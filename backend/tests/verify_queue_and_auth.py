@@ -433,6 +433,15 @@ async def main():
     report("改密必须校验旧密码", "verify_password(data.old_password" in cpsrc)
     report("改密不允许新旧相同", "不能与当前密码相同" in cpsrc)
 
+    # 探活与引擎诊断：前者必须快且匿名，后者含异常详情只能给 admin
+    hsrc = (Path(__file__).resolve().parents[1] / "app" / "api" / "health.py").read_text(encoding="utf-8")
+    report("探活必须封顶（下游引擎卡住不能拖死 /health）",
+           "asyncio.wait_for" in hsrc and "_PROBE_TIMEOUT" in hsrc)
+    report("引擎探测并发（6 个串行会排 12 秒队）", "asyncio.gather" in hsrc)
+    report("/engines 只给 admin（回执带异常详情）", "require_admin" in hsrc)
+    report("引擎异常详情脱敏（抹掉 URL）", "_URL_RE.sub" in hsrc)
+    report("/health 保持匿名可访问（探活不该要 token）", "async def health():" in hsrc)
+
     await engine.dispose()
 
     print()

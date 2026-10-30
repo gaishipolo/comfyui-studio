@@ -41,20 +41,33 @@ class MyProvider(GenerationProvider):
 | `capabilities` | `{kind: CapabilitySpec}`。kind 用 `text_to_image` / `image_to_image` / `text_to_video` 这类蛇形命名 |
 | `config_schema` | `list[FieldSpec]`。运行配置项声明，**机密放这里，不要写死在代码里** |
 
-`FieldSpec` 字段：`name`（=API 参数名）、`label`、`type`（string/int/float/bool/enum/image）、`required`、`default`、`options`（enum 选项，**值直接用 API 原生值**）、`description`、`multiple`。
+`FieldSpec` 字段：`name`（=API 参数名）、`label`、`type`、`required`、`default`、`options`（enum 选项，**值直接用 API 原生值**）、`description`、`multiple`、`advanced`。
 
-### 一个字段收多张图（`multiple=True`）
+### 两个正交的维度：元素类型 vs 基数
 
-API 的 `images` 是数组时，**不要把数组拆成 image / image2 / image3 多个字段**——那是把平台的表达力缺口转嫁给用户。声明一次：
+| 维度 | 属性 | 取值 | 决定什么 |
+|---|---|---|---|
+| 元素类型 | `type` | `string` / `int` / `float` / `bool` / `enum` / `image` / `audio` / `video` | 单个值长什么样 |
+| 基数 | `multiple` | `true` / `false` | 这个参数收几个值 |
+
+**两者互不影响**：音频列表、参考图列表、多值枚举、多行文本都能表达。
+
+`type=image/audio/video` 是**文件类**，表单渲染成上传控件，放行的文件种类由 type 决定（音频框里选不到图片）；其余是**标量类**，渲染成输入框 / 下拉。
+
+### 列表参数（`multiple=True`）
+
+API 收数组时，**不要把数组拆成 image / image2 / audio1 / audio2 / audio3 多个字段** —— 那是把平台的表达力缺口转嫁给用户。声明一次：
 
 ```python
 FieldSpec(name="image", label="参考图", type="image", required=True, multiple=True,
           description="可一次选多张，按选择顺序提交")
+FieldSpec(name="audios", label="参考音频", type="audio", multiple=True,
+          description="可一次选多段")
 ```
 
-界面渲染成一个上传框（可多选、缩略图网格、单张可删），**表单值是数组** `["wbinput:xxx.png", "wbinput:yyy.png"]`；单图字段仍是字符串。
+界面表现：文件类列表是**一个上传框**（可多选、条目可单个删、音频带播放器便于确认）；标量类列表是**可增删的多行输入**（`select` 则是多选勾选组）。
 
-插件侧统一按列表消费，别假设一定是列表——历史任务里可能是单值：
+**表单值形态**：列表字段是数组 `["wbinput:xxx.png", "wbinput:yyy.mp3"]`，单值字段是字符串。插件侧统一按列表消费，别假设一定是列表——历史任务里可能是单值：
 
 ```python
 def _resolve_images(self, value) -> list[str]:
@@ -62,7 +75,49 @@ def _resolve_images(self, value) -> list[str]:
     return [r for r in (self._resolve_image(v) for v in raw) if r]
 ```
 
-语义分工：`image_to_image`（单张参考图）不开 multiple，`image_compose` / 图生视频这类天生多图的才开。
+语义分工：`image_to_image`（单张参考图）不开 multiple，图生视频 / 多图合成这类天生多值的才开。
+
+### 上传产物：`wbinput:` 短标记
+
+`upload_input` 返回什么，表单值就存什么。但**别把 base64 直接当表单值返回** —— 表单值会进 `task.params`，而任务列表每次轮询都返回它，几 MB 的 base64 会把轮询响应撑爆。
+
+平台约定：`upload_input` 把文件落到自己的存储，返回 `wbinput:<key>` 短标记；`build_payload` 里再用 `read_asset_bytes(key)` 读回来，转成 API 要的形态（data URI / base64 / 公网 URL）。参考实现见 `examples/provider_grsai_minimax_h3.py`。
+
+`upload_input` 会被**图片、音频、视频**共用（取决于字段的 type），按扩展名分流存储目录与 MIME：
+
+```python
+async def upload_input(self, data: bytes, filename: str) -> str:
+    ext = Path(filename or "").suffix.lower()
+    if ext in AUDIO_EXT:
+        folder, fallback = "my-audio-input", "audio/mpeg"
+    elif ext in VIDEO_EXT:
+        folder, fallback = "my-video-input", "video/mp4"
+    else:
+        folder, fallback = "my-image-input", "image/png"
+    ...
+    return f"wbinput:{key}"
+```
+
+### bool 字段：别用 `bool()` 转换
+
+表单传回来的可能是 `True` / `"true"` / `"false"` / `1` / `0`（历史模板里存过字符串选项）。`bool("false") is True` —— 直接 `bool()` 会把「关」当成「开」。用显式转换：
+
+```python
+@staticmethod
+def _to_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    s = str(value).strip().lower()
+    if s in ("1", "true", "yes", "on", "是"):
+        return True
+    if s in ("0", "false", "no", "off", "否"):
+        return False
+    raise ValueError(f"只接受 true/false，收到：{value}")
+```
+
+`type=bool` 的字段会自动渲染成「是 / 否」下拉（选项是真布尔），不用自己声明 `options`。
 
 ### 值形态差异怎么处理
 
@@ -78,7 +133,7 @@ def _resolve_images(self, value) -> list[str]:
 | `get_status(task_id) -> GenerationResult` | 轮询状态。完成时把产物放进 `outputs`：`[{"url": 产物URL, "filename": 纯文件名, "subfolder": "", "type": "output"}]` |
 | `download_output(filename, subfolder, output_type) -> bytes` | 下载产物。**支持 filename 是完整 URL**（平台优先传 outputs 里的 url 字段） |
 | `health_check() -> bool` | 连通性检查（管理页「测试」按钮） |
-| `upload_input(data, filename) -> str` | （可选）图生图传图：上传图片返回 API 要的形态（URL/base64/文件 id）。默认不支持 |
+| `upload_input(data, filename) -> str` | （可选）上传参考文件（图片/音频/视频共用）：返回 API 要的形态。建议返回 `wbinput:<key>` 短标记，见上文 |
 | `cancel(provider_task_id) -> bool` | （可选）取消引擎侧任务 |
 | `build_payload(capability, params) -> dict` | （钩子）表单值 → 请求体，默认透传 |
 
