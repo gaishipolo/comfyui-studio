@@ -44,6 +44,16 @@ async def main():
         cascaded_tasks = [tid for tid, tpid in trows if tpid in tpl_ids]
         print(f"  级联 tasks {len(cascaded_tasks)} 条")
 
+        # 5. 测试账号：验证脚本自己会删，但中途失败就会留下。
+        #    它们没有任务、没有素材，但会污染「创建人」下拉和用量统计的用户列表。
+        #    只删「deltest- 前缀 + 名下 0 任务」的，有数据的绝不碰。
+        r = await conn.execute(text(
+            "SELECT u.id, u.username, "
+            "(SELECT COUNT(*) FROM tasks t WHERE t.created_by = u.id) AS n "
+            "FROM users u WHERE u.username LIKE 'deltest-%'"))
+        u_victims = [(uid, nm) for uid, nm, n in r.fetchall() if n == 0]
+        print(f"测试残留 users {len(u_victims)} 条: {[nm for _, nm in u_victims]}")
+
         if "--apply" not in sys.argv:
             print("\n[DRY-RUN] 加 --apply 参数才真正删除")
             return
@@ -59,6 +69,8 @@ async def main():
             await conn.execute(text("DELETE FROM tasks WHERE id=:i"), {"i": tid})
         for tid_ in tpl_ids:
             await conn.execute(text("DELETE FROM templates WHERE id=:i"), {"i": tid_})
+        for uid, _ in u_victims:
+            await conn.execute(text("DELETE FROM users WHERE id=:i"), {"i": uid})
 
         r = await conn.execute(text("SELECT COUNT(*) FROM assets"))
         print(f"\n[APPLIED] 清理后 assets 共 {r.scalar_one()} 条")
