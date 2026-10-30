@@ -59,11 +59,16 @@ _TAG_EXISTS_SQL = (
     "WHERE lower(je.value) = lower(:_tag))"
 )
 
+# 文件大类。素材现在不只有图片（视频/音频也会落库），列表要能按类分栏。
+# 用 mime 前缀匹配，不新增数据库列 —— 已有数据天然带 mime_type，不需要迁移。
+ASSET_KINDS = ("image", "video", "audio")
+
 
 @router.get("", response_model=list[AssetResponse])
 async def list_assets(
     keyword: str | None = Query(None, description="搜索关键词（文件名/提示词）"),
     tag: str | None = Query(None, description="按标签筛选"),
+    kind: str | None = Query(None, description="按文件类型筛选：image / video / audio"),
     template_id: str | None = Query(None, description="按场景筛选"),
     task_id: str | None = Query(None, description="按任务筛选"),
     creator: str | None = Query(None, description="按创建人 user_id 筛选"),
@@ -115,6 +120,17 @@ async def list_assets(
 
     if task_id:
         query = query.where(Asset.task_id == task_id)
+
+    if kind:
+        k = kind.strip().lower()
+        if k not in ASSET_KINDS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"kind 只能是 {'/'.join(ASSET_KINDS)}，收到：{kind}",
+            )
+        # mime 可能为空（历史数据/嗅探失败）→ 这些素材在分类视图里不出现，
+        # 「全部」视图仍能看到，不至于被藏掉
+        query = query.where(Asset.mime_type.ilike(f"{k}/%"))
 
     if template_id:
         query = query.where(Task.template_id == template_id)

@@ -13,6 +13,24 @@ interface Props {
   initialValues?: Record<string, unknown>
 }
 
+/** 文件种类 → 扩展名兜底表。
+ *  有些系统/浏览器给的 file.type 是空的（比如某些 mp3），只靠 MIME 会误判 */
+const KIND_EXT: Record<string, string[]> = {
+  image: ['png', 'jpg', 'jpeg', 'jfif', 'webp', 'gif', 'bmp'],
+  audio: ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'opus'],
+  video: ['mp4', 'webm', 'mov', 'mkv'],
+}
+
+/** 选中的文件是不是这个字段声明的种类。
+ *  `<input accept>` 只是文件对话框的提示，用户可以切到「所有文件」绕过，
+ *  所以落盘前必须自己再拦一次 —— 否则音频字段能塞进图片，到插件才炸。 */
+const matchesKind = (file: File, kind: string): boolean => {
+  const mimeKind = (file.type || '').split('/')[0]
+  if (mimeKind) return mimeKind === kind
+  const ext = (file.name.split('.').pop() || '').toLowerCase()
+  return (KIND_EXT[kind] ?? []).includes(ext)
+}
+
 export default function DynamicForm({ template, onSubmit, submitting, initialValues }: Props) {
   const fields = template.input_schema?.fields ?? []
 
@@ -102,12 +120,24 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
     [],
   )
 
-  // 上传参考图片到生成引擎，入参使用引擎侧文件名。
-  // 多图字段（field.multiple）逐张串行上传后追加进数组，失败只回滚那一张。
-  const handleUpload = async (field: TemplateField, files: File[]) => {
-    if (files.length === 0) return
+  // 上传参考文件到生成引擎，入参使用引擎侧文件名。
+  // 多文件字段（field.multiple）逐个串行上传后追加进数组，失败只回滚那一个。
+  const handleUpload = async (field: TemplateField, incoming: File[]) => {
     // 上传种类由字段声明决定（image/audio/video），前端不再假设「上传 = 图片」
     const kind = field.accept ?? 'image'
+    // accept 属性拦不住「所有文件」，这里按声明的种类再筛一遍
+    const files = incoming.filter((f) => matchesKind(f, kind))
+    if (files.length < incoming.length) {
+      const label = kind === 'audio' ? '音频' : kind === 'video' ? '视频' : '图片'
+      alert(
+        `已忽略 ${incoming.length - files.length} 个非${label}文件：\n` +
+          incoming
+            .filter((f) => !matchesKind(f, kind))
+            .map((f) => f.name)
+            .join('\n'),
+      )
+    }
+    if (files.length === 0) return
 
     if (!field.multiple) {
       const file = files[0]
@@ -148,45 +178,64 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
     setUploading((prev) => ({ ...prev, [field.name]: false }))
   }
 
-  // 从素材库选图：素材文件在本服务磁盘上，ComfyUI 是另一台机器看不见，
+  // 从素材库选素材：素材文件在本服务磁盘上，ComfyUI 是另一台机器看不见，
   // 选完仍要把字节推进引擎输入目录。产出的引擎侧文件名与本地上传一致，
   // 参数注入链路无需区分来源。
-  const handlePickAsset = async (field: TemplateField, asset: Asset) => {
+  // 列表字段可一次选多个 —— 逐个串行推送，顺序即勾选顺序。
+  const handlePickAssets = async (field: TemplateField, assets: Asset[]) => {
     setPickerFor(null)
-    setUploading((prev) => ({ ...prev, [field.name]: true }))
+    if (assets.length === 0) return
     const multi = !!field.multiple
-    const index = multi ? (previews[field.name]?.length ?? 0) : 0
-    let previewShown = false
+    const picked = multi ? assets : assets.slice(0, 1)
+    setUploading((prev) => ({ ...prev, [field.name]: true }))
+    // 与 handleUpload 同理：nextIndex 跟着数组实际长度走，
+    // 某个失败被移除后，后面的素材仍落在正确的预览位置上
+    let nextIndex = previews[field.name]?.length ?? 0
+    let failed = 0
     try {
-      // 预览取不到不致命（退回只有文件名的值态），先出图再送引擎；
-      // 顺序执行保证失败清预览时，不会有慢半拍的预览又冒出来
-      try {
-        const blob = await fetchAssetBlob(getAssetUrl(asset.task_id, asset.file_name))
-        if (multi) appendPreview(field.name, blob, asset.file_name)
-        else setSinglePreview(field.name, blob, asset.file_name)
-        previewShown = true
-      } catch {
-        // 预览失败不挡选用
+      for (const asset of picked) {
+        const myIndex = multi ? nextIndex : 0
+        let previewShown = false
+        try {
+          // 预览取不到不致命（退回只有文件名的值态），先出图再送引擎；
+          // 顺序执行保证失败清预览时，不会有慢半拍的预览又冒出来
+          try {
+            const blob = await fetchAssetBlob(getAssetUrl(asset.task_id, asset.file_name))
+            if (multi) appendPreview(field.name, blob, asset.file_name)
+            else setSinglePreview(field.name, blob, asset.file_name)
+            previewShown = true
+          } catch {
+            // 预览失败不挡选用
+          }
+          const serverName = await uploadFromAsset(asset.id, template.engine)
+          if (multi) {
+            setValues((prev) => {
+              const cur = Array.isArray(prev[field.name]) ? (prev[field.name] as string[]) : []
+              return { ...prev, [field.name]: [...cur, serverName] }
+            })
+            nextIndex = myIndex + 1
+          } else {
+            setValue(field.name, serverName)
+          }
+        } catch {
+          // 推送失败就把这次加的预览撤掉，免得看着像已经选上了
+          if (multi) {
+            if (previewShown) removePreviewAt(field.name, myIndex)
+          } else {
+            clearPreviews(field.name)
+          }
+          failed++
+        }
       }
-      const serverName = await uploadFromAsset(asset.id, template.engine)
-      if (multi) {
-        setValues((prev) => {
-          const cur = Array.isArray(prev[field.name]) ? (prev[field.name] as string[]) : []
-          return { ...prev, [field.name]: [...cur, serverName] }
-        })
-      } else {
-        setValue(field.name, serverName)
-      }
-    } catch (err) {
-      // 推送失败就把这次加的预览撤掉，免得看着像已经选上了
-      if (multi) {
-        if (previewShown) removePreviewAt(field.name, index)
-      } else {
-        clearPreviews(field.name)
-      }
-      alert(`选用素材失败: ${err instanceof Error ? err.message : err}`)
     } finally {
       setUploading((prev) => ({ ...prev, [field.name]: false }))
+    }
+    // 批量时只在最后报一次总数，别一个个弹
+    if (failed) {
+      alert(
+        `${failed} 个素材选用失败（其余 ${picked.length - failed} 个已加入）\n` +
+          '常见原因：素材文件已从磁盘删除，或引擎不可达。',
+      )
     }
   }
 
@@ -690,11 +739,13 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
         </button>
       </div>
 
-      {/* 素材选择弹窗（fixed 遮罩，不影响表单布局） */}
+      {/* 素材选择弹窗（fixed 遮罩，不影响表单布局）。
+          只看字段声明的种类；列表字段进多选模式 */}
       {pickerFor && (
         <AssetPickerModal
-          kind="image"
-          onSelect={(asset) => handlePickAsset(pickerFor, asset)}
+          kind={pickerFor.accept ?? 'image'}
+          multiple={!!pickerFor.multiple}
+          onSelect={(assets) => handlePickAssets(pickerFor, assets)}
           onClose={() => setPickerFor(null)}
         />
       )}

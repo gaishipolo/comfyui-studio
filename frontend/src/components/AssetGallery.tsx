@@ -22,6 +22,15 @@ const formatSize = (bytes: number) =>
     ? `${(bytes / 1024 / 1024).toFixed(1)} MB`
     : `${(bytes / 1024).toFixed(0)} KB`
 
+/** 文件大类分栏。'' = 全部；其余按 mime 前缀过滤，由后端做，不拉回来再筛 */
+type KindFilter = '' | 'image' | 'video' | 'audio'
+const KIND_TABS: { value: KindFilter; label: string }[] = [
+  { value: '', label: '全部' },
+  { value: 'image', label: '图片' },
+  { value: 'video', label: '视频' },
+  { value: 'audio', label: '音频' },
+]
+
 export default function AssetGallery({ templates, user }: Props) {
   const [assets, setAssets] = useState<Asset[]>([])
 
@@ -33,6 +42,8 @@ export default function AssetGallery({ templates, user }: Props) {
   const [debouncedKeyword, setDebouncedKeyword] = useState('')
   const [activeTag, setActiveTag] = useState<string | null>(null)
   const [activeTemplate, setActiveTemplate] = useState<string | null>(null)
+  /** 文件大类分栏：素材不只有图片了（视频/音频也落库），列表得能分开看 */
+  const [kindFilter, setKindFilter] = useState<KindFilter>('')
   /** 时间范围 + 创建人筛选（P1-3）。创建人下拉仅 admin —— 普通用户本来就只见自己的 */
   const [createdFrom, setCreatedFrom] = useState('')
   const [createdTo, setCreatedTo] = useState('')
@@ -51,7 +62,7 @@ export default function AssetGallery({ templates, user }: Props) {
   // 筛选条件一变就清空选中 —— 免得「删除 (N)」里混着看不见的图
   useEffect(() => {
     setSelected(new Set())
-  }, [debouncedKeyword, activeTag, activeTemplate, createdFrom, createdTo, creatorFilter])
+  }, [debouncedKeyword, activeTag, activeTemplate, createdFrom, createdTo, creatorFilter, kindFilter])
 
   // 创建人下拉的数据源（admin 才有 —— 普通用户只见自己的，选人没意义）
   useEffect(() => {
@@ -71,6 +82,7 @@ export default function AssetGallery({ templates, user }: Props) {
       if (createdFrom) params.created_from = createdFrom
       if (createdTo) params.created_to = createdTo
       if (creatorFilter) params.creator = creatorFilter
+      if (kindFilter) params.kind = kindFilter
 
       const data = await listAssets(params)
       setAssets(Array.isArray(data) ? data : [])
@@ -79,7 +91,7 @@ export default function AssetGallery({ templates, user }: Props) {
     } finally {
       setLoading(false)
     }
-  }, [debouncedKeyword, activeTag, activeTemplate, createdFrom, createdTo, creatorFilter])
+  }, [debouncedKeyword, activeTag, activeTemplate, createdFrom, createdTo, creatorFilter, kindFilter])
 
   const fetchTags = useCallback(async () => {
     try {
@@ -314,6 +326,22 @@ export default function AssetGallery({ templates, user }: Props) {
           )}
         </div>
 
+        {/* 类型分栏：图片 / 视频 / 音频。放在标签栏之前 —— 先分大类，再按标签细分 */}
+        <div className="mt-sm flex flex-wrap items-center gap-sm">
+          {KIND_TABS.map((tab) => (
+            <button
+              key={tab.value || 'all'}
+              type="button"
+              onClick={() => setKindFilter(tab.value)}
+              className="chip"
+              data-state={kindFilter === tab.value ? 'on' : undefined}
+              aria-pressed={kindFilter === tab.value}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
         {/* 标签栏 */}
         {tags.length > 0 && (
           <div className="mt-sm flex flex-wrap gap-sm">
@@ -384,20 +412,34 @@ export default function AssetGallery({ templates, user }: Props) {
                 </span>
               )}
 
+              {/* 视频角标：网格里视频首帧和图片长得一样，标一下免得点开才知道 */}
+              {(asset.mime_type || '').startsWith('video/') && (
+                <span className="pointer-events-none absolute bottom-6 left-xs border border-rule bg-paper px-2xs text-xs text-ink-2">
+                  视频
+                </span>
+              )}
+
               <button
                 type="button"
                 onClick={() => setDetail(asset)}
                 className="block w-full text-left"
               >
                 <span className="block aspect-square overflow-hidden border border-rule bg-paper-2">
-                  <AuthMedia
-                    src={assetUrl(asset)}
-                    posterSrc={getAssetThumbUrl(asset.task_id, asset.file_name)}
-                    alt={asset.file_name}
-                    mime={asset.mime_type}
-                    className="h-full w-full object-cover"
-                    loading="lazy"
-                  />
+                  {(asset.mime_type || '').startsWith('audio/') ? (
+                    // 音频没有画面，也不值得为了一个格子把整段音频拉下来
+                    <span className="flex h-full w-full items-center justify-center px-xs text-center text-xs text-muted">
+                      ♪ {asset.file_name}
+                    </span>
+                  ) : (
+                    <AuthMedia
+                      src={assetUrl(asset)}
+                      posterSrc={getAssetThumbUrl(asset.task_id, asset.file_name)}
+                      alt={asset.file_name}
+                      mime={asset.mime_type}
+                      className="h-full w-full object-cover"
+                      loading="lazy"
+                    />
+                  )}
                 </span>
                 <span className="mt-2xs block">
                   <span className="flex flex-wrap gap-2xs">

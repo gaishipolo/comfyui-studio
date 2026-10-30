@@ -55,7 +55,8 @@ TPL_ID = tpl["id"]
 SEEDED_TASKS: list[str] = []
 
 
-async def seed(owner_id: str, created_at: datetime, name: str):
+async def seed(owner_id: str, created_at: datetime, name: str,
+               mime: str = "image/png", ext: str = "png"):
     """造一个任务 + 1 个素材，created_at 指定（时间筛选要确定性）"""
     from app.database import async_session
     from app.models.models import Task, Asset
@@ -70,14 +71,14 @@ async def seed(owner_id: str, created_at: datetime, name: str):
             params={}, result={}, error_msg="",
             created_at=created_at,
         ))
-        rel = f"deltest-{uuid.uuid4().hex[:8]}/{name}.png"
+        rel = f"deltest-{uuid.uuid4().hex[:8]}/{name}.{ext}"
         abs_path = settings.STORAGE_DIR / rel
         abs_path.parent.mkdir(parents=True, exist_ok=True)
         abs_path.write_bytes(b"\x89PNG-test-bytes")
         db.add(Asset(
             id=aid, task_id=task_id, file_path=rel,
-            file_name=f"{name}.png", file_size=14,
-            mime_type="image/png", tags=[], meta={},
+            file_name=f"{name}.{ext}", file_size=14,
+            mime_type=mime, tags=[], meta={},
             created_at=created_at,
         ))
         await db.commit()
@@ -157,6 +158,32 @@ report("纯日期的「止」必须含当天（end=True 走 _parse_day）",
        "_parse_day(created_to, end=True)" in src)
 report("creator 筛选必须与隔离过滤并存（都挂在同一 query 上）",
        "Task.created_by == creator" in src and "Asset.is_shared" in src)
+
+# ── 类型分栏（kind）：素材不只有图片了，列表要能按大类过滤 ──
+print("\n=== kind 类型筛选 ===")
+a_audio = asyncio.run(seed(ADMIN_ID, TODAY, "deltest-audio", mime="audio/mpeg", ext="mp3"))
+
+st, rows = req("/assets?limit=200&kind=audio", token=ADMIN_T)
+report("kind=audio 只返回音频",
+       st == 200 and all((a.get("mime_type") or "").startswith("audio/") for a in rows),
+       f"status={st} 共 {len(rows) if isinstance(rows, list) else '?'} 个")
+report("kind=audio 能查到刚造的音频",
+       isinstance(rows, list) and any(a["id"] == a_audio for a in rows))
+
+st, rows = req("/assets?limit=200&kind=image", token=ADMIN_T)
+report("kind=image 不含音频",
+       st == 200 and all(not (a.get("mime_type") or "").startswith("audio/") for a in rows))
+
+st, rows = req("/assets?limit=200&kind=video", token=ADMIN_T)
+report("kind=video 不含图片/音频",
+       st == 200 and all((a.get("mime_type") or "").startswith("video/") for a in rows))
+
+st, _ = req("/assets?kind=xxx", token=ADMIN_T)
+report("非法 kind → 400（别静默当成全部）", st == 400, f"status={st}")
+
+src = inspect.getsource(amod.list_assets)
+report("kind 用 mime 前缀过滤，不新增数据库列",
+       'Asset.mime_type.ilike(f"{k}/%")' in src)
 
 print("\n=== 清理 ===")
 for tid in list(SEEDED_TASKS):
