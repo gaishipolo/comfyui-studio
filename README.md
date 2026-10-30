@@ -119,6 +119,7 @@ cd frontend && npm run build   # 产物在 frontend/dist
 cd backend
 python tests/verify_plugin_loader.py    # 插件加载与注册（42 项断言）
 python tests/verify_multi_image.py      # 单字段多图：字段声明 / 列表保序 / 多图进请求体（离线，不用起服务）
+python tests/verify_grsai_plugins.py    # Grsai 三插件线格式联调：异步轮询 / 状态映射 / 产物下载（假服务端）
 python tests/verify_queue_and_auth.py   # 队列闸门与鉴权
 python tests/verify_filestore.py        # 存储抽象
 # ...其余 verify_*.py 同理，全部通过输出 PASS
