@@ -1,0 +1,277 @@
+- generic [ref=e18]:
+  - banner [ref=e19]:
+    - generic [ref=e20]:
+      - generic [ref=e21]:
+        - heading "ComfyUI 工作台" [level=1] [ref=e22]
+        - paragraph [ref=e23]: AI 生成集成工作台
+      - generic [ref=e24]:
+        - status [ref=e25]: 生成服务在线
+        - generic [ref=e26]:
+          - generic [ref=e27]:
+            - generic [ref=e28]: 管理员
+            - generic [ref=e29]: 管理员
+          - button "退出" [ref=e30] [cursor=pointer]
+    - navigation "功能模块" [ref=e31]:
+      - generic [ref=e32]:
+        - button "生成" [ref=e33] [cursor=pointer]
+        - button "任务" [ref=e34] [cursor=pointer]
+        - button "素材库" [active] [ref=e35] [cursor=pointer]
+        - button "管理" [ref=e36] [cursor=pointer]
+  - main [ref=e37]:
+    - generic [ref=e865]:
+      - generic [ref=e866]:
+        - generic [ref=e867]:
+          - textbox "搜索素材" [ref=e868]:
+            - /placeholder: 搜索素材（文件名/参数）
+          - combobox "按生成场景筛选" [ref=e869]:
+            - option "全部场景" [selected]
+            - option "Flux2 人脸参考文生图"
+            - option "测试模板-M5"
+            - option "验证用-B5-generic"
+            - option "验证用-B5-generic-1ddad343"
+            - option "验证用-B5-generic-f4e7c216"
+            - option "验证用-B5-generic-ae3c1dc9"
+            - option "删除能力-a8b137c3"
+            - option "验证用-B5-generic-8c25fccd"
+            - option "删除能力-bc23a8b7"
+            - option "删除能力-06a32518"
+            - option "验证用-B5-generic-5b31b936"
+            - option "删除能力-75ce1c26"
+            - option "验证用-B5-generic-0c9dde63"
+            - option "验证用-B5-generic-fad62ca0"
+            - option "删除能力-ae71704c"
+            - option "验证用-B5-generic-1a4d6fbc"
+            - option "验证用-B5-generic-9e0154b7"
+            - option "验证用-B5-generic-d6f36f06"
+            - option "验证用-B5-generic-44626966"
+            - option "验证用-B5-generic-df94f546"
+            - option "验证用-B5-generic-c2eebf19"
+            - option "验证用-B5-generic-72d53ce0"
+        - generic [ref=e870]:
+          - button "全部" [ref=e871] [cursor=pointer]
+          - button "image (32)" [ref=e872] [cursor=pointer]
+      - generic [ref=e873]:
+        - generic [ref=e874]:
+          - button "选择素材 ComfyUI_temp_mbtnm_00005_.png" [ref=e875] [cursor=pointer]
+          - button "ComfyUI_temp_mbtnm_00005_.png image 2026/10/28" [ref=e876] [cursor=pointer]:
+            - img "ComfyUI_temp_mbtnm_00005_.png" [ref=e878]
+            - generic [ref=e879]:
+              - generic [ref=e880]: image
+              - generic [ref=e882]: 2026/10/28
+        - generic [ref=e883]:
+          - button "选择素材 ComfyUI_temp_ueqvb_00001_.png" [ref=e884] [cursor=pointer]
+          - button "ComfyUI_temp_ueqvb_00001_.png image 2026/10/28" [ref=e885] [cursor=pointer]:
+            - img "ComfyUI_temp_ueqvb_00001_.png" [ref=e887]
+            - generic [ref=e888]:
+              - generic [ref=e889]: image
+              - generic [ref=e891]: 2026/10/28
+        - generic [ref=e892]:
+          - button "选择素材 ComfyUI_temp_yqxje_00009_.png" [ref=e893] [cursor=pointer]
+          - button "ComfyUI_temp_yqxje_00009_.png image 2026/10/28" [ref=e894] [cursor=pointer]:
+            - img "ComfyUI_temp_yqxje_00009_.png" [ref=e896]
+            - generic [ref=e897]:
+              - generic [ref=e898]: image
+              - generic [ref=e900]: 2026/10/28
+        - generic [ref=e901]:
+          - button "选择素材 ComfyUI_temp_fbrci_00003_.png" [ref=e902] [cursor=pointer]
+          - button "ComfyUI_temp_fbrci_00003_.png image 2026/10/28" [ref=e903] [cursor=pointer]:
+            - img "ComfyUI_temp_fbrci_00003_.png" [ref=e905]
+            - generic [ref=e906]:
+              - generic [ref=e907]: image
+              - generic [ref=e909]: 2026/10/28
+        - generic [ref=e910]:
+          - button "选择素材 ComfyUI_temp_fbrci_00003_.png" [ref=e911] [cursor=pointer]
+          - button "ComfyUI_temp_fbrci_00003_.png image 2026/10/27" [ref=e912] [cursor=pointer]:
+            - img "ComfyUI_temp_fbrci_00003_.png" [ref=e914]
+            - generic [ref=e915]:
+              - generic [ref=e916]: image
+              - generic [ref=e918]: 2026/10/27
+        - generic [ref=e919]:
+          - button "选择素材 ComfyUI_temp_yqxje_00008_.png" [ref=e920] [cursor=pointer]
+          - button "ComfyUI_temp_yqxje_00008_.png image 2026/10/27" [ref=e921] [cursor=pointer]:
+            - img "ComfyUI_temp_yqxje_00008_.png" [ref=e923]
+            - generic [ref=e924]:
+              - generic [ref=e925]: image
+              - generic [ref=e927]: 2026/10/27
+        - generic [ref=e928]:
+          - button "选择素材 ComfyUI_temp_fbrci_00003_.png" [ref=e929] [cursor=pointer]
+          - button "ComfyUI_temp_fbrci_00003_.png image 2026/10/27" [ref=e930] [cursor=pointer]:
+            - img "ComfyUI_temp_fbrci_00003_.png" [ref=e932]
+            - generic [ref=e933]:
+              - generic [ref=e934]: image
+              - generic [ref=e936]: 2026/10/27
+        - generic [ref=e937]:
+          - button "选择素材 ComfyUI_temp_yqxje_00008_.png" [ref=e938] [cursor=pointer]
+          - button "ComfyUI_temp_yqxje_00008_.png image 2026/10/27" [ref=e939] [cursor=pointer]:
+            - img "ComfyUI_temp_yqxje_00008_.png" [ref=e941]
+            - generic [ref=e942]:
+              - generic [ref=e943]: image
+              - generic [ref=e945]: 2026/10/27
+        - generic [ref=e946]:
+          - button "选择素材 ComfyUI_temp_fbrci_00003_.png" [ref=e947] [cursor=pointer]
+          - button "ComfyUI_temp_fbrci_00003_.png image 2026/10/27" [ref=e948] [cursor=pointer]:
+            - img "ComfyUI_temp_fbrci_00003_.png" [ref=e950]
+            - generic [ref=e951]:
+              - generic [ref=e952]: image
+              - generic [ref=e954]: 2026/10/27
+        - generic [ref=e955]:
+          - button "选择素材 ComfyUI_temp_yqxje_00008_.png" [ref=e956] [cursor=pointer]
+          - button "ComfyUI_temp_yqxje_00008_.png image 2026/10/27" [ref=e957] [cursor=pointer]:
+            - img "ComfyUI_temp_yqxje_00008_.png" [ref=e959]
+            - generic [ref=e960]:
+              - generic [ref=e961]: image
+              - generic [ref=e963]: 2026/10/27
+        - generic [ref=e964]:
+          - button "选择素材 ComfyUI_temp_fbrci_00003_.png" [ref=e965] [cursor=pointer]
+          - button "ComfyUI_temp_fbrci_00003_.png image 2026/10/27" [ref=e966] [cursor=pointer]:
+            - img "ComfyUI_temp_fbrci_00003_.png" [ref=e968]
+            - generic [ref=e969]:
+              - generic [ref=e970]: image
+              - generic [ref=e972]: 2026/10/27
+        - generic [ref=e973]:
+          - button "选择素材 ComfyUI_temp_yqxje_00008_.png" [ref=e974] [cursor=pointer]
+          - button "ComfyUI_temp_yqxje_00008_.png image 2026/10/27" [ref=e975] [cursor=pointer]:
+            - img "ComfyUI_temp_yqxje_00008_.png" [ref=e977]
+            - generic [ref=e978]:
+              - generic [ref=e979]: image
+              - generic [ref=e981]: 2026/10/27
+        - generic [ref=e982]:
+          - button "选择素材 ComfyUI_temp_fbrci_00003_.png" [ref=e983] [cursor=pointer]
+          - button "ComfyUI_temp_fbrci_00003_.png image 2026/10/27" [ref=e984] [cursor=pointer]:
+            - img "ComfyUI_temp_fbrci_00003_.png" [ref=e986]
+            - generic [ref=e987]:
+              - generic [ref=e988]: image
+              - generic [ref=e990]: 2026/10/27
+        - generic [ref=e991]:
+          - button "选择素材 ComfyUI_temp_yqxje_00008_.png" [ref=e992] [cursor=pointer]
+          - button "ComfyUI_temp_yqxje_00008_.png image 2026/10/27" [ref=e993] [cursor=pointer]:
+            - img "ComfyUI_temp_yqxje_00008_.png" [ref=e995]
+            - generic [ref=e996]:
+              - generic [ref=e997]: image
+              - generic [ref=e999]: 2026/10/27
+        - generic [ref=e1000]:
+          - button "选择素材 ComfyUI_temp_yqxje_00008_.png" [ref=e1001] [cursor=pointer]
+          - button "ComfyUI_temp_yqxje_00008_.png image 2026/10/27" [ref=e1002] [cursor=pointer]:
+            - img "ComfyUI_temp_yqxje_00008_.png" [ref=e1004]
+            - generic [ref=e1005]:
+              - generic [ref=e1006]: image
+              - generic [ref=e1008]: 2026/10/27
+        - generic [ref=e1009]:
+          - button "选择素材 ComfyUI_temp_fbrci_00003_.png" [ref=e1010] [cursor=pointer]
+          - button "ComfyUI_temp_fbrci_00003_.png image 2026/10/27" [ref=e1011] [cursor=pointer]:
+            - img "ComfyUI_temp_fbrci_00003_.png" [ref=e1013]
+            - generic [ref=e1014]:
+              - generic [ref=e1015]: image
+              - generic [ref=e1017]: 2026/10/27
+        - generic [ref=e1018]:
+          - button "选择素材 ComfyUI_temp_yqxje_00007_.png" [ref=e1019] [cursor=pointer]
+          - button "ComfyUI_temp_yqxje_00007_.png image 2026/10/27" [ref=e1020] [cursor=pointer]:
+            - img "ComfyUI_temp_yqxje_00007_.png" [ref=e1022]
+            - generic [ref=e1023]:
+              - generic [ref=e1024]: image
+              - generic [ref=e1026]: 2026/10/27
+        - generic [ref=e1027]:
+          - button "选择素材 ComfyUI_temp_fbrci_00003_.png" [ref=e1028] [cursor=pointer]
+          - button "ComfyUI_temp_fbrci_00003_.png image 2026/10/27" [ref=e1029] [cursor=pointer]:
+            - img "ComfyUI_temp_fbrci_00003_.png" [ref=e1031]
+            - generic [ref=e1032]:
+              - generic [ref=e1033]: image
+              - generic [ref=e1035]: 2026/10/27
+        - generic [ref=e1036]:
+          - button "选择素材 ComfyUI_temp_fbrci_00003_.png" [ref=e1037] [cursor=pointer]
+          - button "ComfyUI_temp_fbrci_00003_.png image 2026/10/27" [ref=e1038] [cursor=pointer]:
+            - img "ComfyUI_temp_fbrci_00003_.png" [ref=e1040]
+            - generic [ref=e1041]:
+              - generic [ref=e1042]: image
+              - generic [ref=e1044]: 2026/10/27
+        - generic [ref=e1045]:
+          - button "选择素材 ComfyUI_temp_yqxje_00006_.png" [ref=e1046] [cursor=pointer]
+          - button "ComfyUI_temp_yqxje_00006_.png image 2026/10/27" [ref=e1047] [cursor=pointer]:
+            - img "ComfyUI_temp_yqxje_00006_.png" [ref=e1049]
+            - generic [ref=e1050]:
+              - generic [ref=e1051]: image
+              - generic [ref=e1053]: 2026/10/27
+        - generic [ref=e1054]:
+          - button "选择素材 ComfyUI_temp_yqxje_00006_.png" [ref=e1055] [cursor=pointer]
+          - button "ComfyUI_temp_yqxje_00006_.png image 2026/10/27" [ref=e1056] [cursor=pointer]:
+            - img "ComfyUI_temp_yqxje_00006_.png" [ref=e1058]
+            - generic [ref=e1059]:
+              - generic [ref=e1060]: image
+              - generic [ref=e1062]: 2026/10/27
+        - generic [ref=e1063]:
+          - button "选择素材 ComfyUI_temp_fbrci_00003_.png" [ref=e1064] [cursor=pointer]
+          - button "ComfyUI_temp_fbrci_00003_.png image 2026/10/27" [ref=e1065] [cursor=pointer]:
+            - img "ComfyUI_temp_fbrci_00003_.png" [ref=e1067]
+            - generic [ref=e1068]:
+              - generic [ref=e1069]: image
+              - generic [ref=e1071]: 2026/10/27
+        - generic [ref=e1072]:
+          - button "选择素材 ComfyUI_temp_yqxje_00005_.png" [ref=e1073] [cursor=pointer]
+          - button "ComfyUI_temp_yqxje_00005_.png image 2026/10/27" [ref=e1074] [cursor=pointer]:
+            - img "ComfyUI_temp_yqxje_00005_.png" [ref=e1076]
+            - generic [ref=e1077]:
+              - generic [ref=e1078]: image
+              - generic [ref=e1080]: 2026/10/27
+        - generic [ref=e1081]:
+          - button "选择素材 ComfyUI_temp_fbrci_00003_.png" [ref=e1082] [cursor=pointer]
+          - button "ComfyUI_temp_fbrci_00003_.png image 2026/10/27" [ref=e1083] [cursor=pointer]:
+            - img "ComfyUI_temp_fbrci_00003_.png" [ref=e1085]
+            - generic [ref=e1086]:
+              - generic [ref=e1087]: image
+              - generic [ref=e1089]: 2026/10/27
+        - generic [ref=e1090]:
+          - button "选择素材 ComfyUI_temp_yqxje_00004_.png" [ref=e1091] [cursor=pointer]
+          - button "ComfyUI_temp_yqxje_00004_.png image 2026/10/27" [ref=e1092] [cursor=pointer]:
+            - img "ComfyUI_temp_yqxje_00004_.png" [ref=e1094]
+            - generic [ref=e1095]:
+              - generic [ref=e1096]: image
+              - generic [ref=e1098]: 2026/10/27
+        - generic [ref=e1099]:
+          - button "选择素材 ComfyUI_temp_fbrci_00003_.png" [ref=e1100] [cursor=pointer]
+          - button "ComfyUI_temp_fbrci_00003_.png image 2026/10/27" [ref=e1101] [cursor=pointer]:
+            - img "ComfyUI_temp_fbrci_00003_.png" [ref=e1103]
+            - generic [ref=e1104]:
+              - generic [ref=e1105]: image
+              - generic [ref=e1107]: 2026/10/27
+        - generic [ref=e1108]:
+          - button "选择素材 ComfyUI_temp_yqxje_00003_.png" [ref=e1109] [cursor=pointer]
+          - button "ComfyUI_temp_yqxje_00003_.png image 2026/10/27" [ref=e1110] [cursor=pointer]:
+            - img "ComfyUI_temp_yqxje_00003_.png" [ref=e1112]
+            - generic [ref=e1113]:
+              - generic [ref=e1114]: image
+              - generic [ref=e1116]: 2026/10/27
+        - generic [ref=e1117]:
+          - button "选择素材 ComfyUI_temp_fbrci_00002_.png" [ref=e1118] [cursor=pointer]
+          - button "ComfyUI_temp_fbrci_00002_.png image 2026/10/27" [ref=e1119] [cursor=pointer]:
+            - img "ComfyUI_temp_fbrci_00002_.png" [ref=e1121]
+            - generic [ref=e1122]:
+              - generic [ref=e1123]: image
+              - generic [ref=e1125]: 2026/10/27
+        - generic [ref=e1126]:
+          - button "选择素材 ComfyUI_temp_yqxje_00002_.png" [ref=e1127] [cursor=pointer]
+          - button "ComfyUI_temp_yqxje_00002_.png image 2026/10/27" [ref=e1128] [cursor=pointer]:
+            - img "ComfyUI_temp_yqxje_00002_.png" [ref=e1130]
+            - generic [ref=e1131]:
+              - generic [ref=e1132]: image
+              - generic [ref=e1134]: 2026/10/27
+        - generic [ref=e1135]:
+          - button "选择素材 ComfyUI_temp_fbrci_00001_.png" [ref=e1136] [cursor=pointer]
+          - button "ComfyUI_temp_fbrci_00001_.png image 2026/10/27" [ref=e1137] [cursor=pointer]:
+            - img "ComfyUI_temp_fbrci_00001_.png" [ref=e1139]
+            - generic [ref=e1140]:
+              - generic [ref=e1141]: image
+              - generic [ref=e1143]: 2026/10/27
+        - generic [ref=e1144]:
+          - button "选择素材 ComfyUI_temp_fbrci_00001_.png" [ref=e1145] [cursor=pointer]
+          - button "ComfyUI_temp_fbrci_00001_.png image 2026/10/27" [ref=e1146] [cursor=pointer]:
+            - img "ComfyUI_temp_fbrci_00001_.png" [ref=e1148]
+            - generic [ref=e1149]:
+              - generic [ref=e1150]: image
+              - generic [ref=e1152]: 2026/10/27
+        - generic [ref=e1153]:
+          - button "选择素材 ComfyUI_temp_yqxje_00001_.png" [ref=e1154] [cursor=pointer]
+          - button "ComfyUI_temp_yqxje_00001_.png image 2026/10/27" [ref=e1155] [cursor=pointer]:
+            - img "ComfyUI_temp_yqxje_00001_.png" [ref=e1157]
+            - generic [ref=e1158]:
+              - generic [ref=e1159]: image
+              - generic [ref=e1161]: 2026/10/27

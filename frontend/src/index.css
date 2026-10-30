@@ -1,0 +1,277 @@
+/* Hallmark · shape: app screen · genre: editorial · theme: Grid (deal 3/3, seed prompt-827b·467e00de·2026-10-28·r0) · redesign: full
+ * nav: top bar with module tabs · signature: the queue · states: loading, empty, error, full
+ * axes: light/grotesk-sans/cool · posture: full-palette · contrast: pass · v2.0.0 */
+/* Hallmark · pre-emit critique: P4 H5 E4 S4 R5 V4 · weakest: E, the state chip's success/error ink sat at 5.1:1 on paper; set the state word in ink-2 and kept the token for borders */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer components {
+  /* ── The control recipe ───────────────────────────────────────────
+     36px tall, 44px hit target. One recipe for every control in the
+     app; the states are the eight the Floor requires. */
+
+  .control {
+    @apply relative inline-flex items-center gap-xs font-body text-base;
+    min-height: var(--control-h);
+    padding-block: var(--space-2xs);
+  }
+
+  /* A 36px control carries a 44px hit target: the growth lives in a
+     transparent overlay so the density of the layout is untouched.
+
+     The overlay is absolutely positioned, so the control MUST establish
+     its own containing block. A bare `inset: -4px` on an unpositioned
+     control escapes to the initial containing block and turns into an
+     invisible membrane over the whole page, swallowing every click
+     underneath it. The positioning is therefore declared on the same
+     rule list as the overlay, so the two can never drift apart. */
+  .btn,
+  .btn-primary,
+  .btn-danger,
+  .btn-quiet,
+  .btn-danger-quiet,
+  .tab,
+  .x-btn,
+  button.chip {
+    position: relative;
+  }
+  .btn::after,
+  .btn-primary::after,
+  .btn-danger::after,
+  .btn-quiet::after,
+  .btn-danger-quiet::after,
+  .tab::after,
+  .x-btn::after,
+  button.chip::after {
+    content: "";
+    position: absolute;
+    inset: -4px;
+  }
+  button.chip::after,
+  .x-btn::after { inset: -6px; }
+
+  .btn {
+    @apply control cursor-pointer select-none border border-rule bg-paper text-ink
+           transition-colors duration-micro ease-out;
+    padding-inline: var(--space-md);
+  }
+  .btn:hover { @apply bg-paper-2; }
+  .btn:active,
+  .btn.is-active { @apply bg-paper-3; transform: translateY(1px); }
+  .btn:disabled,
+  .btn[aria-disabled='true'] { @apply cursor-not-allowed border-rule bg-paper-2 text-muted opacity-60; }
+  .btn:disabled:active { transform: none; }
+
+  /* the primary action — the one place the accent is spent */
+  .btn-primary {
+    @apply border-accent bg-accent text-accent-ink;
+  }
+  .btn-primary:hover { @apply border-ink bg-ink; }
+  .btn-primary:active,
+  .btn-primary.is-active { @apply border-ink bg-ink; }
+  .btn-primary:disabled,
+  .btn-primary[aria-disabled='true'] {
+    @apply border-rule bg-paper-2 text-muted opacity-60;
+  }
+
+  /* the destructive action — confirmed, never the accent */
+  .btn-danger {
+    @apply border-error text-error;
+  }
+  .btn-danger:hover,
+  .btn-danger:active { @apply border-error bg-error text-accent-ink; }
+  .btn-danger:disabled { @apply border-rule text-muted opacity-60; }
+
+  /* quiet: a bare control that reads as type until it is used */
+  .btn-quiet {
+    @apply control cursor-pointer select-none border border-transparent bg-transparent text-ink-2;
+    padding-inline: var(--space-md);
+  }
+  .btn-quiet:hover { @apply border-rule bg-paper-2 text-ink; }
+  .btn-quiet:active,
+  .btn-quiet.is-active { @apply bg-paper-3; transform: translateY(1px); }
+  .btn-quiet:disabled,
+  .btn-quiet[aria-disabled='true'] { @apply cursor-not-allowed border-rule text-muted opacity-60; }
+
+  /* a bare glyph control: 32px square, 44px hit target */
+  .x-btn {
+    @apply relative inline-flex cursor-pointer select-none items-center justify-center border border-transparent
+           bg-transparent font-body text-sm text-muted transition-colors duration-micro ease-out;
+    width: var(--control-h-sm);
+    height: var(--control-h-sm);
+  }
+  .x-btn:hover { @apply border-rule bg-paper-2 text-error; }
+  .x-btn:active { @apply bg-paper-3; }
+  .x-btn:disabled,
+  .x-btn[aria-disabled='true'] { @apply cursor-not-allowed opacity-60; }
+
+  /* ── Module tabs ───────────────────────────────────────────────
+     The accent marks the current selection and nothing else. */
+
+  .tab {
+    @apply inline-flex cursor-pointer select-none items-center gap-2xs border-b-2 border-transparent
+           font-body text-base text-ink-2 transition-colors duration-micro ease-out;
+    min-height: var(--control-h);
+    padding-inline: var(--space-2xs);
+  }
+  .tab:hover { @apply bg-paper-2 text-ink; }
+  .tab:active,
+  .tab.is-active { @apply bg-paper-3; }
+  .tab[aria-current='page'] {
+    @apply border-accent font-medium text-accent;
+  }
+  .tab:disabled,
+  .tab[aria-disabled='true'] { @apply cursor-not-allowed text-muted opacity-60; }
+
+  /* ── A selectable row (scene picker, list choices) ──────────────
+     The accent marks the current selection and nothing else. */
+
+  .select-row {
+    @apply block w-full cursor-pointer select-none border-b border-rule bg-paper text-left
+           font-body transition-colors duration-micro ease-out;
+    padding: var(--space-sm) var(--space-xs);
+  }
+  .select-row:hover { @apply bg-paper-2; }
+  .select-row:active,
+  .select-row.is-active { @apply bg-paper-3; }
+  .select-row[aria-pressed='true'] { @apply bg-paper-2; }
+  .select-row:disabled,
+  .select-row[aria-disabled='true'] { @apply cursor-not-allowed opacity-60; }
+
+  /* ── Fields ─────────────────────────────────────────────────────
+     Constant border width in every state; the focus ring is an
+     outline, never a border (39a). A field edge takes --color-muted. */
+
+  .field {
+    @apply block w-full border border-muted bg-paper font-body text-base text-ink;
+    min-height: var(--control-h);
+    padding: var(--space-2xs) var(--space-sm);
+  }
+  .field::placeholder { @apply text-muted; }
+  .field:hover { @apply border-ink-2; }
+  .field:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+    @apply border-ink;
+  }
+  .field:disabled,
+  .field[aria-disabled='true'] {
+    @apply cursor-not-allowed border-rule bg-paper-2 text-muted opacity-60;
+  }
+  .field[aria-invalid='true'] { @apply border-error; }
+
+  /* the label above a field: the body face, one step down, untracked (67) */
+  .field-label {
+    @apply block font-body text-sm text-ink-2;
+    margin-block-end: var(--space-2xs);
+  }
+
+  /* a checkbox row: the accent is the ink of the mark, never a fill */
+  .check-row {
+    @apply inline-flex cursor-pointer select-none items-center gap-2xs font-body text-sm text-ink-2;
+    min-height: var(--control-h);
+    padding-block: var(--space-2xs);
+  }
+  .check-row input[type='checkbox'] {
+    width: var(--control-h-sm);
+    height: var(--control-h-sm);
+    accent-color: var(--color-accent);
+    cursor: pointer;
+  }
+  .check-row input[type='checkbox']:disabled {
+    @apply cursor-not-allowed opacity-60;
+  }
+
+  /* inline code: a boxed token, the mono face, no colour story */
+  .code {
+    @apply font-mono text-sm text-ink;
+    background: var(--color-paper-2);
+    border: var(--rule-hair) solid var(--color-rule);
+    padding: 0 var(--space-2xs);
+    word-break: break-all;
+  }
+
+  /* ── Chips and tags ───────────────────────────────────────────── */
+
+  .chip {
+    @apply inline-flex items-center gap-2xs border border-rule bg-paper-2 px-xs font-body text-sm text-ink-2;
+    min-height: var(--control-h-sm);
+    padding-block: var(--space-3xs);
+  }
+  .chip[data-state='on'] {
+    @apply border-accent bg-accent text-accent-ink;
+  }
+  .chip[data-tone='accent'] { @apply border-accent text-accent; }
+  .chip[data-tone='error'] { @apply border-error text-error; }
+  .chip[data-tone='success'] { @apply border-success text-success; }
+
+  /* the destructive action kept quiet until it is reached */
+  .btn-danger-quiet {
+    @apply border-transparent bg-transparent text-error;
+  }
+  .btn-danger-quiet:hover,
+  .btn-danger-quiet:active { @apply border-error bg-error text-accent-ink; }
+  .btn-danger-quiet:disabled { @apply text-muted opacity-60; }
+
+  /* ── The selection toggle on a thumbnail ─────────────────────── */
+
+  .select-toggle {
+    @apply absolute flex cursor-pointer select-none items-center justify-center border border-rule
+           bg-paper font-body text-sm text-accent-ink transition-colors duration-micro ease-out;
+    width: var(--control-h-sm);
+    height: var(--control-h-sm);
+    z-index: var(--z-raised);
+  }
+  .select-toggle::after { content: ""; position: absolute; inset: -4px; }
+  .select-toggle:hover { @apply border-accent; }
+  .select-toggle:active { @apply bg-paper-3; }
+  .select-toggle[aria-pressed='true'] { @apply border-accent bg-accent; }
+  .select-toggle:disabled { @apply cursor-not-allowed opacity-60; }
+
+  /* ── Tables before cards ────────────────────────────────────────
+     Hairline rules, no zebra, no shadow. Numbers are tabular (F6). */
+
+  .table {
+    @apply w-full border-collapse font-body text-base;
+  }
+  .table th {
+    @apply border-b border-ink py-xs text-left font-body text-sm font-medium text-ink-2;
+    padding-inline: var(--space-sm);
+    white-space: nowrap;
+  }
+  .table td {
+    @apply border-b border-rule py-xs align-middle;
+    padding-inline: var(--space-sm);
+  }
+  .table tbody tr:hover { @apply bg-paper-2; }
+  .table td.num,
+  .table th.num { @apply text-right; font-variant-numeric: tabular-nums; }
+
+  /* ── The four states a data region owes ───────────────────────── */
+
+  .skeleton {
+    @apply bg-paper-2;
+    background-image: linear-gradient(90deg, var(--color-paper-2), var(--color-paper-3), var(--color-paper-2));
+    background-size: 200% 100%;
+    animation: hallmark-shimmer 1.2s linear infinite;
+    min-height: var(--space-lg);
+  }
+  @keyframes hallmark-shimmer {
+    from { background-position: 200% 0; }
+    to { background-position: -200% 0; }
+  }
+
+  /* ── Utility: the hairline that separates regions ─────────────── */
+
+  .rule-t { border-top: var(--rule-hair) solid var(--color-rule); }
+  .rule-b { border-bottom: var(--rule-hair) solid var(--color-rule); }
+
+  /* a figure is a number and its label, in tabular numerals (F6) */
+  .figure {
+    font-family: var(--font-display);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: var(--tracking-display);
+    line-height: 1.05;
+  }
+}

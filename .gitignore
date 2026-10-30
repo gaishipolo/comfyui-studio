@@ -1,0 +1,30 @@
+# 环境与密钥（.env 含 SECRET_KEY / 管理员初始密码，绝不入库）
+backend/.env
+*.env
+!*.env.example
+
+# 数据库与生成产物
+*.db
+*.sqlite*
+storage/
+backend/storage/
+
+# 依赖与构建产物
+node_modules/
+frontend/dist/
+frontend/tsconfig.tsbuildinfo
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 备份与工具缓存
+frontend/src-backup-*/
+.workbuddy-ai/
+.hallmark/
+.playwright-cli/
+
+# 测试产物
+ComfyUI_temp*
+login.yaml
+*.log
