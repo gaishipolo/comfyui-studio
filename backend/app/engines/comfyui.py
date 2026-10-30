@@ -1,6 +1,8 @@
 """ComfyUI Provider — 对接本地/远程 ComfyUI API"""
 import json
 import uuid
+from pathlib import Path
+
 import httpx
 
 from app.config import settings
@@ -334,16 +336,35 @@ class ComfyUIProvider(GenerationProvider):
         return resp.content
 
     async def upload_input(self, data: bytes, filename: str) -> str:
-        """上传输入图片到 ComfyUI（/upload/image），返回服务器上的文件名"""
+        """上传输入文件到 ComfyUI（/upload/image），返回服务器上的文件名。
+
+        两处必须自己兜住，别指望远端：
+
+        1. **文件名要唯一**。ComfyUI 收到同名文件会覆盖（我们还显式传过
+           overwrite=true），两个用户都传 ``ref.png`` 时，先入队的任务会读到
+           后一个人的图 —— 跨用户串图，且只在并发时才偶发，极难复现。
+           这里给原文件名拼一段 uuid，从根上消除同名。
+        2. **返回值不能直接信**。它会进 task.params、进 workflow 注入、再当
+           素材名用，这里按纯文件名归一一次 —— 远端可能回 ``a/b.png``（带
+           subfolder）或者带 ``..`` 的怪名字，只留最后一段。
+        """
         client = await self._get_client()
+        stem = Path(filename or "input").stem[:40] or "input"
+        suffix = Path(filename or "").suffix.lower() or ".bin"
+        unique = f"{stem}_{uuid.uuid4().hex[:8]}{suffix}"
         resp = await client.post(
             "/upload/image",
-            files={"image": (filename, data, "application/octet-stream")},
-            data={"overwrite": "true"},
+            files={"image": (unique, data, "application/octet-stream")},
+            data={"overwrite": "false", "type": "input"},
         )
         resp.raise_for_status()
         info = resp.json()
-        return info.get("name") or filename
+        # 归一：远端可能回 "a/b.png"（带 subfolder）或带 ../ 的怪名字，只留最后一段
+        name = Path(str(info.get("name") or unique).replace("\\", "/")).name or unique
+        sub = str(info.get("subfolder") or "").strip().strip("/")
+        if sub and ".." not in sub.split("/"):
+            return f"{sub}/{name}"
+        return name
 
     async def health_check(self) -> bool:
         try:
