@@ -226,11 +226,18 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
   // 类型对不上就找最接近的渲染形态；值形态差异在选项枚举里消化（选项值=API 原生值）
   const capabilitiesToFields = (specs: FieldSpec[]): TemplateField[] =>
     specs.map((spec) => {
+      // 选项 = 下拉的选项。enum 用声明的 options；bool 没有 options 声明，
+      // 但要能选，所以补 true/false（boolean 原值，不是字符串，否则下游 bool("false") 会变 true）
+      const options: TemplateField['options'] | undefined = spec.options?.length
+        ? [...spec.options]
+        : spec.type === 'bool'
+          ? [true, false]
+          : undefined
+
       let type: TemplateField['type']
-      if (spec.options?.length) type = 'select'           // enum：下拉，选项值即 API 原生值
+      if (options) type = 'select'                         // enum / bool：下拉，选项值即 API 原生值
       else if (spec.type === 'image') type = 'image_upload'
       else if (spec.type === 'int' || spec.type === 'float') type = 'number'
-      else if (spec.type === 'bool') type = 'select'       // bool 也走下拉：true/false 原生值
       else if (spec.name === 'prompt' || /[\r\n]/.test(spec.description || '')) type = 'textarea'
       else type = 'text'
       return {
@@ -238,10 +245,8 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
         label: spec.label || spec.name,
         type,
         required: !!spec.required,
-        ...(spec.options?.length
-          ? { options: spec.type === 'bool' ? [true, false] : [...spec.options] }
-          : {}),
-        ...(spec.default != null ? { default: spec.default as string | number } : {}),
+        ...(options ? { options } : {}),
+        ...(spec.default != null ? { default: spec.default as string | number | boolean } : {}),
         ...(spec.description ? { placeholder: spec.description } : {}),
         // 多值图片字段：一个框可多选，表单值变数组（值形态由能力声明决定，前端不猜）
         ...(spec.multiple ? { multiple: true } : {}),

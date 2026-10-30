@@ -209,6 +209,23 @@ report("h3 audios 收拢为 1 项", pl.get("audios") == ["https://cdn.example/a.
 report("h3 seed 转 int", pl.get("seed") == 42, str(pl.get("seed")))
 report("h3 promptSkill=False 要下发", pl.get("promptSkill") is False, str(pl.get("promptSkill")))
 
+print("\n[3b] bool 字段的字符串形态（表单可能给 \"false\"）")
+for raw, expect in [(True, True), (False, False), ("true", True), ("false", False),
+                    ("TRUE", True), ("否", False), ("是", True), (1, True), (0, False)]:
+    try:
+        got = h3._to_bool(raw)
+        report(f"_to_bool({raw!r}) → {expect}", got is expect, repr(got))
+    except ValueError as e:
+        report(f"_to_bool({raw!r}) → {expect}", False, str(e)[:40])
+try:
+    h3._to_bool("maybe")
+    report("非法 bool 值要报错", False)
+except ValueError as e:
+    report("非法 bool 值要报错", "只接受 true/false" in str(e), str(e)[:40])
+
+pl = h3.build_payload("text_to_video", {"prompt": "x", "duration": 5, "promptSkill": "false"})
+report("字符串 \"false\" 不能变成开启", pl.get("promptSkill") is False, str(pl.get("promptSkill")))
+
 print("\n[4] 参考图短标记 → data URI")
 marker = run(h3.upload_input(TINY_PNG, "tiny.png"))
 pl = h3.build_payload("image_to_video", {"prompt": "x", "image": [marker], "duration": 5})

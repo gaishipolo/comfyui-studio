@@ -50,6 +50,10 @@ bad_schema = {"fields": [
      "required": True, "multiple": True},
     {"name": "txt_multi", "label": "文本", "type": "text",        # multiple 对文本无意义 -> 丢弃
      "multiple": True},
+    {"name": "promptSkill", "label": "提示词优化", "type": "select",  # bool 走下拉：布尔选项 + 布尔默认值
+     "options": [True, False], "default": True},
+    {"name": "offFlag", "label": "关闭", "type": "select",            # 默认 false 不能被当成「没填」
+     "options": [True, False], "default": False},
 ]}
 st, created = req("/templates", "POST", {
     "name": UNIQUE, "input_schema": bad_schema,
@@ -59,7 +63,7 @@ report("创建模板", st == 200, f"status={st} name={UNIQUE}")
 tid = created.get("id")
 
 fields = created["input_schema"]["fields"]
-report("无 name 字段被丢弃", len(fields) == 6, f"实际 {len(fields)} 个")
+report("无 name 字段被丢弃", len(fields) == 8, f"实际 {len(fields)} 个")
 
 by_name = {f["name"]: f for f in fields}
 report("prompt 补上 required", by_name.get("prompt", {}).get("required") is False)
@@ -74,6 +78,15 @@ report("image_upload 保留 multiple",
        by_name.get("image", {}).get("multiple") is True, str(by_name.get("image")))
 report("text 上的 multiple 被丢弃",
        "multiple" not in by_name.get("txt_multi", {}), str(by_name.get("txt_multi")))
+report("布尔选项 [True, False] 原样保留",
+       by_name.get("promptSkill", {}).get("options") == [True, False],
+       str(by_name.get("promptSkill", {}).get("options")))
+report("布尔默认值 True 保留",
+       by_name.get("promptSkill", {}).get("default") is True,
+       str(by_name.get("promptSkill", {}).get("default")))
+report("布尔默认值 False 保留（不能被当成没填）",
+       by_name.get("offFlag", {}).get("default") is False,
+       str(by_name.get("offFlag", {})))
 
 # 全字段必填键齐全
 for f in fields:

@@ -245,7 +245,8 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
             <option value="">请选择</option>
             {field.options?.map((opt) => (
               <option key={String(opt)} value={String(opt)}>
-                {opt}
+                {/* boolean 选项直接当 children 会被 React 渲染成空，必须显式转文本 */}
+                {typeof opt === 'boolean' ? (opt ? '是' : '否') : opt}
               </option>
             ))}
           </select>

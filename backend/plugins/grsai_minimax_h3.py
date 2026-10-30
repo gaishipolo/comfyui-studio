@@ -195,6 +195,23 @@ class GrsaiMinimaxH3Provider(GenerationProvider):
             return v
         raise ValueError(f"参考音频需填公网 URL 或 base64（平台暂无音频上传入口）：{v[:60]}")
 
+    @staticmethod
+    def _to_bool(value) -> bool:
+        """表单值可能是 bool、字符串 "true"/"false"、或 1/0 —— 统一成 bool。
+
+        不能直接 bool(value)：bool("false") 是 True，会把「关闭」悄悄变成「开启」。
+        """
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        s = str(value).strip().lower()
+        if s in ("1", "true", "yes", "on", "是"):
+            return True
+        if s in ("0", "false", "no", "off", "否"):
+            return False
+        raise ValueError(f"提示词优化只接受 true/false，收到：{value}")
+
     async def upload_input(self, data: bytes, filename: str) -> str:
         """参考图进表单的值形态：落 filestore 存短标记，build_payload 时还原成 base64。"""
         ext = Path(filename or "").suffix.lower()
@@ -247,7 +264,7 @@ class GrsaiMinimaxH3Provider(GenerationProvider):
 
         skill = params.get("promptSkill")
         if skill is not None and skill != "":
-            payload["promptSkill"] = bool(skill)
+            payload["promptSkill"] = self._to_bool(skill)
         return payload
 
     @staticmethod
