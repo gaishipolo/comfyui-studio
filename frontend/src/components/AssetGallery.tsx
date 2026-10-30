@@ -31,6 +31,19 @@ const KIND_TABS: { value: KindFilter; label: string }[] = [
   { value: 'audio', label: '音频' },
 ]
 
+/** 模板分类里常出现 image/video/audio 这类「文件种类」值，和上面的类型分栏撞脸。
+ *  标签栏只保留真正的业务分类，这几个由类型分栏统一管。 */
+const FILE_KIND_TAGS = new Set(['image', 'video', 'audio'])
+
+/** 按 MIME 大类给素材一个统一的中文格式角标（图片/视频/音频）。
+ *  三类都给一枚小角标，保持一致；标签里的 image/video/audio 已被过滤，这里补格式标识不重复。 */
+const formatLabel = (mime: string): string | null => {
+  if (mime.startsWith('video/')) return '视频'
+  if (mime.startsWith('audio/')) return '音频'
+  if (mime.startsWith('image/')) return '图片'
+  return null
+}
+
 export default function AssetGallery({ templates, user }: Props) {
   const [assets, setAssets] = useState<Asset[]>([])
 
@@ -342,8 +355,9 @@ export default function AssetGallery({ templates, user }: Props) {
           ))}
         </div>
 
-        {/* 标签栏 */}
-        {tags.length > 0 && (
+        {/* 标签栏：按模板分类筛选。过滤掉 image/video/audio 这类「文件种类」值，
+            它们由上面的类型分栏（按真实 MIME 过滤）统一管，留在这里会撞脸。 */}
+        {tags.filter((t) => !FILE_KIND_TAGS.has(t.name)).length > 0 && (
           <div className="mt-sm flex flex-wrap gap-sm">
             <button
               onClick={() => setActiveTag(null)}
@@ -352,16 +366,18 @@ export default function AssetGallery({ templates, user }: Props) {
             >
               全部
             </button>
-            {tags.map((tag) => (
-              <button
-                key={tag.name}
-                onClick={() => setActiveTag(activeTag === tag.name ? null : tag.name)}
-                className="chip"
-                data-state={activeTag === tag.name ? 'on' : undefined}
-              >
-                {tag.name} ({tag.count})
-              </button>
-            ))}
+            {tags
+              .filter((t) => !FILE_KIND_TAGS.has(t.name))
+              .map((tag) => (
+                <button
+                  key={tag.name}
+                  onClick={() => setActiveTag(activeTag === tag.name ? null : tag.name)}
+                  className="chip"
+                  data-state={activeTag === tag.name ? 'on' : undefined}
+                >
+                  {tag.name} ({tag.count})
+                </button>
+              ))}
           </div>
         )}
       </div>
@@ -412,10 +428,11 @@ export default function AssetGallery({ templates, user }: Props) {
                 </span>
               )}
 
-              {/* 视频角标：网格里视频首帧和图片长得一样，标一下免得点开才知道 */}
-              {(asset.mime_type || '').startsWith('video/') && (
+              {/* 格式角标：图片/视频/音频统一一枚小角标，按 MIME 判定。
+                  标签里的 image/video/audio 已过滤，这里补一个统一的格式标识，三类一致、不重复。 */}
+              {formatLabel(asset.mime_type || '') && (
                 <span className="pointer-events-none absolute bottom-6 left-xs border border-rule bg-paper px-2xs text-xs text-ink-2">
-                  视频
+                  {formatLabel(asset.mime_type || '')}
                 </span>
               )}
 
@@ -443,7 +460,10 @@ export default function AssetGallery({ templates, user }: Props) {
                 </span>
                 <span className="mt-2xs block">
                   <span className="flex flex-wrap gap-2xs">
-                    {(asset.tags || []).slice(0, 3).map((tag) => (
+                    {(asset.tags || [])
+                      .filter((tag) => !FILE_KIND_TAGS.has(tag))
+                      .slice(0, 3)
+                      .map((tag) => (
                       <span
                         key={tag}
                         className="border border-rule bg-paper-2 px-2xs text-xs text-ink-2"
@@ -546,7 +566,9 @@ export default function AssetGallery({ templates, user }: Props) {
               <div className="mt-md">
                 <div className="text-xs text-muted">标签</div>
                 <div className="mt-2xs flex flex-wrap gap-2xs">
-                  {(detail.tags || []).map((tag) => (
+                  {(detail.tags || [])
+                    .filter((tag) => !FILE_KIND_TAGS.has(tag))
+                    .map((tag) => (
                     <span
                       key={tag}
                       className="chip"
