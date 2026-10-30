@@ -4,7 +4,7 @@
  * admin 看全部，多一列「创建人」便于分清谁的活。 */
 import { Fragment, useState, useEffect, useCallback } from 'react'
 import type { Task, Asset, User } from '../types'
-import { listTasks, getTaskAssets, retryTask, cancelTask, getAssetUrl, getAssetThumbUrl, openAssetInNewTab, deleteTask } from '../api/client'
+import { listTasks, getTaskAssets, retryTask, cancelTask, getAssetUrl, getAssetThumbUrl, openAssetInNewTab, deleteTask, getAllTemplates } from '../api/client'
 import FriendlyError from './FriendlyError'
 import AuthMedia from './AuthMedia'
 
@@ -29,6 +29,8 @@ export default function TaskPanel({ user, onReuseTask }: { user: User; onReuseTa
   /** admin 看全员任务，多一列创建人；普通用户只看自己的，没必要显示 */
   const showCreator = user.role === 'admin'
   const [tasks, setTasks] = useState<Task[]>([])
+  /** 模板 id → 名称。任务只存 template_id，列表要显示「用的哪个模板」得自己查一次 */
+  const [tplNames, setTplNames] = useState<Record<string, string>>({})
   const [assetsMap, setAssetsMap] = useState<Record<string, Asset[]>>({})
   /** 素材拉取状态：无记录=还没拉、loading=拉取中、ready=拉到了（可能为空）、error=失败 */
   const [assetsState, setAssetsState] = useState<
@@ -56,6 +58,24 @@ export default function TaskPanel({ user, onReuseTask }: { user: User; onReuseTa
   useEffect(() => {
     refresh()
   }, [refresh])
+
+  // 拉一次模板名（含停用，任务可能指向已停用的模板），建 id→name 映射
+  useEffect(() => {
+    let alive = true
+    getAllTemplates()
+      .then((list) => {
+        if (!alive) return
+        const map: Record<string, string> = {}
+        for (const t of list) map[t.id] = t.name
+        setTplNames(map)
+      })
+      .catch(() => {
+        /* 失败不影响任务列表本身 */
+      })
+    return () => {
+      alive = false
+    }
+  }, [])
 
   // 自动轮询（有 running/pending 任务时每 3 秒刷新）
   const hasActive = tasks.some((t) => t.status === 'running' || t.status === 'pending')
@@ -318,6 +338,11 @@ export default function TaskPanel({ user, onReuseTask }: { user: User; onReuseTa
                             task.params.prompt ?? task.params.description ?? '生成任务',
                           ).slice(0, 50)}
                         </button>
+                        {tplNames[task.template_id] && (
+                          <div className="mt-2xs text-xs text-muted">
+                            {tplNames[task.template_id]}
+                          </div>
+                        )}
                       </td>
                       {showCreator && (
                         <td className="text-sm text-muted">
