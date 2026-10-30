@@ -441,6 +441,14 @@ async def main():
     report("/engines 需要登录（匿名探测要挡住）", "get_current_user" in hsrc)
     report("引擎异常详情只给 admin（内网地址/上游报错）",
            'user.role == "admin"' in hsrc)
+    # 插件的 health_check 是真实的上游 HTTP 请求，前端每 30 秒轮询一次。
+    # 没有缓存的话，N 个在线用户 = 每分钟 N×引擎数 次对供应商的探测
+    report("探测结果必须缓存（否则每个用户都在替所有人重复探上游）",
+           "_CACHE_TTL" in hsrc and "_cache[" in hsrc)
+    report("并发请求共享同一次探测（inflight 去重）", "_inflight" in hsrc)
+    report("配置变更要能立刻打掉缓存（改完 key 不该还显示离线）",
+           "on_change(invalidate_cache)" in hsrc)
+    report("admin 诊断可以跳过缓存", '"fresh"' in hsrc or "fresh: bool" in hsrc)
     report("引擎异常详情脱敏（抹掉 URL）", "_URL_RE.sub" in hsrc)
     report("/health 保持匿名可访问（探活不该要 token）", "async def health():" in hsrc)
 

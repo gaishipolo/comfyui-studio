@@ -67,6 +67,8 @@ if not with_wf:
     sys.exit(1)
 SRC = with_wf[0]
 FILES_BEFORE = workflow_files()
+# 开跑前的模板名快照：收尾时把本次新增的都清掉（含中断运行留下的）
+NAMES_BEFORE = {t["name"] for t in tpls}
 
 # ── 1. 导出 ────────────────────────────────────────────
 print(f"\n=== 1. 导出「{SRC['name']}」 ===")
@@ -97,7 +99,11 @@ if st != 200:
     sys.exit(1)
 IMPORTED_ID = res["template"]["id"]
 CREATED.append(IMPORTED_ID)
-report("名字被改成「(导入)」", res["template"]["name"].endswith("(导入)"), res["template"]["name"])
+# 断言要跟「库里已经有多少个 (导入)」无关 —— 否则前一次中断留下的残留
+# 会让这次变成「(导入 2)」，测试红得莫名其妙
+report("重名时改了名（不覆盖原模板）",
+       res["template"]["name"] != SRC["name"] and res["template"]["name"].startswith(SRC["name"]),
+       res["template"]["name"])
 report("给出了重名告警", any("同名" in w for w in res.get("warnings", [])), str(res.get("warnings")))
 report("id 是新生成的（不是覆盖）", IMPORTED_ID != SRC["id"])
 report("字段一致", res["template"]["input_schema"] == SRC["input_schema"])
@@ -186,6 +192,16 @@ report("没有遗留的工作流副本", not leftover, str(sorted(leftover)))
 for name in leftover:
     from app.config import settings
     (settings.WORKFLOW_DIR / name).unlink(missing_ok=True)
+
+# 兜底清扫：本次跑出来的模板一个都别留（含之前中断运行留下的 (导入) 残骸，
+# 否则它们会越积越多，下一次的「(导入)」变成「(导入 2)」）
+for t in tpls:
+    if t["name"] in NAMES_BEFORE:
+        continue
+    if not (t["name"].startswith("deltest-") or " (导入" in t["name"]):
+        continue
+    st, _ = req(f"/templates/{t['id']}", "DELETE", token=T)
+    report(f"清扫残留模板 {t['name']}", st == 200, f"status={st}")
 
 print()
 print("全部通过 ✓" if ok else "存在失败 ✗")
