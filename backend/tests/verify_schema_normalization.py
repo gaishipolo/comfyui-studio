@@ -46,6 +46,10 @@ bad_schema = {"fields": [
     {"name": "weird", "type": "不存在的类型"},                    # 非法 type -> 降级 text
     {"name": "adv", "label": "高级", "type": "number",
      "required": True, "advanced": True, "default": 3},          # 完整
+    {"name": "image", "label": "参考图", "type": "image_upload",  # 多值图片字段
+     "required": True, "multiple": True},
+    {"name": "txt_multi", "label": "文本", "type": "text",        # multiple 对文本无意义 -> 丢弃
+     "multiple": True},
 ]}
 st, created = req("/templates", "POST", {
     "name": UNIQUE, "input_schema": bad_schema,
@@ -55,7 +59,7 @@ report("创建模板", st == 200, f"status={st} name={UNIQUE}")
 tid = created.get("id")
 
 fields = created["input_schema"]["fields"]
-report("无 name 字段被丢弃", len(fields) == 4, f"实际 {len(fields)} 个")
+report("无 name 字段被丢弃", len(fields) == 6, f"实际 {len(fields)} 个")
 
 by_name = {f["name"]: f for f in fields}
 report("prompt 补上 required", by_name.get("prompt", {}).get("required") is False)
@@ -66,6 +70,10 @@ report("非法 type 降级为 text", by_name.get("weird", {}).get("type") == "te
 report("完整字段保持 advanced/default",
        by_name.get("adv", {}).get("advanced") is True
        and by_name.get("adv", {}).get("default") == 3)
+report("image_upload 保留 multiple",
+       by_name.get("image", {}).get("multiple") is True, str(by_name.get("image")))
+report("text 上的 multiple 被丢弃",
+       "multiple" not in by_name.get("txt_multi", {}), str(by_name.get("txt_multi")))
 
 # 全字段必填键齐全
 for f in fields:

@@ -78,10 +78,8 @@ class AgnesProvider(GenerationProvider):
             fields=[
                 FieldSpec(name="prompt", label="提示词", type="string", required=True,
                           description="说明每张参考图的角色和最终组合方式，如：第一张作主要角色，第二张作产品参考……"),
-                FieldSpec(name="image", label="参考图 1", type="image", required=True),
-                FieldSpec(name="image2", label="参考图 2", type="image",
-                          description="可选；image2/image3 是表单字段名，提交时按顺序合成 extra_body.image 数组"),
-                FieldSpec(name="image3", label="参考图 3", type="image", description="可选"),
+                FieldSpec(name="image", label="参考图", type="image", required=True, multiple=True,
+                          description="可一次选多张，按选择顺序提交；表单里只存短标记"),
                 FieldSpec(name="size", label="尺寸档位", type="enum", default="2K", options=_SIZES),
                 FieldSpec(name="ratio", label="宽高比", type="enum", default="1:1", options=_RATIOS),
             ],
@@ -155,6 +153,16 @@ class AgnesProvider(GenerationProvider):
             return self._to_data_uri(data, key)
         raise ValueError(f"无法识别的参考图值：{v[:60]}")
 
+    def _resolve_images(self, value) -> list[str]:
+        """参考图字段可能是单个值，也可能是一组值（multiple 字段），统一成列表。"""
+        raw = value if isinstance(value, (list, tuple)) else [value]
+        out = []
+        for v in raw:
+            r = self._resolve_image(v)
+            if r:
+                out.append(r)
+        return out
+
     async def upload_input(self, data: bytes, filename: str) -> str:
         """参考图进表单的值形态：落 filestore 存短标记，build_payload 时还原。
 
@@ -179,8 +187,7 @@ class AgnesProvider(GenerationProvider):
         if ratio:
             payload["ratio"] = ratio  # 顶层，与 size 并列（官方 2K/16:9 示例）
 
-        images = [self._resolve_image(params.get(k)) for k in ("image", "image2", "image3")]
-        images = [i for i in images if i]
+        images = self._resolve_images(params.get("image"))
         if capability in ("image_to_image", "image_compose") or images:
             if not images:
                 raise ValueError("图生图 / 多图合成需要至少一张参考图")

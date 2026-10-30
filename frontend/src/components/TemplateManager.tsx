@@ -243,6 +243,8 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
           : {}),
         ...(spec.default != null ? { default: spec.default as string | number } : {}),
         ...(spec.description ? { placeholder: spec.description } : {}),
+        // 多值图片字段：一个框可多选，表单值变数组（值形态由能力声明决定，前端不猜）
+        ...(spec.multiple ? { multiple: true } : {}),
       }
     })
 

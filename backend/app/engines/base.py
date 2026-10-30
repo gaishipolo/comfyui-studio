@@ -34,6 +34,9 @@ class FieldSpec:
     default: Any = None
     options: list[str] = field(default_factory=list)
     description: str = ""
+    # 多值字段：type="image" 时允许一次上传多张，表单值变成数组（如 MiniMax H3 的 images 数组）。
+    # 只有声明了它的能力才会渲染成「一个框、可多选」，否则仍是单图字段
+    multiple: bool = False
 
 
 @dataclass

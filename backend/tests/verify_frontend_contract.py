@@ -38,7 +38,7 @@ TS = {
     "EngineInfo": {"req": ["name", "status"], "opt": ["detail"]},
     # 引擎插件（多引擎）：FieldSpec/CapabilitySpec 与后端 asdict 同构，全字段必在
     "FieldSpec": {
-        "req": ["name", "label", "type", "required", "default", "options", "description"],
+        "req": ["name", "label", "type", "required", "default", "options", "description", "multiple"],
         "opt": [],
     },
     "CapabilitySpec": {"req": ["kind", "label", "fields"], "opt": []},
@@ -49,7 +49,7 @@ TS = {
     },
     "TemplateField": {
         "req": ["name", "label", "type", "required"],
-        "opt": ["placeholder", "options", "default", "advanced"],
+        "opt": ["placeholder", "options", "default", "advanced", "multiple"],
     },
     # avg_duration_seconds 必须存在（没完成任务时是 null，不是缺字段）→ 归 req
     "UsageByUser": {
@@ -152,13 +152,15 @@ for t in tasks:
     r = t.get("result") or {}
     outs = r.get("outputs")
     if outs:
-        need = ["filename", "subfolder", "type", "node_id"]
+        # node_id 只有 ComfyUI 系引擎的产物才有；插件 provider 返回的产物没有节点概念
+        need = ["filename", "subfolder", "type"]
         miss = [k for k in need if k not in outs[0]]
         if miss:
             ok_all = False
             print(f"  [FAIL] result.outputs[0] 缺字段: {miss} (实际 {list(outs[0])})")
         else:
-            print(f"  [OK] result.outputs[0] 字段齐全 (filename/subfolder/type/node_id)")
+            extra = "含 node_id（ComfyUI）" if "node_id" in outs[0] else "插件 provider，无 node_id"
+            print(f"  [OK] result.outputs[0] 字段齐全 (filename/subfolder/type)；{extra}")
         break
 
 print(f"\n结果: {'[OK] 契约一致' if ok_all else '[FAIL] 存在契约不一致'}")

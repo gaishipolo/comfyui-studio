@@ -41,7 +41,28 @@ class MyProvider(GenerationProvider):
 | `capabilities` | `{kind: CapabilitySpec}`。kind 用 `text_to_image` / `image_to_image` / `text_to_video` 这类蛇形命名 |
 | `config_schema` | `list[FieldSpec]`。运行配置项声明，**机密放这里，不要写死在代码里** |
 
-`FieldSpec` 字段：`name`（=API 参数名）、`label`、`type`（string/int/float/bool/enum/image）、`required`、`default`、`options`（enum 选项，**值直接用 API 原生值**）、`description`。
+`FieldSpec` 字段：`name`（=API 参数名）、`label`、`type`（string/int/float/bool/enum/image）、`required`、`default`、`options`（enum 选项，**值直接用 API 原生值**）、`description`、`multiple`。
+
+### 一个字段收多张图（`multiple=True`）
+
+API 的 `images` 是数组时，**不要把数组拆成 image / image2 / image3 多个字段**——那是把平台的表达力缺口转嫁给用户。声明一次：
+
+```python
+FieldSpec(name="image", label="参考图", type="image", required=True, multiple=True,
+          description="可一次选多张，按选择顺序提交")
+```
+
+界面渲染成一个上传框（可多选、缩略图网格、单张可删），**表单值是数组** `["wbinput:xxx.png", "wbinput:yyy.png"]`；单图字段仍是字符串。
+
+插件侧统一按列表消费，别假设一定是列表——历史任务里可能是单值：
+
+```python
+def _resolve_images(self, value) -> list[str]:
+    raw = value if isinstance(value, (list, tuple)) else [value]
+    return [r for r in (self._resolve_image(v) for v in raw) if r]
+```
+
+语义分工：`image_to_image`（单张参考图）不开 multiple，`image_compose` / 图生视频这类天生多图的才开。
 
 ### 值形态差异怎么处理
 

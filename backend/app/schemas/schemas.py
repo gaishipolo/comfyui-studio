@@ -56,6 +56,9 @@ def normalize_input_schema(value: Any) -> dict:
             field["default"] = item["default"]
         if item.get("advanced"):
             field["advanced"] = True
+        # 多值图片字段：一个框可上传多张（表单值是数组）。只在 image_upload 上有意义
+        if item.get("multiple") and field_type == "image_upload":
+            field["multiple"] = True
         fields.append(field)
 
     return {**value, "fields": fields}

@@ -97,7 +97,16 @@ cd frontend && npm run build   # 产物在 frontend/dist
 对接一家新的生成服务只需写一个 Python 文件：
 
 1. 读 `docs/provider-dev-guide.md`（标准与契约）
-2. 抄 `backend/examples/provider_template.py`（假想「示例云」骨架）或 `backend/examples/provider_agnes.py`（真实参考实现，含同步 API 适配、参考图传输等实战套路）
+2. 抄一个现成参考实现：
+
+   | 文件 | 适配的 API 形态 | 值得借鉴的点 |
+   |---|---|---|
+   | `provider_template.py` | 假想「示例云」骨架 | 最小可运行结构 |
+   | `provider_agnes.py` | Agnes 图像（同步阻塞） | 同步 API 伪装成异步、`extra_body` 嵌套、多图参考 |
+   | `provider_grsai.py` | Grsai Nano Banana（异步轮询） | `replyType: async` + `GET /v1/api/result` 真轮询、失败也可能带 400 |
+   | `provider_grsai_gpt_image.py` | Grsai GPT-Image 2/2.5 | 同一参数名在不同模型下语义不同（比例 vs 像素）怎么拆字段 |
+   | `provider_grsai_minimax_h3.py` | Grsai MiniMax H3（视频） | 多图数组、时长与分辨率联动校验、大文件下载超时 |
+
 3. 管理页「引擎插件」上传 `.py` → 配置 API Key → 建模板时选引擎/能力 →「从能力带入」生成表单
 
 上传即在服务端执行该 Python 文件，请只给 admin 上传权限（平台已默认如此）。
@@ -109,6 +118,7 @@ cd frontend && npm run build   # 产物在 frontend/dist
 ```bash
 cd backend
 python tests/verify_plugin_loader.py    # 插件加载与注册（42 项断言）
+python tests/verify_multi_image.py      # 单字段多图：字段声明 / 列表保序 / 多图进请求体（离线，不用起服务）
 python tests/verify_queue_and_auth.py   # 队列闸门与鉴权
 python tests/verify_filestore.py        # 存储抽象
 # ...其余 verify_*.py 同理，全部通过输出 PASS

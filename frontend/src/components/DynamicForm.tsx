@@ -28,32 +28,57 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
   const [batchCount, setBatchCount] = useState(1)
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [uploading, setUploading] = useState<Record<string, boolean>>({})
-  // 本地预览：选中即出图（object URL），不用等上传返回
-  const [previews, setPreviews] = useState<Record<string, string>>({})
-  const [previewNames, setPreviewNames] = useState<Record<string, string>>({})
+  // 本地预览：选中即出图（object URL），不用等上传返回。
+  // 统一用数组存 —— 单图字段长度恒为 1，多图字段（field.multiple）逐张累加
+  const [previews, setPreviews] = useState<Record<string, string[]>>({})
+  const [previewNames, setPreviewNames] = useState<Record<string, string[]>>({})
   // object URL 必须手动回收，换图/移除/卸载漏一个就漏一块内存
-  const previewUrls = useRef<Record<string, string>>({})
+  const previewUrls = useRef<Record<string, string[]>>({})
   // 「从素材库选择」弹窗当前服务于哪个字段（null = 未打开）
   const [pickerFor, setPickerFor] = useState<TemplateField | null>(null)
 
   const setValue = (name: string, val: unknown) =>
     setValues((prev) => ({ ...prev, [name]: val }))
 
-  const setPreview = (name: string, blob: Blob, fileName: string) => {
+  /** 单图字段：替换预览（旧的 object URL 立即回收） */
+  const setSinglePreview = (name: string, blob: Blob, fileName: string) => {
+    for (const url of previewUrls.current[name] ?? []) URL.revokeObjectURL(url)
     const url = URL.createObjectURL(blob)
-    const old = previewUrls.current[name]
-    if (old) URL.revokeObjectURL(old)
-    previewUrls.current[name] = url
-    setPreviews((prev) => ({ ...prev, [name]: url }))
-    setPreviewNames((prev) => ({ ...prev, [name]: fileName }))
+    previewUrls.current[name] = [url]
+    setPreviews((prev) => ({ ...prev, [name]: [url] }))
+    setPreviewNames((prev) => ({ ...prev, [name]: [fileName] }))
   }
 
-  const clearPreview = (name: string) => {
-    const old = previewUrls.current[name]
-    if (old) {
-      URL.revokeObjectURL(old)
-      delete previewUrls.current[name]
-    }
+  /** 多图字段：追加一张预览（与 values 里的顺序对齐） */
+  const appendPreview = (name: string, blob: Blob, fileName: string) => {
+    const url = URL.createObjectURL(blob)
+    previewUrls.current[name] = [...(previewUrls.current[name] ?? []), url]
+    setPreviews((prev) => ({ ...prev, [name]: [...(prev[name] ?? []), url] }))
+    setPreviewNames((prev) => ({ ...prev, [name]: [...(prev[name] ?? []), fileName] }))
+  }
+
+  /** 多图字段：按位置移除一张预览 */
+  const removePreviewAt = (name: string, index: number) => {
+    const urls = previewUrls.current[name] ?? []
+    if (urls[index]) URL.revokeObjectURL(urls[index])
+    previewUrls.current[name] = urls.filter((_, i) => i !== index)
+    setPreviews((prev) => ({ ...prev, [name]: (prev[name] ?? []).filter((_, i) => i !== index) }))
+    setPreviewNames((prev) => ({ ...prev, [name]: (prev[name] ?? []).filter((_, i) => i !== index) }))
+  }
+
+  /** 多图字段：删掉第 index 张 —— 预览与表单值同步移除（上传未完成的图值不存在，只删预览） */
+  const removeImageAt = (field: TemplateField, index: number) => {
+    removePreviewAt(field.name, index)
+    setValues((prev) => {
+      const cur = Array.isArray(prev[field.name]) ? (prev[field.name] as string[]) : []
+      if (index >= cur.length) return prev
+      return { ...prev, [field.name]: cur.filter((_, i) => i !== index) }
+    })
+  }
+
+  const clearPreviews = (name: string) => {
+    for (const url of previewUrls.current[name] ?? []) URL.revokeObjectURL(url)
+    delete previewUrls.current[name]
     setPreviews((prev) => {
       const next = { ...prev }
       delete next[name]
@@ -69,26 +94,56 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
   // 卸载时把还挂着的 object URL 全部回收
   useEffect(
     () => () => {
-      for (const url of Object.values(previewUrls.current)) URL.revokeObjectURL(url)
+      for (const urls of Object.values(previewUrls.current)) {
+        for (const url of urls) URL.revokeObjectURL(url)
+      }
       previewUrls.current = {}
     },
     [],
   )
 
-  // 上传参考图片到生成引擎，入参使用引擎侧文件名
-  const handleUpload = async (field: TemplateField, file: File) => {
-    setPreview(field.name, file, file.name) // 先出预览，不等网络
-    setUploading((prev) => ({ ...prev, [field.name]: true }))
-    try {
-      const serverName = await uploadImage(file, template.engine)
-      setValue(field.name, serverName)
-    } catch (err) {
-      // 上传失败就把预览撤掉，免得看着像已经传上去了
-      clearPreview(field.name)
-      alert(`上传失败: ${err instanceof Error ? err.message : err}`)
-    } finally {
-      setUploading((prev) => ({ ...prev, [field.name]: false }))
+  // 上传参考图片到生成引擎，入参使用引擎侧文件名。
+  // 多图字段（field.multiple）逐张串行上传后追加进数组，失败只回滚那一张。
+  const handleUpload = async (field: TemplateField, files: File[]) => {
+    if (files.length === 0) return
+
+    if (!field.multiple) {
+      const file = files[0]
+      setSinglePreview(field.name, file, file.name) // 先出预览，不等网络
+      setUploading((prev) => ({ ...prev, [field.name]: true }))
+      try {
+        const serverName = await uploadImage(file, template.engine)
+        setValue(field.name, serverName)
+      } catch (err) {
+        // 上传失败就把预览撤掉，免得看着像已经传上去了
+        clearPreviews(field.name)
+        alert(`上传失败: ${err instanceof Error ? err.message : err}`)
+      } finally {
+        setUploading((prev) => ({ ...prev, [field.name]: false }))
+      }
+      return
     }
+
+    setUploading((prev) => ({ ...prev, [field.name]: true }))
+    // 串行上传：顺序即用户选择顺序。nextIndex 跟着数组实际长度走，
+    // 某张失败被移除后，后面的图仍然落在正确的预览位置上
+    let nextIndex = previews[field.name]?.length ?? 0
+    for (const file of files) {
+      appendPreview(field.name, file, file.name)
+      const myIndex = nextIndex
+      try {
+        const serverName = await uploadImage(file, template.engine)
+        setValues((prev) => {
+          const cur = Array.isArray(prev[field.name]) ? (prev[field.name] as string[]) : []
+          return { ...prev, [field.name]: [...cur, serverName] }
+        })
+        nextIndex = myIndex + 1
+      } catch (err) {
+        removePreviewAt(field.name, myIndex)
+        alert(`上传失败: ${err instanceof Error ? err.message : err}`)
+      }
+    }
+    setUploading((prev) => ({ ...prev, [field.name]: false }))
   }
 
   // 从素材库选图：素材文件在本服务磁盘上，ComfyUI 是另一台机器看不见，
@@ -97,20 +152,36 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
   const handlePickAsset = async (field: TemplateField, asset: Asset) => {
     setPickerFor(null)
     setUploading((prev) => ({ ...prev, [field.name]: true }))
+    const multi = !!field.multiple
+    const index = multi ? (previews[field.name]?.length ?? 0) : 0
+    let previewShown = false
     try {
       // 预览取不到不致命（退回只有文件名的值态），先出图再送引擎；
       // 顺序执行保证失败清预览时，不会有慢半拍的预览又冒出来
       try {
         const blob = await fetchAssetBlob(getAssetUrl(asset.task_id, asset.file_name))
-        setPreview(field.name, blob, asset.file_name)
+        if (multi) appendPreview(field.name, blob, asset.file_name)
+        else setSinglePreview(field.name, blob, asset.file_name)
+        previewShown = true
       } catch {
         // 预览失败不挡选用
       }
       const serverName = await uploadFromAsset(asset.id, template.engine)
-      setValue(field.name, serverName)
+      if (multi) {
+        setValues((prev) => {
+          const cur = Array.isArray(prev[field.name]) ? (prev[field.name] as string[]) : []
+          return { ...prev, [field.name]: [...cur, serverName] }
+        })
+      } else {
+        setValue(field.name, serverName)
+      }
     } catch (err) {
-      // 推送失败就把预览撤掉，免得看着像已经选上了
-      clearPreview(field.name)
+      // 推送失败就把这次加的预览撤掉，免得看着像已经选上了
+      if (multi) {
+        if (previewShown) removePreviewAt(field.name, index)
+      } else {
+        clearPreviews(field.name)
+      }
       alert(`选用素材失败: ${err instanceof Error ? err.message : err}`)
     } finally {
       setUploading((prev) => ({ ...prev, [field.name]: false }))
@@ -119,10 +190,12 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
-    // 过滤掉空值
+    // 过滤掉空值（多图字段的 [] 也算空）
     const params: Record<string, unknown> = {}
     for (const [k, v] of Object.entries(values)) {
-      if (v !== '' && v !== null && v !== undefined) params[k] = v
+      if (v === '' || v === null || v === undefined) continue
+      if (Array.isArray(v) && v.length === 0) continue
+      params[k] = v
     }
     onSubmit(params, batchCount)
   }
@@ -178,22 +251,83 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
           </select>
         )
       case 'image_upload': {
-        const preview = previews[field.name]
-        const previewName = previewNames[field.name]
+        const isMulti = !!field.multiple
+        const urls = previews[field.name] ?? []
+        const names = previewNames[field.name] ?? []
+        const preview = urls[0]
+        const previewName = names[0]
         return (
           <div className="border border-rule bg-paper">
             <input
               type="file"
               accept="image/*"
+              multiple={isMulti}
               className="visually-hidden"
               id={`upload-${field.name}`}
               onChange={(e) => {
-                const file = e.target.files?.[0]
-                if (file) handleUpload(field, file)
+                const files = Array.from(e.target.files ?? [])
+                if (files.length) handleUpload(field, files)
                 e.target.value = '' // 允许重复选择同一文件
               }}
             />
-            {preview ? (
+            {isMulti ? (
+              <div className="p-sm">
+                {urls.length > 0 ? (
+                  <div className="flex flex-wrap gap-sm">
+                    {urls.map((url, i) => (
+                      <div
+                        key={`${url}-${i}`}
+                        className="relative h-20 w-20 overflow-hidden border border-rule bg-paper-2"
+                      >
+                        <img
+                          src={url}
+                          alt={names[i] || `${field.label} ${i + 1}`}
+                          className="h-full w-full object-cover"
+                        />
+                        <button
+                          type="button"
+                          className="absolute right-0 top-0 h-5 w-5 border border-rule bg-paper text-xs leading-none text-ink disabled:opacity-40"
+                          aria-label={`移除第 ${i + 1} 张`}
+                          // 上传中禁止删：删掉会让后面追加的图与预览位置错位
+                          disabled={!!uploading[field.name]}
+                          onClick={() => removeImageAt(field, i)}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="border border-dashed border-muted px-md py-lg text-center text-sm text-ink-2">
+                    {uploading[field.name] ? '上传中…' : `还没有选择${field.label}`}
+                  </div>
+                )}
+                <div className="mt-xs flex flex-wrap items-center gap-sm">
+                  {/* 上传中锁住入口：并发上传会让追加顺序与预览位置错位 */}
+                  <label
+                    htmlFor={`upload-${field.name}`}
+                    className={`btn-quiet cursor-pointer ${uploading[field.name] ? 'pointer-events-none opacity-50' : ''}`}
+                  >
+                    添加图片
+                  </label>
+                  <button
+                    type="button"
+                    className="btn-quiet"
+                    disabled={!!uploading[field.name]}
+                    onClick={() => setPickerFor(field)}
+                  >
+                    从素材库
+                  </button>
+                  <span className="text-xs text-muted">
+                    {uploading[field.name]
+                      ? '上传中…'
+                      : urls.length > 0
+                        ? `已选 ${urls.length} 张`
+                        : '未选择'}
+                  </span>
+                </div>
+              </div>
+            ) : preview ? (
               <div className="flex items-start gap-sm p-sm">
                 <div className="h-24 w-24 shrink-0 overflow-hidden border border-rule bg-paper-2">
                   <img
@@ -222,7 +356,7 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
                       type="button"
                       className="btn-danger-quiet"
                       onClick={() => {
-                        clearPreview(field.name)
+                        clearPreviews(field.name)
                         setValue(field.name, '')
                       }}
                     >

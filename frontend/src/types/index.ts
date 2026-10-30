@@ -9,6 +9,8 @@ export interface TemplateField {
   options?: (string | number | boolean)[]
   default?: string | number | boolean
   advanced?: boolean
+  /** 多值字段（仅图片）：一个框可上传多张，表单值是数组 */
+  multiple?: boolean
 }
 
 export interface Template {
@@ -45,7 +47,8 @@ export interface Task {
   progress: number
   params: Record<string, unknown>
   provider_task_id: string
-  result: { outputs?: { filename: string; subfolder: string; type: string; node_id: string }[] }
+  // node_id 只有 ComfyUI 系引擎有（插件 provider 的产物没有节点概念），前端只用 length，故为可选
+  result: { outputs?: { filename: string; subfolder: string; type: string; node_id?: string }[] }
   error_msg: string
   created_at: string
   started_at: string | null
@@ -177,6 +180,8 @@ export interface FieldSpec {
   /** enum 选项，值直接用 API 原生值 */
   options: string[]
   description: string
+  /** 多值字段（图片可一次上传多张，表单值变数组） */
+  multiple: boolean
 }
 
 /** 能力声明（Provider.capabilities 的一项） */
