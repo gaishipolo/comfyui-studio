@@ -1,7 +1,7 @@
 /** 动态表单 — 根据模板 input_schema 自动渲染 */
 import { useState, useEffect, useRef } from 'react'
 import type { Asset, Template, TemplateField } from '../types'
-import { fetchAssetBlob, getAssetUrl, uploadFromAsset, uploadImage } from '../api/client'
+import { fetchAssetBlob, getAssetUrl, uploadFromAsset, uploadInput } from '../api/client'
 import AssetPickerModal from './AssetPickerModal'
 
 interface Props {
@@ -106,13 +106,15 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
   // 多图字段（field.multiple）逐张串行上传后追加进数组，失败只回滚那一张。
   const handleUpload = async (field: TemplateField, files: File[]) => {
     if (files.length === 0) return
+    // 上传种类由字段声明决定（image/audio/video），前端不再假设「上传 = 图片」
+    const kind = field.accept ?? 'image'
 
     if (!field.multiple) {
       const file = files[0]
       setSinglePreview(field.name, file, file.name) // 先出预览，不等网络
       setUploading((prev) => ({ ...prev, [field.name]: true }))
       try {
-        const serverName = await uploadImage(file, template.engine)
+        const serverName = await uploadInput(file, template.engine, kind)
         setValue(field.name, serverName)
       } catch (err) {
         // 上传失败就把预览撤掉，免得看着像已经传上去了
@@ -132,7 +134,7 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
       appendPreview(field.name, file, file.name)
       const myIndex = nextIndex
       try {
-        const serverName = await uploadImage(file, template.engine)
+        const serverName = await uploadInput(file, template.engine, kind)
         setValues((prev) => {
           const cur = Array.isArray(prev[field.name]) ? (prev[field.name] as string[]) : []
           return { ...prev, [field.name]: [...cur, serverName] }
@@ -188,13 +190,200 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
     }
   }
 
+  // ── 列表字段（multiple）：值与元素类型无关，永远是数组 ──────────
+  const listValue = (name: string): unknown[] => {
+    const v = values[name]
+    return Array.isArray(v) ? v : []
+  }
+
+  const setListItem = (name: string, index: number, val: unknown) =>
+    setValues((prev) => {
+      const cur = Array.isArray(prev[name]) ? [...(prev[name] as unknown[])] : []
+      cur[index] = val
+      return { ...prev, [name]: cur }
+    })
+
+  const addListItem = (name: string) =>
+    setValues((prev) => {
+      const cur = Array.isArray(prev[name]) ? [...(prev[name] as unknown[])] : []
+      return { ...prev, [name]: [...cur, ''] }
+    })
+
+  const removeListItem = (name: string, index: number) =>
+    setValues((prev) => {
+      const cur = Array.isArray(prev[name]) ? [...(prev[name] as unknown[])] : []
+      return { ...prev, [name]: cur.filter((_, i) => i !== index) }
+    })
+
+  const toggleListItem = (name: string, option: unknown) =>
+    setValues((prev) => {
+      const cur = Array.isArray(prev[name]) ? [...(prev[name] as unknown[])] : []
+      const exists = cur.some((x) => String(x) === String(option))
+      return {
+        ...prev,
+        [name]: exists ? cur.filter((x) => String(x) !== String(option)) : [...cur, option],
+      }
+    })
+
+  /** 标量列表：可增删的多行输入；枚举列表：多选勾选组 */
+  const renderListField = (field: TemplateField) => {
+    const items = listValue(field.name)
+
+    if (field.type === 'select') {
+      return (
+        <div className="flex flex-wrap gap-sm border border-rule bg-paper p-sm">
+          {field.options?.map((opt) => (
+            <label key={String(opt)} className="check-row">
+              <input
+                type="checkbox"
+                checked={items.some((x) => String(x) === String(opt))}
+                onChange={() => toggleListItem(field.name, opt)}
+              />
+              {typeof opt === 'boolean' ? (opt ? '是' : '否') : opt}
+            </label>
+          ))}
+        </div>
+      )
+    }
+
+    return (
+      <div className="flex flex-col gap-2xs">
+        {items.length === 0 && (
+          <p className="text-xs text-muted">还没有添加{field.label}（可添加多个，按顺序提交）</p>
+        )}
+        {items.map((item, i) => (
+          <div key={i} className="flex items-center gap-xs">
+            <input
+              className="field flex-1"
+              type={field.type === 'number' ? 'number' : 'text'}
+              placeholder={field.placeholder || `第 ${i + 1} 项`}
+              value={String(item ?? '')}
+              onChange={(e) =>
+                setListItem(
+                  field.name,
+                  i,
+                  field.type === 'number' && e.target.value !== ''
+                    ? Number(e.target.value)
+                    : e.target.value,
+                )
+              }
+            />
+            <button
+              type="button"
+              className="x-btn"
+              aria-label={`删除第 ${i + 1} 项`}
+              onClick={() => removeListItem(field.name, i)}
+            >
+              ✕
+            </button>
+          </div>
+        ))}
+        <button type="button" className="btn-quiet self-start" onClick={() => addListItem(field.name)}>
+          添加一项
+        </button>
+      </div>
+    )
+  }
+
+  /** 音频 / 视频上传：不做图片网格，按条目显示文件名（音频带播放器便于确认选对了） */
+  const renderAvField = (field: TemplateField, kind: 'audio' | 'video') => {
+    const isMulti = !!field.multiple
+    const urls = previews[field.name] ?? []
+    const names = previewNames[field.name] ?? []
+    const busy = !!uploading[field.name]
+    const unit = kind === 'audio' ? '音频' : '视频'
+    const uploadId = `upload-${field.name}`
+    const rows = (isMulti ? names : names.slice(0, 1)).map((n, i) => ({ n, i }))
+
+    return (
+      <div className="border border-rule bg-paper">
+        <input
+          type="file"
+          accept={`${kind}/*`}
+          multiple={isMulti}
+          className="visually-hidden"
+          id={uploadId}
+          onChange={(e) => {
+            const files = Array.from(e.target.files ?? [])
+            if (files.length) handleUpload(field, files)
+            e.target.value = '' // 允许重复选择同一文件
+          }}
+        />
+        <div className="p-sm">
+          {rows.length === 0 ? (
+            <div className="border border-dashed border-muted px-md py-lg text-center text-sm text-ink-2">
+              {busy ? '上传中…' : `还没有选择${unit}`}
+            </div>
+          ) : (
+            <ul className="flex flex-col gap-2xs">
+              {rows.map(({ n, i }) => (
+                <li
+                  key={`${n}-${i}`}
+                  className="flex items-center gap-sm border border-rule bg-paper-2 px-sm py-2xs"
+                >
+                  {kind === 'audio' && urls[i] ? (
+                    <audio src={urls[i]} controls className="h-8 max-w-64" aria-label={n} />
+                  ) : (
+                    <span className="min-w-0 flex-1 truncate text-sm text-ink">
+                      {n || `${unit} ${i + 1}`}
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    className="btn-danger-quiet"
+                    disabled={busy}
+                    onClick={() => {
+                      if (isMulti) {
+                        removeImageAt(field, i)
+                      } else {
+                        clearPreviews(field.name)
+                        setValue(field.name, '')
+                      }
+                    }}
+                  >
+                    移除
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <div className="mt-xs flex flex-wrap items-center gap-sm">
+            <label
+              htmlFor={uploadId}
+              className={`btn-quiet cursor-pointer ${busy ? 'pointer-events-none opacity-50' : ''}`}
+            >
+              {rows.length ? `继续添加${unit}` : `上传${unit}`}
+            </label>
+            <button
+              type="button"
+              className="btn-quiet"
+              disabled={busy}
+              onClick={() => setPickerFor(field)}
+            >
+              从素材库
+            </button>
+            <span className="text-xs text-muted">
+              {busy ? '上传中…' : rows.length ? `已选 ${rows.length} 个` : '未选择'}
+            </span>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     // 过滤掉空值（多图字段的 [] 也算空）
     const params: Record<string, unknown> = {}
     for (const [k, v] of Object.entries(values)) {
       if (v === '' || v === null || v === undefined) continue
-      if (Array.isArray(v) && v.length === 0) continue
+      if (Array.isArray(v)) {
+        // 列表字段：去掉空行，空列表整体不发（让插件的必填校验报出人话）
+        const items = v.filter((x) => x !== '' && x !== null && x !== undefined)
+        if (items.length === 0) continue
+        params[k] = items
+        continue
+      }
       params[k] = v
     }
     onSubmit(params, batchCount)
@@ -203,6 +392,18 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
   const renderField = (field: TemplateField) => {
     const value = values[field.name]
     const id = `field-${field.name}`
+
+    // 上传控件：kind 由字段声明决定（image / audio / video），image_upload 是历史别名
+    const fileKind =
+      field.type === 'file_upload' || field.type === 'image_upload'
+        ? (field.accept ?? 'image')
+        : null
+
+    // 音频 / 视频：不做图片网格，走条目式渲染（图片仍走下面的缩略图网格）
+    if (fileKind && fileKind !== 'image') return renderAvField(field, fileKind)
+
+    // 列表字段（非文件）：值永远是数组，控件按元素类型渲染
+    if (field.multiple && !fileKind) return renderListField(field)
 
     switch (field.type) {
       case 'textarea':
@@ -251,7 +452,8 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
             ))}
           </select>
         )
-      case 'image_upload': {
+      case 'image_upload':
+      case 'file_upload': {
         const isMulti = !!field.multiple
         const urls = previews[field.name] ?? []
         const names = previewNames[field.name] ?? []

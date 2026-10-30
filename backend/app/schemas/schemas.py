@@ -5,7 +5,12 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator
 
 # 表单字段允许的控件类型（与前端 TemplateField.type 对齐）
-_FIELD_TYPES = {"text", "textarea", "number", "select", "image_upload"}
+# 注意：type 只描述「用什么控件」，不描述「几个值」—— 基数看 multiple，
+# 元素类型看能力声明（string/int/bool/enum/image/audio/video）。
+# image_upload 是历史名字（当初只有图片能上传），读取时归一成 file_upload。
+_FIELD_TYPES = {"text", "textarea", "number", "select", "file_upload", "image_upload"}
+# 上传控件放行的文件种类
+_FILE_KINDS = {"image", "audio", "video"}
 
 
 def normalize_input_schema(value: Any) -> dict:
@@ -41,12 +46,23 @@ def normalize_input_schema(value: Any) -> dict:
         if field_type not in _FIELD_TYPES:
             field_type = "text"
 
+        # 上传控件：统一成 file_upload + accept（image/audio/video）。
+        # 旧模板里的 image_upload 在这里升级，前端只需认一种类型
+        accept = ""
+        if field_type in ("image_upload", "file_upload"):
+            accept = str(item.get("accept") or "").strip().lower()
+            if accept not in _FILE_KINDS:
+                accept = "image"
+            field_type = "file_upload"
+
         field = {
             "name": name,
             "label": item.get("label") or name,
             "type": field_type,
             "required": bool(item.get("required", False)),
         }
+        if accept:
+            field["accept"] = accept
         # 可选键：仅在确有值时保留，避免塞一堆 null
         if item.get("placeholder"):
             field["placeholder"] = str(item["placeholder"])
@@ -56,8 +72,10 @@ def normalize_input_schema(value: Any) -> dict:
             field["default"] = item["default"]
         if item.get("advanced"):
             field["advanced"] = True
-        # 多值图片字段：一个框可上传多张（表单值是数组）。只在 image_upload 上有意义
-        if item.get("multiple") and field_type == "image_upload":
+        # 基数：任何类型都可以是列表（音频列表、参考图列表、甚至多行文本）。
+        # 之前把 multiple 限定在 image_upload 上，导致「列表参数」只能靠
+        # audio/audio2/audio3 这种槽位硬凑 —— 那正是这次要拆掉的东西
+        if item.get("multiple"):
             field["multiple"] = True
         fields.append(field)
 

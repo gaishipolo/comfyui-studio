@@ -14,8 +14,8 @@
 - aspectRatio 只有两个值：portrait（竖屏）/ landscape（横屏），**不是** 16:9 这种写法。
 - resolution 480p / 768p / 1080p；duration 1~15 秒，**1080p 最多 10 秒**（超了直接报错，不静默改）。
 - images 最多 9 张、audios 最多 3 段，都支持 base64 与公网 URL。
-  **本平台的上传接口目前只收图片**，所以参考音频只能在表单里手填公网 URL / base64，
-  界面上没有音频上传按钮 —— 这是平台限制，不是本插件偷懒。
+  参考图和参考音频都走平台上传（/api/upload/file?kind=image|audio），表单只存短标记；
+  也允许手填公网 URL / base64 直连。
 - promptSkill 默认 true（服务端会先优化提示词）；模型对提示词要求较高，建议保留。
 - 没有取消端点，cancel 恒返回 False。
 
@@ -45,6 +45,10 @@ _RESOLUTIONS = ["480p", "768p", "1080p"]
 _RATIOS = ["landscape", "portrait"]
 _MAX_DURATION = 15
 _MAX_DURATION_1080P = 10
+_MAX_IMAGES = 9
+_MAX_AUDIOS = 3
+_AUDIO_EXT = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus"}
+_IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 
 
 class GrsaiMinimaxH3Provider(GenerationProvider):
@@ -69,10 +73,8 @@ class GrsaiMinimaxH3Provider(GenerationProvider):
                           description="可选；固定种子便于复现同一结果"),
                 FieldSpec(name="promptSkill", label="提示词优化", type="bool", default=True,
                           description="服务端先优化提示词；关闭则完全按原文生成"),
-                FieldSpec(name="audio", label="参考音频 1", type="string",
-                          description="可选；公网 URL 或 base64（平台暂无音频上传入口）"),
-                FieldSpec(name="audio2", label="参考音频 2", type="string", description="可选"),
-                FieldSpec(name="audio3", label="参考音频 3", type="string", description="可选"),
+                FieldSpec(name="audios", label="参考音频", type="audio", multiple=True,
+                          description=f"可一次选多个（接口上限 {_MAX_AUDIOS} 段）；也可填公网 URL / base64"),
             ],
         ),
         "image_to_video": CapabilitySpec(
@@ -93,10 +95,8 @@ class GrsaiMinimaxH3Provider(GenerationProvider):
                           description="可选；固定种子便于复现同一结果"),
                 FieldSpec(name="promptSkill", label="提示词优化", type="bool", default=True,
                           description="服务端先优化提示词；关闭则完全按原文生成"),
-                FieldSpec(name="audio", label="参考音频 1", type="string",
-                          description="可选；公网 URL 或 base64（平台暂无音频上传入口）"),
-                FieldSpec(name="audio2", label="参考音频 2", type="string", description="可选"),
-                FieldSpec(name="audio3", label="参考音频 3", type="string", description="可选"),
+                FieldSpec(name="audios", label="参考音频", type="audio", multiple=True,
+                          description=f"可一次选多个（接口上限 {_MAX_AUDIOS} 段）；也可填公网 URL / base64"),
             ],
         ),
     }
@@ -107,9 +107,9 @@ class GrsaiMinimaxH3Provider(GenerationProvider):
                   description="国内节点 https://grsai.dakka.com.cn ｜ 全球 https://grsaiapi.com（带不带 /v1 都行）"),
         FieldSpec(name="api_key", label="API 密钥", type="string", required=True,
                   description="sk- 开头，控制台 https://grsai.ai/zh/dashboard/api-keys 获取"),
-        FieldSpec(name="image_format", label="参考图编码", type="enum", default="data_uri",
+        FieldSpec(name="image_format", label="参考文件编码", type="enum", default="data_uri",
                   options=["data_uri", "raw_base64"],
-                  description="data_uri = data:image/png;base64,...；接口报图片解析失败就切 raw_base64"),
+                  description="参考图/音频的内联方式：data_uri = data:image/png;base64,...；接口报解析失败就切 raw_base64"),
     ]
 
     # ── ② 配置与认证 ────────────────────────────────────
@@ -182,18 +182,43 @@ class GrsaiMinimaxH3Provider(GenerationProvider):
                 out.append(r)
         return out
 
-    @staticmethod
-    def _resolve_audio(value) -> str:
-        """参考音频只认公网 URL / base64 —— 平台的上传接口目前只收图片，
-        所以这里没有 wbinput: 分支，填了别的会直接报错而不是悄悄丢掉。"""
+    def _encode_audio(self, data: bytes, key: str) -> str:
+        """音频内联：与参考图同一套编码开关（data_uri / raw_base64）。"""
+        mime = mimetypes.guess_type(key)[0] or "audio/mpeg"
+        b64 = base64.b64encode(data).decode()
+        if (self.config.get("image_format") or "data_uri") == "raw_base64":
+            return b64
+        return f"data:{mime};base64,{b64}"
+
+    def _resolve_audio(self, value) -> str:
+        """单个参考音频 → API 能吃的 URL / base64 / data URI。
+
+        认三种形态：wbinput: 短标记（本平台上传产出）、手填公网 URL、手贴 base64。
+        """
         v = str(value or "").strip()
         if not v:
             return ""
         if v.startswith(("data:", "http://", "https://")):
             return v
+        if v.startswith("wbinput:"):
+            key = v[len("wbinput:"):]
+            data = read_asset_bytes(key)
+            if data is None:
+                raise ValueError(f"参考音频临时文件已丢失：{key}（重新上传一次即可）")
+            return self._encode_audio(data, key)
         if len(v) > 512:  # 手贴的裸 base64
             return v
-        raise ValueError(f"参考音频需填公网 URL 或 base64（平台暂无音频上传入口）：{v[:60]}")
+        raise ValueError(f"无法识别的参考音频值：{v[:60]}（上传音频，或填公网 URL / base64）")
+
+    def _resolve_audios(self, value) -> list[str]:
+        """参考音频字段可能是单个值，也可能是一组值（multiple 字段），统一成列表。"""
+        raw = value if isinstance(value, (list, tuple)) else [value]
+        out = []
+        for v in raw:
+            r = self._resolve_audio(v)
+            if r:
+                out.append(r)
+        return out
 
     @staticmethod
     def _to_bool(value) -> bool:
@@ -213,12 +238,19 @@ class GrsaiMinimaxH3Provider(GenerationProvider):
         raise ValueError(f"提示词优化只接受 true/false，收到：{value}")
 
     async def upload_input(self, data: bytes, filename: str) -> str:
-        """参考图进表单的值形态：落 filestore 存短标记，build_payload 时还原成 base64。"""
+        """参考文件进表单的值形态：落 filestore 存短标记，build_payload 时还原成 base64。
+
+        图片和音频共用这条路（平台上传接口按 kind 放行），按扩展名分目录便于排查。
+        """
         ext = Path(filename or "").suffix.lower()
-        if ext not in (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"):
-            ext = self._sniff_ext(data)  # .jfif 等猜不出 mime 的兜底
-        key = f"grsai-video-input/{uuid.uuid4().hex}{ext}"
-        save_asset_file(key, data, mimetypes.guess_type(f"x{ext}")[0] or "image/png")
+        if ext in _AUDIO_EXT:
+            folder, fallback_mime = "grsai-audio-input", "audio/mpeg"
+        else:
+            if ext not in _IMAGE_EXT:
+                ext = self._sniff_ext(data)  # .jfif 等猜不出 mime 的兜底
+            folder, fallback_mime = "grsai-video-input", "image/png"
+        key = f"{folder}/{uuid.uuid4().hex}{ext}"
+        save_asset_file(key, data, mimetypes.guess_type(f"x{ext}")[0] or fallback_mime)
         return f"wbinput:{key}"
 
     # ── ④ 表单值 → 请求体 ────────────────────────────────
@@ -226,8 +258,14 @@ class GrsaiMinimaxH3Provider(GenerationProvider):
         images = self._resolve_images(params.get("image"))
         if capability == "image_to_video" and not images:
             raise ValueError("图生视频需要至少一张参考图")
-        audios = [self._resolve_audio(params.get(k)) for k in ("audio", "audio2", "audio3")]
-        audios = [a for a in audios if a]
+        # 新字段 audios 是列表；老模板里还存着 audio/audio2/audio3 三个槽位，
+        # 这里一并收下 —— 存量模板不报错，管理员点「对齐到当前能力」后自然只剩 audios
+        audios = self._resolve_audios(params.get("audios"))
+        audios += self._resolve_audios([params.get(k) for k in ("audio", "audio2", "audio3")])
+        if len(audios) > _MAX_AUDIOS:
+            raise ValueError(f"参考音频最多 {_MAX_AUDIOS} 段，收到 {len(audios)} 段")
+        if len(images) > _MAX_IMAGES:
+            raise ValueError(f"参考图最多 {_MAX_IMAGES} 张，收到 {len(images)} 张")
 
         resolution = str(params.get("resolution") or "480p")
         # 注意不能用 `params.get("duration") or 5` —— 0 是假值，会被悄悄改成 5 秒。

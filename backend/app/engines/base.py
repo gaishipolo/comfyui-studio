@@ -29,13 +29,17 @@ class FieldSpec:
     """
     name: str
     label: str
-    type: str = "string"  # string / int / float / bool / enum / image
+    # 元素类型（不是控件）：string / int / float / bool / enum /
+    # image / audio / video（后三个是文件类，走上传控件）
+    type: str = "string"
     required: bool = False
     default: Any = None
     options: list[str] = field(default_factory=list)
     description: str = ""
-    # 多值字段：type="image" 时允许一次上传多张，表单值变成数组（如 MiniMax H3 的 images 数组）。
-    # 只有声明了它的能力才会渲染成「一个框、可多选」，否则仍是单图字段
+    # 基数：true = 这个参数是列表，表单值是数组（顺序即提交顺序）。
+    # **与 type 正交**：任何类型都能是列表（audios 列表、参考图列表、多值枚举…），
+    # 不要再用 audio/audio2/audio3 这种槽位去硬凑列表 —— 那是把平台的表达力缺口
+    # 转嫁给用户。文件类的列表 = 一个框可多选；标量类的列表 = 可增删的多行输入
     multiple: bool = False
 
 

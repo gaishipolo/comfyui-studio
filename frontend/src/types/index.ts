@@ -3,13 +3,20 @@
 export interface TemplateField {
   name: string
   label: string
-  type: 'text' | 'textarea' | 'number' | 'select' | 'image_upload'
+  /**
+   * 控件类型（不是元素类型）。
+   * image_upload 是历史名字，后端读取时已统一成 file_upload + accept=image，
+   * 这里保留兼容，前端渲染两者走同一分支
+   */
+  type: 'text' | 'textarea' | 'number' | 'select' | 'file_upload' | 'image_upload'
   required: boolean
   placeholder?: string
   options?: (string | number | boolean)[]
   default?: string | number | boolean
   advanced?: boolean
-  /** 多值字段（仅图片）：一个框可上传多张，表单值是数组 */
+  /** 上传控件放行的文件种类（仅 file_upload 有意义），缺省 image */
+  accept?: 'image' | 'audio' | 'video'
+  /** 基数：true = 表单值是数组。**与控件类型正交**，任何类型都能是列表 */
   multiple?: boolean
 }
 

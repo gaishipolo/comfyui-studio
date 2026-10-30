@@ -48,8 +48,12 @@ bad_schema = {"fields": [
      "required": True, "advanced": True, "default": 3},          # 完整
     {"name": "image", "label": "参考图", "type": "image_upload",  # 多值图片字段
      "required": True, "multiple": True},
-    {"name": "txt_multi", "label": "文本", "type": "text",        # multiple 对文本无意义 -> 丢弃
+    {"name": "txt_multi", "label": "文本", "type": "text",        # 列表参数：文本也能是列表
      "multiple": True},
+    {"name": "audios", "label": "参考音频", "type": "file_upload",  # 音频上传（新种类）
+     "accept": "audio", "multiple": True},
+    {"name": "weird_accept", "label": "怪种类", "type": "file_upload",
+     "accept": "pdf"},                                           # 非法种类 -> 回落 image
     {"name": "promptSkill", "label": "提示词优化", "type": "select",  # bool 走下拉：布尔选项 + 布尔默认值
      "options": [True, False], "default": True},
     {"name": "offFlag", "label": "关闭", "type": "select",            # 默认 false 不能被当成「没填」
@@ -63,7 +67,7 @@ report("创建模板", st == 200, f"status={st} name={UNIQUE}")
 tid = created.get("id")
 
 fields = created["input_schema"]["fields"]
-report("无 name 字段被丢弃", len(fields) == 8, f"实际 {len(fields)} 个")
+report("无 name 字段被丢弃", len(fields) == 10, f"实际 {len(fields)} 个")
 
 by_name = {f["name"]: f for f in fields}
 report("prompt 补上 required", by_name.get("prompt", {}).get("required") is False)
@@ -76,8 +80,16 @@ report("完整字段保持 advanced/default",
        and by_name.get("adv", {}).get("default") == 3)
 report("image_upload 保留 multiple",
        by_name.get("image", {}).get("multiple") is True, str(by_name.get("image")))
-report("text 上的 multiple 被丢弃",
-       "multiple" not in by_name.get("txt_multi", {}), str(by_name.get("txt_multi")))
+report("image_upload 升级成 file_upload + accept=image",
+       by_name.get("image", {}).get("type") == "file_upload"
+       and by_name.get("image", {}).get("accept") == "image", str(by_name.get("image")))
+report("text 上的 multiple 保留（列表参数通用）",
+       by_name.get("txt_multi", {}).get("multiple") is True, str(by_name.get("txt_multi")))
+report("音频上传：accept=audio + multiple 保留",
+       by_name.get("audios", {}).get("accept") == "audio"
+       and by_name.get("audios", {}).get("multiple") is True, str(by_name.get("audios")))
+report("非法 accept 回落 image",
+       by_name.get("weird_accept", {}).get("accept") == "image", str(by_name.get("weird_accept")))
 report("布尔选项 [True, False] 原样保留",
        by_name.get("promptSkill", {}).get("options") == [True, False],
        str(by_name.get("promptSkill", {}).get("options")))

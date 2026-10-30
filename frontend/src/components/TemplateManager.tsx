@@ -228,6 +228,13 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
     specs.map((spec) => {
       // 选项 = 下拉的选项。enum 用声明的 options；bool 没有 options 声明，
       // 但要能选，所以补 true/false（boolean 原值，不是字符串，否则下游 bool("false") 会变 true）
+      // 文件类（image/audio/video）共用同一个上传控件，accept 决定放行哪类文件。
+      // 以前只认 image，音频只能退化成手填 URL 的文本框 —— 那是平台缺口，不是接口限制
+      const fileKind: TemplateField['accept'] | undefined =
+        spec.type === 'image' || spec.type === 'audio' || spec.type === 'video'
+          ? (spec.type as TemplateField['accept'])
+          : undefined
+
       const options: TemplateField['options'] | undefined = spec.options?.length
         ? [...spec.options]
         : spec.type === 'bool'
@@ -235,8 +242,8 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
           : undefined
 
       let type: TemplateField['type']
-      if (options) type = 'select'                         // enum / bool：下拉，选项值即 API 原生值
-      else if (spec.type === 'image') type = 'image_upload'
+      if (fileKind) type = 'file_upload'
+      else if (options) type = 'select'                    // enum / bool：下拉，选项值即 API 原生值
       else if (spec.type === 'int' || spec.type === 'float') type = 'number'
       else if (spec.name === 'prompt' || /[\r\n]/.test(spec.description || '')) type = 'textarea'
       else type = 'text'
@@ -245,10 +252,11 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
         label: spec.label || spec.name,
         type,
         required: !!spec.required,
+        ...(fileKind ? { accept: fileKind } : {}),
         ...(options ? { options } : {}),
         ...(spec.default != null ? { default: spec.default as string | number | boolean } : {}),
         ...(spec.description ? { placeholder: spec.description } : {}),
-        // 多值图片字段：一个框可多选，表单值变数组（值形态由能力声明决定，前端不猜）
+        // 基数与类型正交：任何字段都能是列表，值形态由能力声明决定，前端不猜
         ...(spec.multiple ? { multiple: true } : {}),
       }
     })
@@ -643,7 +651,7 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
                           <option value="textarea">多行文本</option>
                           <option value="number">数字</option>
                           <option value="select">下拉</option>
-                          <option value="image_upload">图片上传</option>
+                          <option value="file_upload">文件上传</option>
                         </select>
                       </label>
                       <label className="check-row">
@@ -661,6 +669,16 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
                           onChange={(e) => updateField(i, { advanced: e.target.checked })}
                         />
                         高级
+                      </label>
+                      {/* 基数：勾上 = 这个参数是列表（表单值变数组）。
+                          与控件类型无关 —— 文本可以多行、文件可以多选、下拉可以多选 */}
+                      <label className="check-row">
+                        <input
+                          type="checkbox"
+                          checked={!!field.multiple}
+                          onChange={(e) => updateField(i, { multiple: e.target.checked })}
+                        />
+                        列表
                       </label>
                       <button
                         onClick={() => removeField(i)}
@@ -689,6 +707,22 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
                           onChange={(e) => updateField(i, { placeholder: e.target.value || undefined })}
                         />
                       </label>
+                      {field.type === 'file_upload' && (
+                        <label className="block w-28">
+                          <span className="field-label">文件种类</span>
+                          <select
+                            className="field"
+                            value={field.accept ?? 'image'}
+                            onChange={(e) =>
+                              updateField(i, { accept: e.target.value as TemplateField['accept'] })
+                            }
+                          >
+                            <option value="image">图片</option>
+                            <option value="audio">音频</option>
+                            <option value="video">视频</option>
+                          </select>
+                        </label>
+                      )}
                       {field.type === 'select' && (
                         <label className="block min-w-40 flex-1">
                           <span className="field-label">选项（逗号分隔，失焦生效）</span>

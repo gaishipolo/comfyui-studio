@@ -49,7 +49,7 @@ TS = {
     },
     "TemplateField": {
         "req": ["name", "label", "type", "required"],
-        "opt": ["placeholder", "options", "default", "advanced", "multiple"],
+        "opt": ["placeholder", "options", "default", "advanced", "multiple", "accept"],
     },
     # avg_duration_seconds 必须存在（没完成任务时是 null，不是缺字段）→ 归 req
     "UsageByUser": {

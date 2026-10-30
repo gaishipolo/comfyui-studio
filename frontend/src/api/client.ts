@@ -158,19 +158,31 @@ export const getEngines = () => request<EngineInfo[]>('/engines')
 
 // ── 上传（参考图片）─────────────────────────
 
-export const uploadImage = async (file: File, engine = 'comfyui'): Promise<string> => {
+/** 上传参考文件（图片 / 音频 / 视频），返回引擎侧文件名。
+ *  kind 决定后端放行哪类扩展名与大小上限 —— 别在这里按类型分支，统一一个入口 */
+export const uploadInput = async (
+  file: File,
+  engine = 'comfyui',
+  kind: 'image' | 'audio' | 'video' = 'image',
+): Promise<string> => {
   const form = new FormData()
   form.append('file', file)
   const token = getToken()
-  const resp = await fetch(`${BASE}/upload/image?engine=${encodeURIComponent(engine)}`, {
-    method: 'POST',
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-    body: form,
-  })
+  const resp = await fetch(
+    `${BASE}/upload/file?engine=${encodeURIComponent(engine)}&kind=${kind}`,
+    {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: form,
+    },
+  )
   const data = await resp.json()
   if (!resp.ok) throw new Error(data?.detail || '上传失败')
   return data.filename as string
 }
+
+/** 兼容旧调用点：等价于 uploadInput(file, engine, 'image') */
+export const uploadImage = (file: File, engine = 'comfyui') => uploadInput(file, engine, 'image')
 
 /** 从素材库选用已有素材推进生成引擎，返回引擎侧文件名（与 uploadImage 同构，
  *  表单拿到文件名后走同一条参数注入链路，无需区分来源） */
