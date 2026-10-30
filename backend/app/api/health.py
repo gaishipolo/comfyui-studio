@@ -4,7 +4,8 @@ import re
 
 from fastapi import APIRouter, Depends
 
-from app.auth import require_admin
+from app.auth import get_current_user
+from app.engines.base import GenerationProvider
 from app.engines.factory import get_provider, list_engines
 from app.models.models import User
 
@@ -30,6 +31,10 @@ async def _probe(engine_name: str) -> dict:
     一个引擎坏了不该让整个探活接口 500。"""
     try:
         provider = get_provider(engine_name)
+        # 插件没实现 health_check 时基类返回 None —— 那是「不知道」，
+        # 不能当成「离线」，否则每个没写的插件都会天天误报
+        if type(provider).health_check is GenerationProvider.health_check:
+            return {"name": engine_name, "status": "unknown", "detail": "该引擎未实现健康检查"}
         ok = await asyncio.wait_for(provider.health_check(), timeout=_PROBE_TIMEOUT)
         return {"name": engine_name, "status": "connected" if ok else "disconnected"}
     except asyncio.TimeoutError:
@@ -54,11 +59,18 @@ async def health():
 
 
 @router.get("/engines")
-async def engines(user: User = Depends(require_admin)):
+async def engines(user: User = Depends(get_current_user)):
     """列出已注册引擎及其健康状态。
 
-    运维诊断用，回执里带异常详情（已脱敏），因此只给 admin ——
+    登录用户都能看 —— 生成页要据此提示「你选的引擎离线了」，
+    不然用户只会看到任务莫名失败。
+
+    但**异常详情只给 admin**：里面可能有内网地址、上游报错细节，
     普通用户不需要知道服务端连的是哪台机器、报了什么错。
+
     并发探测：6 个引擎串行最坏要 6×2 秒，探活不该排这么长的队。
     """
-    return await asyncio.gather(*(_probe(name) for name in list_engines()))
+    results = await asyncio.gather(*(_probe(name) for name in list_engines()))
+    if user.role == "admin":
+        return results
+    return [{"name": r["name"], "status": r["status"]} for r in results]

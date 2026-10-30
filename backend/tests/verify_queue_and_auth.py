@@ -438,7 +438,9 @@ async def main():
     report("探活必须封顶（下游引擎卡住不能拖死 /health）",
            "asyncio.wait_for" in hsrc and "_PROBE_TIMEOUT" in hsrc)
     report("引擎探测并发（6 个串行会排 12 秒队）", "asyncio.gather" in hsrc)
-    report("/engines 只给 admin（回执带异常详情）", "require_admin" in hsrc)
+    report("/engines 需要登录（匿名探测要挡住）", "get_current_user" in hsrc)
+    report("引擎异常详情只给 admin（内网地址/上游报错）",
+           'user.role == "admin"' in hsrc)
     report("引擎异常详情脱敏（抹掉 URL）", "_URL_RE.sub" in hsrc)
     report("/health 保持匿名可访问（探活不该要 token）", "async def health():" in hsrc)
 

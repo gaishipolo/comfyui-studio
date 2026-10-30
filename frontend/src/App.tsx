@@ -3,10 +3,10 @@
  *
  * 所有功能 Tab 由 modules/ 注册表驱动，新增模块无需改本文件。
  */
-import { useState, useEffect, useCallback, useRef } from 'react'
-import type { GenerateDraft, Task, Template, User } from './types'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import type { EngineInfo, GenerateDraft, Task, Template, User } from './types'
 import {
-  getTemplates, getHealth, listTasks,
+  getTemplates, getHealth, getEngines, listTasks,
   getToken, getStoredUser, clearToken,
 } from './api/client'
 import { getVisibleModules } from './modules'
@@ -23,6 +23,9 @@ export default function App() {
   const [user, setUser] = useState<User | null>(getStoredUser())
   const [templates, setTemplates] = useState<Template[]>([])
   const [health, setHealth] = useState<{ status: string; comfyui: string } | null>(null)
+  /** 各引擎的健康状态。多引擎之后光看 ComfyUI 会骗人 ——
+   *  用户选的可能是 grsai，它挂了顶部还显示「在线」，然后任务莫名失败 */
+  const [engines, setEngines] = useState<EngineInfo[] | null>(null)
   const [activeKey, setActiveKey] = useState('generate')
   const [showChangePassword, setShowChangePassword] = useState(false)
   const [notice, setNotice] = useState('')
@@ -40,8 +43,15 @@ export default function App() {
   useEffect(() => {
     if (!getToken()) return
     refreshTemplates()
-    const checkHealth = () =>
-      getHealth().then(setHealth).catch(() => setHealth({ status: 'error', comfyui: 'unknown' }))
+    const checkHealth = () => {
+      getHealth()
+        .then(setHealth)
+        .catch(() => setHealth({ status: 'error', comfyui: 'unknown' }))
+      // 引擎列表要登录态，失败就退回只看 ComfyUI（不让指示器整个消失）
+      getEngines()
+        .then(setEngines)
+        .catch(() => setEngines(null))
+    }
     checkHealth()
     // 健康状态每 30 秒刷新一次，离线恢复后可自动变绿
     const timer = setInterval(checkHealth, 30_000)
@@ -120,6 +130,23 @@ export default function App() {
   const ActiveComponent = activeModule?.component
   const online = health?.comfyui === 'connected'
 
+  // 只看「有启用模板在用」的引擎：
+  //  · generic_api 没配 base_url 时本来就是 disconnected，拿它报警等于天天误报
+  //  · unknown（插件没实现 health_check）不算离线，那是「不知道」
+  const engineIssues = useMemo(() => {
+    if (!engines) return null
+    const status = new Map(engines.map((e) => [e.name, e.status]))
+    const used = new Set(templates.filter((t) => t.is_active).map((t) => t.engine))
+    const missing: string[] = []
+    const offline: string[] = []
+    for (const name of used) {
+      const s = status.get(name)
+      if (s === undefined) missing.push(name)
+      else if (s === 'disconnected' || s === 'error') offline.push(name)
+    }
+    return { missing, offline }
+  }, [engines, templates])
+
   return (
     <div className="flex min-h-screen flex-col bg-paper text-ink">
       {/* 顶栏 — 一行品牌与身份，一行模块标签 */}
@@ -131,8 +158,27 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-lg">
-            {/* 生成服务状态 — 文字本身说明状态，颜色只是复述 */}
-            {health && (
+            {/* 生成服务状态 — 文字本身说明状态，颜色只是复述。
+                优先报「模板在用但连不上 / 没装」的引擎，都正常才退回 ComfyUI 状态 */}
+            {engineIssues && (engineIssues.missing.length > 0 || engineIssues.offline.length > 0) ? (
+              <span
+                role="status"
+                className="chip"
+                data-tone="error"
+                title={[
+                  ...(engineIssues.offline.length
+                    ? [`连不上：${engineIssues.offline.join('、')}`]
+                    : []),
+                  ...(engineIssues.missing.length
+                    ? [`未安装：${engineIssues.missing.join('、')}`]
+                    : []),
+                ].join('\n')}
+              >
+                {engineIssues.missing.length > 0
+                  ? `${engineIssues.missing.length} 个引擎未安装`
+                  : `${engineIssues.offline.length} 个引擎离线`}
+              </span>
+            ) : health ? (
               <span
                 role="status"
                 className="chip"
@@ -140,7 +186,7 @@ export default function App() {
               >
                 {online ? '生成服务在线' : '生成服务离线'}
               </span>
-            )}
+            ) : null}
 
             <div className="flex items-center gap-md">
               <div>

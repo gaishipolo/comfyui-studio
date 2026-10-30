@@ -114,7 +114,9 @@ export interface GenerateDraft {
 
 export interface EngineInfo {
   name: string
-  status: 'connected' | 'disconnected' | 'error'
+  /** unknown = 该引擎没实现 health_check（「不知道」，不等于「离线」） */
+  status: 'connected' | 'disconnected' | 'error' | 'unknown'
+  /** 异常详情，只有 admin 拿得到 */
   detail?: string
 }
 
