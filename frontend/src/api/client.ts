@@ -2,7 +2,7 @@
 import type {
   Template, Task, Asset, User, LoginResponse,
   AssetTag, EngineInfo, WorkflowUploadResponse, WorkflowInventoryResponse,
-  UsageResponse, EnginePluginInfo,
+  UsageResponse, EnginePluginInfo, TemplateImportResult,
 } from '../types'
 
 const BASE = '/api'
@@ -151,6 +151,27 @@ export const getWorkflowInventory = (filename: string) =>
   request<WorkflowInventoryResponse>(
     `/templates/workflow-inventory?filename=${encodeURIComponent(filename)}`,
   )
+
+// ── 模板导出 / 导入 ────────────────────────
+
+/** 下载模板导出文件（配置 + 内嵌工作流）。
+ *  走 fetch 而不是 <a href>：导出接口要 JWT，直链发不出 Authorization 头 */
+export async function exportTemplate(templateId: string, templateName: string): Promise<void> {
+  const blob = await fetchAssetBlob(`${BASE}/templates/${templateId}/export`)
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `${templateName}.template.json`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+/** 导入模板导出文件。overwrite=true 时同名模板被覆盖（保留原 id，历史任务不断链） */
+export const importTemplate = (payload: unknown, overwrite = false) =>
+  request<TemplateImportResult>(`/templates/import?overwrite=${overwrite}`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
 
 // ── 引擎 ──────────────────────────────────
 

@@ -7,6 +7,7 @@ import type {
 import {
   getAllTemplates, createTemplate, updateTemplate, deleteTemplate,
   uploadWorkflow, getWorkflowInventory, listPlugins,
+  exportTemplate, importTemplate,
 } from '../api/client'
 
 interface Props {
@@ -69,6 +70,54 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
   const [inventory, setInventory] = useState<WorkflowInventory | null>(null)
   const [inventoryLoading, setInventoryLoading] = useState(false)
   const [inventoryError, setInventoryError] = useState('')
+
+  // ── 导出 / 导入 ──────────────────────────
+
+  /** 导出单个模板（配置 + 内嵌工作流）为 JSON 文件 */
+  const handleExport = async (template: Template) => {
+    try {
+      await exportTemplate(template.id, template.name)
+    } catch (err) {
+      alert(`导出失败: ${err instanceof Error ? err.message : err}`)
+    }
+  }
+
+  /** 导入模板导出文件。只在真的重名时才问覆盖 —— 没冲突就不该拦一道 */
+  const handleImport = async (file: File) => {
+    let payload: unknown
+    try {
+      payload = JSON.parse(await file.text())
+    } catch {
+      alert('这个文件不是合法的 JSON')
+      return
+    }
+    // 先看格式，别把 zip、别家的 JSON 送上去再被拒（错误提示也没这里具体）
+    const fmt = (payload as { format?: string })?.format
+    if (fmt !== 'comfyui-workbench/template') {
+      alert(`不是本系统导出的模板文件${fmt ? `（format=${fmt}）` : ''}`)
+      return
+    }
+    const name =
+      (payload as { template?: { name?: string } })?.template?.name || file.name.replace(/\.json$/i, '')
+    const exists = templates.some((t) => t.name === name)
+    const overwrite = exists
+      ? confirm(
+          `已存在同名模板「${name}」。\n\n` +
+            '点「确定」= 覆盖它（保留原 id，历史任务不受影响）\n' +
+            `点「取消」= 另存为「${name} (导入)」`,
+        )
+      : false
+    try {
+      const res = await importTemplate(payload, overwrite)
+      await fetchTemplates()
+      onTemplatesChange()
+      const lines = [`已导入「${res.template.name}」`]
+      if (res.warnings.length) lines.push('', ...res.warnings.map((w) => `· ${w}`))
+      alert(lines.join('\n'))
+    } catch (err) {
+      alert(`导入失败: ${err instanceof Error ? err.message : err}`)
+    }
+  }
 
   const fetchTemplates = useCallback(async () => {
     setLoading(true)
@@ -383,22 +432,37 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
     <div>
       <div className="rule-b flex items-center justify-between gap-md pb-sm">
         <h2 className="font-display text-section">模板管理</h2>
-        <button
-          onClick={() =>
-            openEditor(
-              {
-                ...emptyForm,
-                input_schema: { fields: [...emptyForm.input_schema.fields] },
-                param_mapping: {},
-                output_config: { nodes: [] },
-              },
-              null,
-            )
-          }
-          className="btn"
-        >
-          新建模板
-        </button>
+        <div className="flex items-center gap-xs">
+          <label className="btn-quiet cursor-pointer">
+            导入模板
+            <input
+              type="file"
+              accept=".json,application/json"
+              className="visually-hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0]
+                if (f) handleImport(f)
+                e.target.value = '' // 允许重复导入同一个文件
+              }}
+            />
+          </label>
+          <button
+            onClick={() =>
+              openEditor(
+                {
+                  ...emptyForm,
+                  input_schema: { fields: [...emptyForm.input_schema.fields] },
+                  param_mapping: {},
+                  output_config: { nodes: [] },
+                },
+                null,
+              )
+            }
+            className="btn"
+          >
+            新建模板
+          </button>
+        </div>
       </div>
 
       {/* 编辑表单 */}
@@ -886,6 +950,9 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
                   <td className="num">{Object.keys(template.param_mapping || {}).length}</td>
                   <td>
                     <div className="flex items-center gap-2xs">
+                      <button onClick={() => handleExport(template)} className="btn-quiet">
+                        导出
+                      </button>
                       <button
                         onClick={() =>
                           openEditor(

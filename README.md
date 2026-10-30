@@ -7,6 +7,8 @@
 **生成与任务**
 - 任务队列：并发闸门、进度轮询、超时自动取消、僵尸任务收割、手动取消（独立 `cancelled` 终态）
 - 模板系统：一套表单驱动不同引擎；「从能力带入」按引擎声明自动生成表单字段，值域即 API 原生值（零映射层）
+- 模板导出 / 导入：导出为自包含 JSON（配置 + 内嵌工作流），换台机器导入即可用；重名可覆盖或另存，缺引擎只告警不拒绝
+- 参数列表化：`FieldSpec.multiple` 与类型正交，一个字段可收多张图 / 多段音频（不用开 `image2/audio2` 这种槽位）
 - ComfyUI 深度支持：工作流 JSON 解析、参数注入映射、出图节点识别、workflow-inventory
 
 **多引擎插件机制**
@@ -122,6 +124,7 @@ python tests/verify_multi_image.py      # 单字段多图：字段声明 / 列�
 python tests/verify_grsai_plugins.py    # Grsai 三插件线格式联调：异步轮询 / 状态映射 / 产物下载（假服务端）
 python tests/verify_queue_and_auth.py   # 队列闸门与鉴权
 python tests/verify_filestore.py        # 存储抽象
+python tests/verify_template_export.py  # 模板导出/导入：自包含工作流、去重、重名、缺引擎告警
 # ...其余 verify_*.py 同理，全部通过输出 PASS
 ```
 

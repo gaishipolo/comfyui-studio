@@ -44,6 +44,13 @@ export interface TemplateOutputConfig {
   nodes?: string[]
 }
 
+/** 导入模板的回执：warnings 是「导进来了，但你可能想知道」的事
+ *  （本机没装那个引擎、工作流没跟着文件走、重名被改了…） */
+export interface TemplateImportResult {
+  template: Template
+  warnings: string[]
+}
+
 export interface Task {
   id: string
   template_id: string

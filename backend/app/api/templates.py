@@ -1,8 +1,14 @@
 """模板 CRUD API"""
+import hashlib
 import json
 import uuid
+from datetime import datetime
 from pathlib import Path
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from urllib.parse import quote
+
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi.responses import Response
+from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,7 +16,9 @@ from app.database import get_db
 from app.models.models import Task, Template, User
 from app.schemas.schemas import (
     TemplateCreate, TemplateUpdate, TemplateResponse,
+    TemplateImportPayload, TemplateImportResponse,
     WorkflowUploadResponse, WorkflowInventoryResponse,
+    normalize_input_schema,
 )
 from app.services.workflow_inspect import inspect_workflow
 from app.config import settings
@@ -264,3 +272,247 @@ async def upload_workflow(
         message=message,
         **inventory,
     )
+
+
+# ── 模板导出 / 导入 ──────────────────────────────────────────
+# 导出文件是自包含的：模板配置 + 内嵌工作流 JSON。这样换一台机器导入即可用，
+# 不用再去翻原实例的工作流目录拷文件。
+#
+# format / version 两个字段专门用来「拒绝不认识的文件」：
+# 用户很容易拿个 zip、别家的 JSON、或者新版本导出的文件来试，
+# 与其让它半死不活地导进去，不如直接说清楚为什么不行。
+
+TEMPLATE_EXPORT_FORMAT = "comfyui-workbench/template"
+TEMPLATE_EXPORT_VERSION = 1
+
+
+def _export_payload(tpl: Template) -> dict:
+    """导出哪些字段 —— 不含 id / created_at（那是本机的，换实例没意义）
+
+    input_schema 走一遍归一化再导出：库里可能还存着 `image_upload` 这种历史别名，
+    导出的文件应该是「接口现在给你的样子」，而不是「当年存进去的样子」。
+    """
+    return {
+        "name": tpl.name,
+        "description": tpl.description,
+        "category": tpl.category,
+        "icon": tpl.icon,
+        "input_schema": normalize_input_schema(tpl.input_schema),
+        "engine": tpl.engine,
+        "capability": tpl.capability,
+        "workflow_file": tpl.workflow_file,
+        "param_mapping": tpl.param_mapping,
+        "output_config": tpl.output_config,
+        "is_active": tpl.is_active,
+        "sort_order": tpl.sort_order,
+    }
+
+
+def _read_workflow_for_export(workflow_file: str) -> dict | None:
+    """把工作流文件内容读出来内嵌进导出文件。读不到就返回 None（导出仍继续）。"""
+    if not workflow_file:
+        return None
+    path = settings.WORKFLOW_DIR / Path(workflow_file).name
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+async def _free_template_name(db: AsyncSession, name: str) -> str:
+    """重名时挑一个没被占用的名字。用「(导入)」「(导入 2)」而不是随机串 ——
+    用户看得懂哪个是导入来的。"""
+    names = set((await db.execute(select(Template.name))).scalars().all())
+    if name not in names:
+        return name
+    for i in range(1, 100):
+        candidate = f"{name} (导入)" if i == 1 else f"{name} (导入 {i})"
+        if candidate not in names:
+            return candidate
+    return f"{name} (导入 {uuid.uuid4().hex[:4]})"
+
+
+def _canonical_json(obj) -> str:
+    """规范化 JSON 文本，用于内容比对（键序、缩进、空格都不影响结果）"""
+    return json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _save_workflow_dedup(workflow: dict, stem: str, prefer: str = "") -> str:
+    """把内嵌工作流写进 WORKFLOW_DIR，内容相同的已有文件直接复用。
+
+    去重不是洁癖：同一个模板导出文件被导入两次（换台机器验证、回滚重导）
+    就会在目录里堆一串一模一样的工作流副本，谁也不知道哪个是当前用的。
+    按内容哈希去重后，重复导入是幂等的。
+
+    `prefer` 是导出文件里记的原文件名 —— 内容一致就优先复用它，
+    这样导入后的模板还指着「当初那个文件」，而不是随便一个同内容的文件。
+    """
+    settings.WORKFLOW_DIR.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(_canonical_json(workflow).encode("utf-8")).hexdigest()
+
+    def same_content(path: Path) -> bool:
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return False
+        return hashlib.sha256(_canonical_json(existing).encode("utf-8")).hexdigest() == digest
+
+    if prefer:
+        candidate = settings.WORKFLOW_DIR / Path(prefer).name
+        if candidate.exists() and same_content(candidate):
+            return candidate.name
+
+    for path in sorted(settings.WORKFLOW_DIR.glob("*.json")):
+        if same_content(path):
+            return path.name
+
+    target = settings.WORKFLOW_DIR / f"{stem}_{digest[:6]}.json"
+    target.write_text(
+        json.dumps(workflow, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return target.name
+
+
+@router.get("/{template_id}/export")
+async def export_template(
+    template_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """导出单个模板为 JSON 文件（含内嵌工作流）。
+
+    读模板本来就不需要管理员权限（生成页人人都要读），导出只是换个格式，
+    不额外提权。
+    """
+    tpl = await db.get(Template, template_id)
+    if not tpl:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    workflow = _read_workflow_for_export(tpl.workflow_file)
+    doc = {
+        "format": TEMPLATE_EXPORT_FORMAT,
+        "version": TEMPLATE_EXPORT_VERSION,
+        "exported_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "source": {
+            "template_id": tpl.id,
+            "updated_at": tpl.updated_at.isoformat(timespec="seconds") if tpl.updated_at else "",
+        },
+        "template": _export_payload(tpl),
+        "workflow": workflow,
+    }
+    # 文件名带模板名方便认，但必须走 RFC 5987 编码 —— 中文名直接塞 filename=
+    # 会被部分浏览器丢掉，变成一串乱码或纯 download.json
+    filename = f"{tpl.name}.template.json"
+    return Response(
+        content=json.dumps(doc, ensure_ascii=False, indent=2).encode("utf-8"),
+        media_type="application/json",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@router.post("/import", response_model=TemplateImportResponse)
+async def import_template(
+    payload: TemplateImportPayload,
+    overwrite: bool = Query(False, description="同名模板已存在时覆盖它（保留原 id，任务不会断链）"),
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """导入模板导出文件。
+
+    导入会改系统配置（模板是所有人生成时共用的），所以只给 admin。
+    """
+    warnings: list[str] = []
+
+    if payload.format != TEMPLATE_EXPORT_FORMAT:
+        raise HTTPException(
+            status_code=400,
+            detail=f"不是本系统导出的模板文件（format={payload.format or '空'}）",
+        )
+    if payload.version > TEMPLATE_EXPORT_VERSION:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"该文件由更新版本导出（v{payload.version}），"
+                f"当前只支持到 v{TEMPLATE_EXPORT_VERSION}，请先升级后端"
+            ),
+        )
+
+    # 走 TemplateCreate 校验：input_schema 的归一化白名单顺带生效，
+    # 不用在导入路径上再写一遍字段清洗
+    try:
+        data = TemplateCreate(**payload.template)
+    except ValidationError as e:
+        first = e.errors()[0] if e.errors() else {}
+        raise HTTPException(
+            status_code=400,
+            detail=f"模板内容不合法：{first.get('loc', '')} {first.get('msg', '')}".strip(),
+        )
+
+    # 内嵌工作流落盘：内容相同就复用已有文件，绝不覆盖本机已有的同名工作流
+    if payload.workflow:
+        stem = Path(data.workflow_file or "workflow").stem or "workflow"
+        data.workflow_file = _save_workflow_dedup(
+            payload.workflow, stem, prefer=data.workflow_file
+        )
+    elif data.workflow_file:
+        # 没带工作流却绑了文件名：本机大概率没这个文件，清掉绑定免得存进去就是个坏模板
+        missing = settings.WORKFLOW_DIR / Path(data.workflow_file).name
+        if not missing.exists():
+            warnings.append(
+                f"导出文件里没有内嵌工作流，本机也找不到「{data.workflow_file}」，"
+                "已清空工作流绑定 —— 需要重新上传工作流并重配参数映射"
+            )
+            data.workflow_file = ""
+
+    # 引擎 / 能力对不上不算错误：模板可以先落地，等插件装上就能用。
+    # 但必须说出来，否则用户会以为是插件坏了
+    from app.engines.factory import get_provider, list_engines
+
+    if data.engine not in list_engines():
+        warnings.append(
+            f"本机没有安装引擎「{data.engine}」，模板已导入但暂时无法生成；"
+            "装上同名插件后自动生效"
+        )
+    elif data.capability:
+        try:
+            caps = get_provider(data.engine).capabilities
+            kinds = set(caps.keys()) if isinstance(caps, dict) else {c.get("kind") for c in caps}
+            if data.capability not in kinds:
+                warnings.append(
+                    f"引擎「{data.engine}」当前没有能力「{data.capability}」，"
+                    "模板字段可能与实际接口对不上"
+                )
+        except Exception:  # noqa: BLE001 —— 探活失败不该挡住导入
+            warnings.append(f"引擎「{data.engine}」读取能力声明失败，跳过能力校验")
+
+    existing = (
+        await db.execute(select(Template).where(Template.name == data.name))
+    ).scalar_one_or_none()
+
+    if existing and overwrite:
+        # 覆盖：保留 id —— 历史任务的 template_id 外键还指着它，换 id 等于断链
+        for key, value in data.model_dump().items():
+            setattr(existing, key, value)
+        _validate_workflow_config(existing.workflow_file, existing.param_mapping, existing.output_config)
+        await db.commit()
+        await db.refresh(existing)
+        warnings.append(f"已覆盖同名模板「{existing.name}」")
+        return TemplateImportResponse(template=existing, warnings=warnings)
+
+    if existing:
+        data.name = await _free_template_name(db, data.name)
+        warnings.append(f"已存在同名模板，本次导入为「{data.name}」")
+
+    _validate_workflow_config(data.workflow_file, data.param_mapping, data.output_config)
+
+    tpl = Template(**data.model_dump())
+    db.add(tpl)
+    await db.commit()
+    await db.refresh(tpl)
+    return TemplateImportResponse(template=tpl, warnings=warnings)

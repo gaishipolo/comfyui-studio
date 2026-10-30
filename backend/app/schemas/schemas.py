@@ -237,6 +237,27 @@ class WorkflowInventoryResponse(WorkflowInventory):
     filename: str
 
 
+# ── 模板导出 / 导入 ──────────────────────────────
+
+class TemplateImportPayload(BaseModel):
+    """模板导出文件的内容。
+
+    `workflow` 内嵌时导出文件是自包含的 —— 换台机器导入即可用，
+    不用再去翻原实例的工作流目录。
+    """
+    format: str = ""
+    version: int = 0
+    template: dict = Field(default_factory=dict)
+    workflow: dict | None = None
+
+
+class TemplateImportResponse(BaseModel):
+    """导入结果。warnings 是「导进来了，但你可能想知道」的事 ——
+    比如本机没装那个引擎、工作流没跟着文件走、重名被改了。"""
+    template: TemplateResponse
+    warnings: list[str] = Field(default_factory=list)
+
+
 class UsageByUser(BaseModel):
     """单个用户的用量统计（一个时间段内）"""
     user_id: str = ""
