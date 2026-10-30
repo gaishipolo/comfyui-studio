@@ -264,6 +264,39 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
     setEditing({ ...editing, input_schema: { fields: capabilitiesToFields(spec.fields) } })
   }
 
+  // 能力漂移检测：模板字段是「当时」从能力带出来的快照。插件升级后可能对不上
+  // （字段改名、加了 multiple、bool 选项从字符串变布尔……）。这里只读，不自动改数据 ——
+  // 管理员可能手动调过 label / 选项，必须他自己确认才覆盖。
+  const detectCapabilityDrift = () => {
+    if (!editing || !editing.capability) return null
+    const spec = (plugins.find((p) => p.name === editing.engine)?.capabilities || {})[
+      editing.capability
+    ]
+    if (!spec) return null
+    const want = capabilitiesToFields(spec.fields)
+    const have = new Map(editing.input_schema.fields.map((f) => [f.name, f]))
+    const wantNames = new Set(want.map((f) => f.name))
+    const missing: string[] = []
+    const changed: string[] = []
+    for (const w of want) {
+      const h = have.get(w.name)
+      if (!h) {
+        missing.push(w.name)
+        continue
+      }
+      // 用 JSON 比对选项：能同时抓住 [true,false] vs ["true","false"] 这种类型漂移
+      const same =
+        h.type === w.type &&
+        !!h.multiple === !!w.multiple &&
+        JSON.stringify(h.options ?? []) === JSON.stringify(w.options ?? [])
+      if (!same) changed.push(w.name)
+    }
+    const extra = [...have.keys()].filter((n) => !wantNames.has(n))
+    if (!missing.length && !changed.length && !extra.length) return null
+    return { missing, changed, extra }
+  }
+  const drift = detectCapabilityDrift()
+
   const removeField = (index: number) => {
     if (!editing) return
     const fields = editing.input_schema.fields.filter((_, i) => i !== index)
@@ -559,6 +592,19 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
                 <button onClick={addField} className="btn-quiet">添加字段</button>
               </div>
             </div>
+            {drift && (
+              <div className="mt-sm rounded-md bg-warning/10 px-md py-sm text-sm text-warning">
+                <p>
+                  字段与当前能力声明不一致
+                  {drift.missing.length > 0 && `：缺 ${drift.missing.join('、')}`}
+                  {drift.changed.length > 0 && `：类型/选项变了 ${drift.changed.join('、')}`}
+                  {drift.extra.length > 0 && `：能力里没有 ${drift.extra.join('、')}`}
+                </p>
+                <button onClick={importCapabilityFields} className="mt-xs btn-quiet">
+                  对齐到当前能力
+                </button>
+              </div>
+            )}
             <div className="mt-sm">
               {editing.input_schema.fields.length === 0 ? (
                 <p className="border border-dashed border-rule px-md py-lg text-center text-sm text-muted">
