@@ -1,6 +1,5 @@
 """任务提交与查询 API"""
 import uuid
-import mimetypes
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
@@ -18,6 +17,7 @@ from app.services.task_service import (
 )
 from app.auth import get_current_user
 from app.filestore import delete_asset_file, open_asset
+from app.media import guess_mime
 from app.access import (
     can_modify_task,
     can_view_asset,
@@ -154,7 +154,9 @@ async def download_asset(
     if handle is None:
         raise HTTPException(status_code=404, detail="Asset file not found")
 
-    media_type = mimetypes.guess_type(safe_name)[0] or "application/octet-stream"
+    # 落盘时已嗅探过文件头（app/media.py），直接用库里的值；
+    # 老记录可能没有 mime_type，再按文件名兜底
+    media_type = asset.mime_type or guess_mime(safe_name)
 
     # 本地后端有真实路径 → FileResponse：支持 HTTP Range，视频拖进度条才不卡
     if handle.local_path is not None:

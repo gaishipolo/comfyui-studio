@@ -2,7 +2,6 @@
 import uuid
 import asyncio
 import json
-import mimetypes
 import time
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +14,7 @@ from app.engines.factory import get_provider
 from app.engines.base import GenerationResult, TaskStatus
 from app.config import settings
 from app.filestore import save_asset_file
+from app.media import guess_mime
 
 
 # 取消登记表：cancel_task() 写入，执行协程在轮询间隙读。
@@ -379,7 +379,8 @@ class TaskService:
         )
         # 保存文件（文件名只取纯名字，防止路径穿越/非法字符）
         safe_name = Path(output["filename"]).name or f"{uuid.uuid4().hex}.bin"
-        mime = mimetypes.guess_type(safe_name)[0] or "application/octet-stream"
+        # 插件产物常是无扩展名的 CDN URL → 扩展名猜不出时看文件头，否则视频会被当图片渲染
+        mime = guess_mime(safe_name, file_bytes)
 
         # 存储键固定用 POSIX 分隔符：Windows 下 str(Path) 是反斜杠，直接当对象键会跟
         # S3 / mc mirror 的 / 对不上号。老记录里存的是反斜杠，filestore 读入端两种都吃。
