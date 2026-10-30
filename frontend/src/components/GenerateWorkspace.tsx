@@ -2,7 +2,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import type { GenerateDraft, Template, Task, Asset, User } from '../types'
 import {
-  submitTask, listTasks, getTaskAssets, getAssetUrl, openAssetInNewTab,
+  submitTask, listTasks, getTaskAssets, getAssetUrl, getAssetThumbUrl, openAssetInNewTab,
 } from '../api/client'
 import FriendlyError from './FriendlyError'
 import TemplateGallery from './TemplateGallery'
@@ -287,6 +287,7 @@ export default function GenerateWorkspace({
                               <div className="aspect-square overflow-hidden border border-rule bg-paper">
                                 <AuthMedia
                                   src={getAssetUrl(task.id, asset.file_name)}
+                                  posterSrc={getAssetThumbUrl(task.id, asset.file_name)}
                                   alt={asset.file_name}
                                   mime={asset.mime_type}
                                   className="h-full w-full object-cover"

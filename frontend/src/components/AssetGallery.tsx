@@ -7,7 +7,7 @@ import { useState, useEffect, useCallback } from 'react'
 import type { Asset, Template, AssetTag, User } from '../types'
 import {
   listAssets, listAssetTags, addAssetTag, removeAssetTag, shareAsset,
-  batchDownload, getAssetUrl, downloadAsset, deleteAsset, listUsers,
+  batchDownload, getAssetUrl, getAssetThumbUrl, downloadAsset, deleteAsset, listUsers,
 } from '../api/client'
 import { subscribeAssetsChanged } from '../notify'
 import AuthMedia from './AuthMedia'
@@ -392,6 +392,7 @@ export default function AssetGallery({ templates, user }: Props) {
                 <span className="block aspect-square overflow-hidden border border-rule bg-paper-2">
                   <AuthMedia
                     src={assetUrl(asset)}
+                    posterSrc={getAssetThumbUrl(asset.task_id, asset.file_name)}
                     alt={asset.file_name}
                     mime={asset.mime_type}
                     className="h-full w-full object-cover"

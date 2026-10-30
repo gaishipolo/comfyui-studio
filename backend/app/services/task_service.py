@@ -1,4 +1,5 @@
 """任务服务 — 任务提交、执行、状态管理"""
+import logging
 import uuid
 import asyncio
 import json
@@ -15,6 +16,9 @@ from app.engines.base import GenerationResult, TaskStatus
 from app.config import settings
 from app.filestore import save_asset_file
 from app.media import guess_mime
+from app.thumbs import make_video_thumb, thumb_key
+
+logger = logging.getLogger(__name__)
 
 
 # 取消登记表：cancel_task() 写入，执行协程在轮询间隙读。
@@ -386,6 +390,16 @@ class TaskService:
         # S3 / mc mirror 的 / 对不上号。老记录里存的是反斜杠，filestore 读入端两种都吃。
         rel_path = f"{task.id}/{safe_name}"
         save_asset_file(rel_path, file_bytes, content_type=mime)
+
+        # 视频顺手抽一帧当缩略图：素材库卡片不然要拉整个 mp4 当封面。
+        # 抽帧失败（没 ffmpeg / 视频损坏）就当没这回事，不影响素材本身
+        if mime.startswith("video/"):
+            try:
+                thumb = make_video_thumb(file_bytes, Path(safe_name).suffix)
+                if thumb:
+                    save_asset_file(thumb_key(task.id, safe_name), thumb, content_type="image/jpeg")
+            except Exception:  # noqa: BLE001 —— 缩略图是锦上添花，不能拖垮存素材
+                logger.warning("视频缩略图生成失败，跳过：%s", safe_name, exc_info=True)
 
         asset = Asset(
             task_id=task.id,

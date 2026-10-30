@@ -275,6 +275,10 @@ export const batchDownload = async (assetIds: string[]): Promise<Blob> => {
 export const getAssetUrl = (taskId: string, fileName: string) =>
   `${BASE}/tasks/${encodeURIComponent(taskId)}/assets/${encodeURIComponent(fileName)}`
 
+/** 视频缩略图 URL（落盘时抽的一帧）。老素材没有就是 404，AuthMedia 会自动退回原文件 */
+export const getAssetThumbUrl = (taskId: string, fileName: string) =>
+  `${getAssetUrl(taskId, fileName)}/thumb`
+
 // ⚠️ 素材接口需要 JWT，而 <img src> / <a href> **无法携带 Authorization 头**，
 // 直接把 getAssetUrl() 塞进 src 会全部 401（缩略图加载不出来）。
 // 因此带鉴权取文件必须走 fetch，再用 object URL 渲染。

@@ -11,6 +11,8 @@ interface AuthMediaProps {
   loading?: 'lazy' | 'eager'
   /** 视频/音频是否带播放控制条。缩略图给 false（静音只显示首帧），详情面板给 true */
   controls?: boolean
+  /** 视频缩略图地址（后端抽的一帧）。取不到就自动退回「拉视频显示首帧」的老逻辑 */
+  posterSrc?: string
 }
 
 /**
@@ -30,9 +32,12 @@ export default function AuthMedia({
   className,
   loading,
   controls = false,
+  posterSrc,
 }: AuthMediaProps) {
   const [url, setUrl] = useState<string | null>(null)
   const [failed, setFailed] = useState(false)
+  // true = url 是缩略图（静态图），false = url 是原文件
+  const [isPoster, setIsPoster] = useState(false)
 
   useEffect(() => {
     let objectUrl: string | null = null
@@ -40,22 +45,38 @@ export default function AuthMedia({
 
     setUrl(null)
     setFailed(false)
+    setIsPoster(false)
 
-    fetchAssetBlob(src)
-      .then((blob) => {
+    // 有缩略图就先取缩略图：几十 KB vs 整个 mp4。取不到（老素材没抽过帧）再拉原文件
+    const load = async () => {
+      if (posterSrc) {
+        try {
+          const blob = await fetchAssetBlob(posterSrc)
+          if (cancelled) return
+          objectUrl = URL.createObjectURL(blob)
+          setIsPoster(true)
+          setUrl(objectUrl)
+          return
+        } catch {
+          // 静默退回，不打扰用户
+        }
+      }
+      try {
+        const blob = await fetchAssetBlob(src)
         if (cancelled) return
         objectUrl = URL.createObjectURL(blob)
         setUrl(objectUrl)
-      })
-      .catch(() => {
+      } catch {
         if (!cancelled) setFailed(true)
-      })
+      }
+    }
+    load()
 
     return () => {
       cancelled = true
       if (objectUrl) URL.revokeObjectURL(objectUrl)
     }
-  }, [src])
+  }, [src, posterSrc])
 
   // 加载中：保持容器占位（外层 aspect-square 撑住布局），不闪一下再变
   if (!url) {
@@ -70,6 +91,11 @@ export default function AuthMedia({
         文件已丢失
       </div>
     ) : null
+  }
+
+  // 缩略图就是一张 JPEG，直接当图片渲染（不传 controls 时才用，详情面板要真播放器）
+  if (isPoster) {
+    return <img src={url} alt={alt} className={className} loading={loading} />
   }
 
   const kind = (mime ?? '').split('/')[0]

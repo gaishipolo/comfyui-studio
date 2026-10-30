@@ -7,7 +7,7 @@
  *  后端 /api/upload/from-asset 的 mime 前缀白名单同步扩一行。 */
 import { useEffect, useState } from 'react'
 import type { Asset } from '../types'
-import { listAssets, getAssetUrl } from '../api/client'
+import { listAssets, getAssetUrl, getAssetThumbUrl } from '../api/client'
 import AuthMedia from './AuthMedia'
 
 interface Props {
@@ -133,6 +133,7 @@ export default function AssetPickerModal({ kind = 'image', onSelect, onClose }: 
                   <span className="block aspect-square overflow-hidden border border-rule bg-paper-2">
                     <AuthMedia
                       src={getAssetUrl(asset.task_id, asset.file_name)}
+                      posterSrc={getAssetThumbUrl(asset.task_id, asset.file_name)}
                       alt={asset.file_name}
                       mime={asset.mime_type}
                       className="h-full w-full object-cover"

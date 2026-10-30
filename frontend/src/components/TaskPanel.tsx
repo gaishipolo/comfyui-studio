@@ -4,7 +4,7 @@
  * admin 看全部，多一列「创建人」便于分清谁的活。 */
 import { Fragment, useState, useEffect, useCallback } from 'react'
 import type { Task, Asset, User } from '../types'
-import { listTasks, getTaskAssets, retryTask, cancelTask, getAssetUrl, openAssetInNewTab, deleteTask } from '../api/client'
+import { listTasks, getTaskAssets, retryTask, cancelTask, getAssetUrl, getAssetThumbUrl, openAssetInNewTab, deleteTask } from '../api/client'
 import FriendlyError from './FriendlyError'
 import AuthMedia from './AuthMedia'
 
@@ -412,6 +412,7 @@ export default function TaskPanel({ user, onReuseTask }: { user: User; onReuseTa
                                     <div className="aspect-square overflow-hidden border border-rule bg-paper">
                                       <AuthMedia
                                         src={getAssetUrl(task.id, asset.file_name)}
+                                        posterSrc={getAssetThumbUrl(task.id, asset.file_name)}
                                         alt={asset.file_name}
                                         mime={asset.mime_type}
                                         className="h-full w-full object-cover"

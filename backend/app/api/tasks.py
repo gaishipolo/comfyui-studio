@@ -1,7 +1,7 @@
 """任务提交与查询 API"""
 import uuid
 from pathlib import Path
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +18,7 @@ from app.services.task_service import (
 from app.auth import get_current_user
 from app.filestore import delete_asset_file, open_asset
 from app.media import guess_mime
+from app.thumbs import thumb_key
 from app.access import (
     can_modify_task,
     can_view_asset,
@@ -176,6 +177,49 @@ async def download_asset(
             "Content-Length": str(handle.size),
             "Content-Disposition": f'attachment; filename="{safe_name}"',
         },
+    )
+
+
+@router.get("/{task_id}/assets/{filename}/thumb")
+async def download_asset_thumb(
+    task_id: str,
+    filename: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """视频缩略图（落盘时抽的那一帧）。
+
+    鉴权/隔离与文件下载完全一致 —— 缩略图也是素材内容，不能绕过可见性。
+    没有缩略图（老素材 / 抽帧失败）就 404，前端退回「拉视频显示首帧」的老逻辑。
+    """
+    safe_name = Path(filename).name
+    safe_task_id = Path(task_id).name
+
+    result = await db.execute(
+        select(Asset).where(Asset.task_id == safe_task_id, Asset.file_name == safe_name)
+    )
+    asset = result.scalar_one_or_none()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset file not found")
+
+    owners = await task_owner_map(db, {safe_task_id})
+    if not can_view_asset(user, owners.get(safe_task_id, ""), asset.is_shared):
+        raise HTTPException(status_code=404, detail="Asset file not found")
+
+    handle = open_asset(thumb_key(safe_task_id, safe_name))
+    if handle is None:
+        raise HTTPException(status_code=404, detail="Thumbnail not found")
+
+    try:
+        data = b"".join(handle.iter_bytes())
+    finally:
+        handle.close()
+
+    # 缩略图不会变（同一个视频抽同一帧），让浏览器缓存一天，别再反复打后端
+    return Response(
+        content=data,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "private, max-age=86400"},
     )
 
 
