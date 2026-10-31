@@ -274,9 +274,11 @@ class TaskService:
 
                 template = await db.get(Template, task.template_id)
                 if not template:
-                    task.status = "error"
-                    task.error_msg = "Template not found"
-                    await db.commit()
+                    await TaskService._commit_error(
+                        db,
+                        task.id,
+                        "Template not found",
+                    )
                     return
 
                 # 更新状态
@@ -363,10 +365,11 @@ class TaskService:
 
                 template = await db.get(Template, task.template_id)
                 if not template:
-                    task.status = "error"
-                    task.error_msg = "Template not found"
-                    task.finished_at = datetime.utcnow()
-                    await db.commit()
+                    await TaskService._commit_error(
+                        db,
+                        task.id,
+                        "Template not found",
+                    )
                     return
 
                 persisted_task_id = task.id
@@ -419,15 +422,23 @@ class TaskService:
             stale = list(result.scalars().all())
             resumed: list[str] = []
             failed: list[str] = []
-            for t in stale:
-                if t.provider_task_id:
-                    resumed.append(t.id)
-                else:
-                    t.status = "error"
-                    t.error_msg = "服务重启时任务还没提交到引擎，可点击重试"
-                    t.finished_at = datetime.utcnow()
-                    failed.append(t.id)
-            await db.commit()
+            stale_ids = [task.id for task in stale]
+            await db.rollback()
+            async with thumbnail_lifecycle(
+                task_lifecycle_key(task_id) for task_id in stale_ids
+            ):
+                for stale_id in stale_ids:
+                    task = await TaskService._reload_task(db, stale_id)
+                    if task is None or task.status not in {"pending", "running"}:
+                        continue
+                    if task.provider_task_id:
+                        resumed.append(task.id)
+                    else:
+                        task.status = "error"
+                        task.error_msg = "服务重启时任务还没提交到引擎，可点击重试"
+                        task.finished_at = datetime.utcnow()
+                        failed.append(task.id)
+                await db.commit()
 
         # 协程在会话外启动，别让启动流程被长任务卡住
         for task_id in resumed:

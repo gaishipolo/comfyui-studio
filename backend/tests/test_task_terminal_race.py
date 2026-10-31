@@ -21,7 +21,11 @@ from app.engines.base import GenerationResult, TaskStatus  # noqa: E402
 from app.filestore import asset_exists, reset_store  # noqa: E402
 from app.models.models import Asset, Base, Task, Template  # noqa: E402
 from app.services.task_service import TaskService  # noqa: E402
-from app.thumbs import thumb_key  # noqa: E402
+from app.thumbs import (  # noqa: E402
+    task_lifecycle_key,
+    thumb_key,
+    thumbnail_lifecycle,
+)
 from provider_test_utils import lease_acquirer  # noqa: E402
 
 
@@ -294,11 +298,76 @@ async def test_finish_holds_terminal_lock_then_cancel_conflicts() -> None:
         assert asset_count == 0
 
 
+async def missing_template_cancel_race(*, resume: bool) -> None:
+    suffix = "resume-missing" if resume else "execute-missing"
+    async with isolated_database(f"terminal-{suffix}-") as (_engine, sessions):
+        task_id = f"task-{suffix}"
+        async with sessions() as db:
+            db.add(Task(
+                id=task_id,
+                template_id=f"absent-{suffix}",
+                status="running" if resume else "pending",
+                provider_task_id="provider-missing" if resume else "",
+                params={},
+                result={},
+            ))
+            await db.commit()
+
+        provider = FakeProvider(GenerationResult(status=TaskStatus.RUNNING))
+
+        async def cancel_call():
+            async with sessions() as db:
+                return await TaskService.cancel_task(db, task_id)
+
+        with (
+            patch.object(task_service_module, "async_session", sessions),
+            patch.object(
+                task_service_module,
+                "acquire_provider",
+                lease_acquirer(lambda _name: provider),
+            ),
+        ):
+            async with thumbnail_lifecycle([task_lifecycle_key(task_id)]):
+                cancellation = asyncio.create_task(cancel_call())
+                await asyncio.sleep(0.03)
+                completion = asyncio.create_task(
+                    TaskService.resume_task(task_id)
+                    if resume
+                    else TaskService.execute_task(task_id)
+                )
+                await asyncio.sleep(0.05)
+                completion_bypassed_lock = completion.done()
+            cancel_result, completion_result = await asyncio.gather(
+                cancellation,
+                completion,
+                return_exceptions=True,
+            )
+
+        assert not completion_bypassed_lock, "terminal setup failure bypassed task ownership"
+        assert isinstance(cancel_result, Task), cancel_result
+        assert cancel_result.status == "cancelled", cancel_result.status
+        assert completion_result is None, completion_result
+        task, asset_count = await load_state(sessions, task_id)
+        assert task.status == "cancelled", task.status
+        assert task.error_msg == "", task.error_msg
+        assert asset_count == 0
+
+
+async def test_execute_missing_template_serializes_with_cancel() -> None:
+    await missing_template_cancel_race(resume=False)
+
+
+async def test_resume_missing_template_serializes_with_cancel() -> None:
+    await missing_template_cancel_race(resume=True)
+
+
 async def main() -> int:
     tests = [
         test_cancel_wins_while_done_output_save_is_blocked,
         test_cancel_wins_over_provider_error_completion,
         test_finish_holds_terminal_lock_then_cancel_conflicts,
+        test_execute_missing_template_serializes_with_cancel,
+        test_resume_missing_template_serializes_with_cancel,
     ]
     failures: list[str] = []
     for test in tests:
