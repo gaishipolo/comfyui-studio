@@ -43,30 +43,35 @@ async def create_default_admin():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 启动时初始化数据库 + 默认管理员 + 引擎插件 + 收拾上个进程遗留的中断任务
-    await init_db()
-    await create_default_admin()
-    # 插件恢复要在任务收割之前 —— 收割会 resume 遗留任务，得先有引擎可用
-    from app.api.plugins import restore_plugins
-    async with async_session() as db:
-        plugin_results = await restore_plugins(db)
-    loaded = [p["name"] for p in plugin_results if p["ok"]]
-    failed = [p["file"] for p in plugin_results if not p["ok"]]
-    if loaded or failed:
-        print(f"[Plugin] 引擎插件恢复：加载 {loaded or '无'}，失败 {failed or '无'}", flush=True)
-    from app.services.task_service import TaskService
-    # 有 prompt_id 的接回去继续跑（别让 5 分钟的视频白跑），没提交成的标成可重试
-    reaped = await TaskService.reap_stale_tasks()
-    if reaped["resumed"] or reaped["failed"]:
-        print(
-            f"[Task] 启动收拾遗留任务：接回 {len(reaped['resumed'])} 条"
-            f"（继续等引擎出结果），标记失败 {len(reaped['failed'])} 条",
-            flush=True,  # 启动日志要立刻可见：stdout 重定向到文件时是块缓冲，不刷就查不到
-        )
-    print(f"[{settings.APP_NAME}] v{settings.APP_VERSION} started", flush=True)
-    yield
-    # 关闭时清理
-    print("Shutting down...")
+    try:
+        # 启动时初始化数据库 + 默认管理员 + 引擎插件 + 收拾上个进程遗留的中断任务
+        await init_db()
+        await create_default_admin()
+        # 插件恢复要在任务收割之前 —— 收割会 resume 遗留任务，得先有引擎可用
+        from app.api.plugins import restore_plugins
+        async with async_session() as db:
+            plugin_results = await restore_plugins(db)
+        loaded = [p["name"] for p in plugin_results if p["ok"]]
+        failed = [p["file"] for p in plugin_results if not p["ok"]]
+        if loaded or failed:
+            print(f"[Plugin] 引擎插件恢复：加载 {loaded or '无'}，失败 {failed or '无'}", flush=True)
+        from app.services.task_service import TaskService
+        # 有 prompt_id 的接回去继续跑（别让 5 分钟的视频白跑），没提交成的标成可重试
+        reaped = await TaskService.reap_stale_tasks()
+        if reaped["resumed"] or reaped["failed"]:
+            print(
+                f"[Task] 启动收拾遗留任务：接回 {len(reaped['resumed'])} 条"
+                f"（继续等引擎出结果），标记失败 {len(reaped['failed'])} 条",
+                flush=True,  # 启动日志要立刻可见：stdout 重定向到文件时是块缓冲，不刷就查不到
+            )
+        print(f"[{settings.APP_NAME}] v{settings.APP_VERSION} started", flush=True)
+        yield
+    finally:
+        # Provider 持有 httpx 连接池和 WS 重连协程，启动失败时也必须清理
+        from app.engines.factory import close_all_providers
+
+        await close_all_providers()
+        print("Shutting down...")
 
 
 app = FastAPI(

@@ -123,3 +123,11 @@ class GenerationProvider(ABC):
     async def health_check(self) -> bool:
         """引擎健康检查"""
         ...
+
+    async def close(self) -> None:
+        """释放实例持有的资源（httpx 连接池、后台协程等）。默认无操作。
+
+        工厂在替换/注销实例时会调用（factory._retire）—— 不覆写也没关系，
+        但覆写了就必须真能停：ComfyUI 的进度追踪是无限重连的 WS 协程，
+        忘了停就是一条永久泄漏。"""
+        ...
