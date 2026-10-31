@@ -1,7 +1,9 @@
-"""Deterministic safety and cleanup contracts for verify_b5_b6.py."""
+"""Deterministic in-process B5 and fake-service B6 contracts."""
 
 from __future__ import annotations
 
+import asyncio
+import importlib.util
 import json
 import os
 import subprocess
@@ -9,6 +11,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -34,16 +37,17 @@ def valid_template() -> dict:
     }
 
 
-class FakeBackend:
-    def __init__(self, *, b5_count: int = 1, b6_count: int = 1, fixture=None):
-        self.b5_count = b5_count
+class FakeB6Service:
+    def __init__(self, *, b6_count: int = 1, fixture=None):
         self.b6_count = b6_count
         self.fixture = fixture or valid_template()
-        self.b5_posts = 0
+        self.login_posts = 0
+        self.template_gets = 0
+        self.b5_template_posts = 0
+        self.generic_task_posts = 0
         self.b6_posts = 0
         self.cancelled: list[str] = []
         self.deleted: list[str] = []
-        self.deleted_templates: list[str] = []
         self.tasks: dict[str, str] = {}
         outer = self
 
@@ -67,16 +71,8 @@ class FakeBackend:
 
             def do_GET(self):
                 path = urlsplit(self.path).path
-                if path == "/api/engines":
-                    self.send_json(
-                        200,
-                        [
-                            {"name": "comfyui", "status": "connected"},
-                            {"name": "generic_api", "status": "disconnected"},
-                        ],
-                    )
-                    return
                 if path == "/api/templates":
+                    outer.template_gets += 1
                     self.send_json(200, [outer.fixture])
                     return
                 if path.startswith("/api/tasks/") and path.endswith("/assets"):
@@ -97,9 +93,9 @@ class FakeBackend:
                             "id": task_id,
                             "status": status,
                             "progress": 0.0,
-                            "params": {"prompt": "fake"},
+                            "params": {"prompt": "fake B6"},
                             "provider_task_id": "fake-provider-id",
-                            "error_msg": "fake generic failure" if status == "error" else "",
+                            "error_msg": "fake B6 terminal failure" if status == "error" else "",
                         },
                     )
                     return
@@ -109,32 +105,26 @@ class FakeBackend:
                 path = urlsplit(self.path).path
                 body = self.read_json()
                 if path == "/api/auth/login":
+                    outer.login_posts += 1
                     self.send_json(200, {"access_token": "fake-admin-token"})
                     return
                 if path == "/api/templates":
-                    self.send_json(200, {"id": "b5-template", **body})
+                    outer.b5_template_posts += 1
+                    self.send_json(500, {"detail": "B5 must not use service templates"})
                     return
                 if path == "/api/tasks":
-                    template_id = body.get("template_id")
-                    if template_id == "b5-template":
-                        outer.b5_posts += 1
-                        ids = [f"b5-task-{index}" for index in range(outer.b5_count)]
-                        status = "running" if outer.b5_count > 1 else "error"
-                    else:
-                        outer.b6_posts += 1
-                        ids = [f"b6-task-{index}" for index in range(outer.b6_count)]
-                        status = "running" if outer.b6_count > 1 else "error"
+                    if body.get("template_id") != TEMPLATE_ID:
+                        outer.generic_task_posts += 1
+                        self.send_json(500, {"detail": "B5 must not use service tasks"})
+                        return
+                    outer.b6_posts += 1
+                    ids = [f"b6-task-{index}" for index in range(outer.b6_count)]
+                    status = "running" if outer.b6_count > 1 else "error"
                     for task_id in ids:
                         outer.tasks[task_id] = status
                     self.send_json(
                         200,
-                        [
-                            {
-                                "id": task_id,
-                                "created_by": "fake-admin-id",
-                            }
-                            for task_id in ids
-                        ],
+                        [{"id": task_id, "created_by": "fake-admin-id"} for task_id in ids],
                     )
                     return
                 if path.endswith("/cancel"):
@@ -151,11 +141,6 @@ class FakeBackend:
                     task_id = path.rsplit("/", 1)[-1]
                     outer.deleted.append(task_id)
                     self.send_json(200, {"id": task_id, "message": "Task deleted"})
-                    return
-                if path.startswith("/api/templates/"):
-                    template_id = path.rsplit("/", 1)[-1]
-                    outer.deleted_templates.append(template_id)
-                    self.send_json(200, {"message": "Template deleted"})
                     return
                 self.send_json(404, {"detail": "not found"})
 
@@ -176,28 +161,28 @@ class FakeBackend:
         self.thread.join(timeout=5)
 
 
-def unused_loopback_origin() -> str:
-    server = ThreadingHTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
-    port = server.server_address[1]
-    server.server_close()
-    return f"http://127.0.0.1:{port}"
-
-
-def run_verifier(fake: FakeBackend, generic_origin: str) -> subprocess.CompletedProcess[str]:
-    with tempfile.TemporaryDirectory(prefix="task7-b5-contract-") as raw_dir:
+def run_verifier(
+    fake: FakeB6Service,
+    *,
+    template_id: str | None = TEMPLATE_ID,
+) -> subprocess.CompletedProcess[str]:
+    with tempfile.TemporaryDirectory(prefix="task7-b6-contract-") as raw_dir:
         root = Path(raw_dir)
         env = os.environ.copy()
+        env.pop("COMFYUI_STUDIO_TEST_GENERIC_BASE_URL", None)
+        env.pop("GENERIC_API_BASE_URL", None)
+        if template_id is None:
+            env.pop("COMFYUI_STUDIO_B5_B6_TEMPLATE_ID", None)
+        else:
+            env["COMFYUI_STUDIO_B5_B6_TEMPLATE_ID"] = template_id
         env.update(
             {
                 "COMFYUI_STUDIO_TEST_BASE_URL": fake.origin,
-                "COMFYUI_STUDIO_B5_B6_TEMPLATE_ID": TEMPLATE_ID,
-                "COMFYUI_STUDIO_TEST_GENERIC_BASE_URL": generic_origin,
-                "GENERIC_API_BASE_URL": generic_origin,
-                "DATABASE_URL": f"sqlite+aiosqlite:///{root / 'workbench.db'}",
+                "DATABASE_URL": f"sqlite+aiosqlite:///{root / 'unused-service.db'}",
                 "STORAGE_BACKEND": "local",
-                "STORAGE_DIR": str(root / "storage"),
-                "WORKFLOW_DIR": str(root / "workflows"),
-                "SECRET_KEY": "task7-b5-contract-secret",
+                "STORAGE_DIR": str(root / "unused-storage"),
+                "WORKFLOW_DIR": str(root / "unused-workflows"),
+                "SECRET_KEY": "task7-b6-contract-secret",
             }
         )
         return subprocess.run(
@@ -211,61 +196,107 @@ def run_verifier(fake: FakeBackend, generic_origin: str) -> subprocess.Completed
         )
 
 
+def load_verifier_module():
+    name = f"verify_b5_b6_contract_{uuid.uuid4().hex}"
+    spec = importlib.util.spec_from_file_location(name, VERIFIER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 class VerifyB5B6ContractTests(unittest.TestCase):
-    def test_extra_b5_task_ids_are_all_cancelled_and_deleted(self):
-        with FakeBackend(b5_count=2) as fake:
-            result = run_verifier(fake, unused_loopback_origin())
+    def test_b5_runs_in_process_without_service(self):
+        with tempfile.TemporaryDirectory(prefix="task7-b5-import-") as raw_dir:
+            previous = {
+                name: os.environ.get(name)
+                for name in ("DATABASE_URL", "STORAGE_DIR", "WORKFLOW_DIR")
+            }
+            os.environ.update(
+                {
+                    "DATABASE_URL": f"sqlite+aiosqlite:///{Path(raw_dir) / 'unused.db'}",
+                    "STORAGE_DIR": str(Path(raw_dir) / "unused-storage"),
+                    "WORKFLOW_DIR": str(Path(raw_dir) / "unused-workflows"),
+                }
+            )
+            try:
+                module = load_verifier_module()
+                self.assertTrue(
+                    hasattr(module, "verify_b5_in_process"),
+                    "verify_b5_in_process contract is missing",
+                )
+                reports = []
+
+                def report(label, condition, detail=""):
+                    reports.append((label, bool(condition), detail))
+
+                self.assertTrue(asyncio.run(module.verify_b5_in_process(report)))
+                self.assertTrue(reports)
+                self.assertTrue(
+                    all(condition for _label, condition, _detail in reports),
+                    reports,
+                )
+            finally:
+                for name, value in previous.items():
+                    if value is None:
+                        os.environ.pop(name, None)
+                    else:
+                        os.environ[name] = value
+
+    def test_main_uses_no_b5_service_routes(self):
+        with FakeB6Service() as fake:
+            result = run_verifier(fake)
 
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(fake.b6_posts, 0, result.stdout + result.stderr)
-        self.assertEqual(set(fake.cancelled), {"b5-task-0", "b5-task-1"})
-        self.assertEqual(set(fake.deleted), {"b5-task-0", "b5-task-1"})
-
-    def test_extra_b6_task_ids_are_all_deleted(self):
-        with FakeBackend(b6_count=2) as fake:
-            result = run_verifier(fake, unused_loopback_origin())
-
-        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(fake.b5_posts, 1)
+        self.assertIn("B5 in-process", result.stdout)
+        self.assertEqual(fake.b5_template_posts, 0)
+        self.assertEqual(fake.generic_task_posts, 0)
         self.assertEqual(fake.b6_posts, 1)
-        self.assertTrue({"b6-task-0", "b6-task-1"}.issubset(set(fake.cancelled)))
-        self.assertTrue({"b6-task-0", "b6-task-1"}.issubset(set(fake.deleted)))
 
-    def test_fixture_mismatch_fails_before_any_task_submission(self):
+    def test_extra_b6_task_ids_are_all_cancelled_and_deleted(self):
+        with FakeB6Service(b6_count=2) as fake:
+            result = run_verifier(fake)
+
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(fake.b5_template_posts, 0)
+        self.assertEqual(fake.generic_task_posts, 0)
+        self.assertEqual(fake.b6_posts, 1)
+        self.assertEqual(set(fake.cancelled), {"b6-task-0", "b6-task-1"})
+        self.assertEqual(set(fake.deleted), {"b6-task-0", "b6-task-1"})
+
+    def test_fixture_mapping_mismatch_fails_before_b6_submission(self):
         fixture = valid_template()
         fixture["param_mapping"] = {**fixture["param_mapping"], "width": "999.inputs.value"}
-        with FakeBackend(fixture=fixture) as fake:
-            result = run_verifier(fake, unused_loopback_origin())
+        with FakeB6Service(fixture=fixture) as fake:
+            result = run_verifier(fake)
 
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(fake.b5_posts, 0, result.stdout + result.stderr)
-        self.assertEqual(fake.b6_posts, 0, result.stdout + result.stderr)
+        self.assertEqual(fake.template_gets, 1)
+        self.assertEqual(fake.b6_posts, 0)
+        self.assertEqual(fake.b5_template_posts, 0)
+        self.assertEqual(fake.generic_task_posts, 0)
 
     def test_name_match_cannot_replace_exact_template_id(self):
         fixture = valid_template()
         fixture["id"] = "different-template-id"
-        with FakeBackend(fixture=fixture) as fake:
-            result = run_verifier(fake, unused_loopback_origin())
+        with FakeB6Service(fixture=fixture) as fake:
+            result = run_verifier(fake)
 
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(fake.b5_posts, 0, result.stdout + result.stderr)
-        self.assertEqual(fake.b6_posts, 0, result.stdout + result.stderr)
+        self.assertEqual(fake.template_gets, 1)
+        self.assertEqual(fake.b6_posts, 0)
+        self.assertEqual(fake.b5_template_posts, 0)
+        self.assertEqual(fake.generic_task_posts, 0)
 
-    def test_non_loopback_generic_origin_refuses_before_b5(self):
-        with FakeBackend() as fake:
-            result = run_verifier(fake, "https://example.com:443")
-
-        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(fake.b5_posts, 0, result.stdout + result.stderr)
-        self.assertEqual(fake.b6_posts, 0, result.stdout + result.stderr)
-
-    def test_reachable_loopback_generic_origin_refuses_before_b5(self):
-        with FakeBackend() as fake:
-            result = run_verifier(fake, fake.origin)
+    def test_missing_explicit_template_id_refuses_before_service(self):
+        with FakeB6Service() as fake:
+            result = run_verifier(fake, template_id=None)
 
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(fake.b5_posts, 0, result.stdout + result.stderr)
-        self.assertEqual(fake.b6_posts, 0, result.stdout + result.stderr)
+        self.assertEqual(fake.login_posts, 0)
+        self.assertEqual(fake.template_gets, 0)
+        self.assertEqual(fake.b6_posts, 0)
+        self.assertEqual(fake.b5_template_posts, 0)
+        self.assertEqual(fake.generic_task_posts, 0)
 
 
 if __name__ == "__main__":

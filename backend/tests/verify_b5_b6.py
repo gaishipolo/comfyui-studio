@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """B5/B6/B11 verification with real ComfyUI and deterministic cleanup."""
 
+import asyncio
 import io
-import ipaddress
 import json
 import os
-import socket
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -15,10 +15,16 @@ import uuid
 from pathlib import Path
 
 from PIL import Image
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from app.database import Base
+from app.engines.base import GenerationResult, TaskStatus
 from app.filestore import asset_exists
+from app.models.models import Task, Template
+from app.services import task_service as task_service_module
+from app.services.task_service import TaskService
 from app.thumbs import thumb_key
 from test_env import SERVICE_BASE_URL
 
@@ -26,7 +32,6 @@ from test_env import SERVICE_BASE_URL
 BASE = SERVICE_BASE_URL
 TERMINAL_STATUSES = {"done", "error", "cancelled"}
 TEMPLATE_ID_ENV = "COMFYUI_STUDIO_B5_B6_TEMPLATE_ID"
-GENERIC_URL_ENV = "COMFYUI_STUDIO_TEST_GENERIC_BASE_URL"
 EXPECTED_WORKFLOW_FILE = "image_flux2_klein_text_to_image.json"
 EXPECTED_PARAM_MAPPING = {
     "prompt": "76.inputs.value",
@@ -80,72 +85,11 @@ def req_bytes(method, path, token=None):
         )
 
 
-def required_environment() -> tuple[str, str]:
+def required_template_id() -> str:
     template_id = os.environ.get(TEMPLATE_ID_ENV, "").strip()
-    generic_url = os.environ.get(GENERIC_URL_ENV, "").strip().rstrip("/")
-    backend_generic_url = os.environ.get("GENERIC_API_BASE_URL", "").strip().rstrip("/")
     if not template_id:
         raise ValueError(f"必须显式设置 {TEMPLATE_ID_ENV}")
-    if not generic_url:
-        raise ValueError(f"必须显式设置 {GENERIC_URL_ENV}")
-    if backend_generic_url != generic_url:
-        raise ValueError(
-            f"GENERIC_API_BASE_URL 必须与 {GENERIC_URL_ENV} 完全一致，"
-            "并传给同一个隔离后端进程"
-        )
-    return template_id, generic_url
-
-
-def require_unreachable_loopback_origin(value: str) -> None:
-    try:
-        parsed = urllib.parse.urlsplit(value)
-        port = parsed.port
-    except ValueError as exc:
-        raise ValueError(f"测试 generic endpoint 非法: {value!r}") from exc
-    if (
-        parsed.scheme not in {"http", "https"}
-        or not parsed.hostname
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.query
-        or parsed.fragment
-        or parsed.path not in {"", "/"}
-    ):
-        raise ValueError(f"测试 generic endpoint 必须是纯 HTTP(S) origin: {value!r}")
-
-    hostname = parsed.hostname.lower()
-    try:
-        addresses = [ipaddress.ip_address(hostname)]
-    except ValueError:
-        if hostname != "localhost":
-            raise ValueError(
-                f"拒绝非 loopback generic endpoint，避免误提交到真实服务: {value!r}"
-            )
-        try:
-            addresses = [
-                ipaddress.ip_address(sockaddr[0])
-                for _family, _type, _proto, _canonname, sockaddr in socket.getaddrinfo(
-                    hostname,
-                    port or (443 if parsed.scheme == "https" else 80),
-                    type=socket.SOCK_STREAM,
-                )
-            ]
-        except OSError as exc:
-            raise ValueError(f"无法解析 loopback generic endpoint: {value!r}") from exc
-    if not addresses or not all(address.is_loopback for address in addresses):
-        raise ValueError(
-            f"拒绝非 loopback generic endpoint，避免误提交到真实服务: {value!r}"
-        )
-
-    target_port = port or (443 if parsed.scheme == "https" else 80)
-    try:
-        with socket.create_connection((hostname, target_port), timeout=0.5):
-            pass
-    except OSError:
-        return
-    raise ValueError(
-        f"测试 generic endpoint 当前可连接，无法证明 B5 不会触达服务: {value!r}"
-    )
+    return template_id
 
 
 def returned_task_ids(payload) -> list[str]:
@@ -158,6 +102,161 @@ def returned_task_ids(payload) -> list[str]:
     ]
 
 
+class _B5FakeGenericProvider:
+    def __init__(self):
+        self.submit_calls: list[tuple[dict, dict]] = []
+        self.status_calls: list[str] = []
+        self.last_request = None
+
+    async def submit(self, ctx: dict, params: dict) -> str:
+        self.submit_calls.append((dict(ctx), dict(params)))
+        self.last_request = {"kind": "B5 in-process fake", "params": dict(params)}
+        return "b5-in-process-prompt"
+
+    async def get_status(self, task_id: str) -> GenerationResult:
+        self.status_calls.append(task_id)
+        return GenerationResult(
+            status=TaskStatus.ERROR,
+            error="B5 synthetic generic terminal result",
+        )
+
+
+async def verify_b5_in_process(check) -> bool:
+    provider = _B5FakeGenericProvider()
+    original_session_factory = task_service_module.async_session
+    original_get_provider = task_service_module.get_provider
+    conditions: list[bool] = []
+    database_removed = False
+
+    def verify(label, condition, detail=""):
+        conditions.append(bool(condition))
+        check(label, condition, detail)
+
+    with tempfile.TemporaryDirectory(prefix="task7-b5-in-process-") as raw_dir:
+        db_path = Path(raw_dir) / "b5.db"
+        engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+        session_factory = async_sessionmaker(
+            engine,
+            class_=AsyncSession,
+            expire_on_commit=False,
+        )
+        template_id = uuid.uuid4().hex
+        task_id = uuid.uuid4().hex
+
+        def fake_get_provider(engine_name: str):
+            verify(
+                "B5 in-process 只请求 generic_api Provider",
+                engine_name == "generic_api",
+                repr(engine_name),
+            )
+            return provider
+
+        try:
+            async with engine.begin() as connection:
+                await connection.run_sync(Base.metadata.create_all)
+            async with session_factory() as db:
+                db.add(
+                    Template(
+                        id=template_id,
+                        name="B5 in-process generic fixture",
+                        category="image",
+                        engine="generic_api",
+                        workflow_file="",
+                        input_schema={"fields": []},
+                        param_mapping={},
+                        output_config={},
+                        is_active=False,
+                    )
+                )
+                db.add(
+                    Task(
+                        id=task_id,
+                        template_id=template_id,
+                        created_by="b5-in-process",
+                        batch_id=uuid.uuid4().hex,
+                        status="pending",
+                        progress=0.0,
+                        params={"prompt": "B5 in-process"},
+                        result={},
+                        error_msg="",
+                    )
+                )
+                await db.commit()
+
+            task_service_module.async_session = session_factory
+            task_service_module.get_provider = fake_get_provider
+            await TaskService.execute_task(task_id)
+
+            async with session_factory() as db:
+                task = await db.get(Task, task_id)
+                template = await db.get(Template, template_id)
+                ctx = provider.submit_calls[0][0] if provider.submit_calls else {}
+                params = provider.submit_calls[0][1] if provider.submit_calls else {}
+                error = task.error_msg if task else ""
+                verify("B5 in-process 模板 workflow_file 为空", template.workflow_file == "")
+                verify("B5 in-process submit 被调用一次", len(provider.submit_calls) == 1)
+                verify(
+                    "B5 in-process submit context 正确且 workflow/mapping 为空",
+                    ctx
+                    == {
+                        "_type": "image",
+                        "_capability": "image",
+                        "_template_name": "B5 in-process generic fixture",
+                        "_workflow": {},
+                        "_param_mapping": {},
+                    },
+                    repr(ctx),
+                )
+                verify("B5 in-process 参数到达 Provider", params == {"prompt": "B5 in-process"})
+                verify("B5 in-process 状态查询使用 submit ID", provider.status_calls == ["b5-in-process-prompt"])
+                verify(
+                    "B5 in-process synthetic prompt ID 已持久化",
+                    task is not None and task.provider_task_id == "b5-in-process-prompt",
+                    task.provider_task_id if task else "missing task",
+                )
+                verify(
+                    "B5 in-process 终态失败来自 fake result",
+                    task is not None
+                    and task.status == "error"
+                    and "B5 synthetic generic terminal result" in error,
+                    error,
+                )
+                verify(
+                    "B5 in-process 失败与 workflow/IsADirectory 无关",
+                    "workflow" not in error.lower() and "isadirectory" not in error.lower(),
+                    error,
+                )
+                verify(
+                    "B5 in-process 请求快照持久化",
+                    (task.result or {}).get("_request", {}).get("kind")
+                    == "B5 in-process fake",
+                    repr(task.result if task else None),
+                )
+        except Exception as exc:  # noqa: BLE001 - aggregate verifier reports the failure
+            verify("B5 in-process 执行不抛异常", False, f"{type(exc).__name__}: {exc}")
+        finally:
+            task_service_module.async_session = original_session_factory
+            task_service_module.get_provider = original_get_provider
+            await engine.dispose()
+            for candidate in (
+                db_path,
+                Path(f"{db_path}-wal"),
+                Path(f"{db_path}-shm"),
+            ):
+                candidate.unlink(missing_ok=True)
+            database_removed = not any(
+                candidate.exists()
+                for candidate in (
+                    db_path,
+                    Path(f"{db_path}-wal"),
+                    Path(f"{db_path}-shm"),
+                )
+            )
+
+    verify("B5 in-process 临时 SQLite 已删除", database_removed)
+    return bool(conditions) and all(conditions)
+
+
 def main() -> int:
     ok = True
 
@@ -166,9 +265,11 @@ def main() -> int:
         ok &= bool(condition)
         print(f"{'OK  ' if condition else 'FAIL'} {label}" + (f" {detail}" if detail else ""))
 
+    if not asyncio.run(verify_b5_in_process(check)):
+        return 1
+
     try:
-        expected_template_id, generic_url = required_environment()
-        require_unreachable_loopback_origin(generic_url)
+        expected_template_id = required_template_id()
     except ValueError as exc:
         print(f"安全检查失败: {exc}")
         return 1
@@ -183,28 +284,9 @@ def main() -> int:
         return 1
     token = login["access_token"]
 
-    b5_template_id = None
     created_task_ids: list[str] = []
     generated_assets: dict[str, list[dict]] = {}
     try:
-        code, engines = req("GET", "/api/engines", token=token)
-        generic = next(
-            (
-                item
-                for item in engines
-                if isinstance(item, dict) and item.get("name") == "generic_api"
-            ),
-            None,
-        ) if code == 200 and isinstance(engines, list) else None
-        generic_disconnected = (
-            generic is not None and generic.get("status") == "disconnected"
-        )
-        check(
-            "B5 generic_api 已认证确认 disconnected",
-            generic_disconnected,
-            f"HTTP {code} {generic}",
-        )
-
         code, templates = req(
             "GET", "/api/templates?include_inactive=true", token=token
         )
@@ -230,82 +312,8 @@ def main() -> int:
         }
         for label, condition in fixture_checks.items():
             check(f"B6 fixture {label}", condition)
-        if not generic_disconnected or flux is None or not all(fixture_checks.values()):
+        if flux is None or not all(fixture_checks.values()):
             return 1
-
-        b5_name = f"验证用-B5-generic-{uuid.uuid4().hex[:8]}"
-        code, template = req(
-            "POST",
-            "/api/templates",
-            token=token,
-            json_body={
-                "name": b5_name,
-                "category": "image",
-                "engine": "generic_api",
-                "workflow_file": "",
-                "input_schema": {
-                    "fields": [{
-                        "name": "prompt",
-                        "label": "提示词",
-                        "type": "textarea",
-                        "required": True,
-                    }],
-                },
-                "param_mapping": {},
-            },
-        )
-        check("B5 创建 generic_api 模板", code == 200, f"HTTP {code}")
-        if code != 200:
-            return 1
-        b5_template_id = template["id"]
-
-        try:
-            require_unreachable_loopback_origin(generic_url)
-        except ValueError as exc:
-            check("B5 提交前 generic endpoint 仍不可达", False, str(exc))
-            return 1
-
-        code, tasks = req(
-            "POST",
-            "/api/tasks",
-            token=token,
-            json_body={
-                "template_id": b5_template_id,
-                "params": {"prompt": "test"},
-                "batch_count": 1,
-            },
-        )
-        b5_task_ids = returned_task_ids(tasks)
-        created_task_ids.extend(b5_task_ids)
-        b5_response_ok = (
-            code in {200, 201}
-            and isinstance(tasks, list)
-            and len(tasks) == 1
-            and len(b5_task_ids) == 1
-        )
-        check(
-            "B5 提交任务且只返回 1 个任务",
-            b5_response_ok,
-            f"HTTP {code} returned={len(tasks) if isinstance(tasks, list) else 'non-list'} "
-            f"owned_ids={b5_task_ids}",
-        )
-        if not b5_response_ok:
-            return 1
-        b5_task_id = b5_task_ids[0]
-        time.sleep(4)
-        code, task = req("GET", f"/api/tasks/{b5_task_id}", token=token)
-        error = task.get("error_msg", "") if isinstance(task, dict) else ""
-        b5_ok = (
-            code == 200
-            and task.get("status") == "error"
-            and "workflow" not in error.lower()
-            and "IsADirectory" not in error
-        )
-        check(
-            "B5 generic_api 无 workflow 可执行",
-            b5_ok,
-            f"status={task.get('status')} err={error[:80]!r}",
-        )
 
         prompt_uuid = str(uuid.uuid4())
         code, tasks = req(
@@ -478,9 +486,6 @@ def main() -> int:
                     and not asset_exists(thumb_key(task_id, asset["file_name"])),
                     asset["file_path"],
                 )
-        if b5_template_id:
-            code, body = req("DELETE", f"/api/templates/{b5_template_id}", token=token)
-            check("清理 B5 模板", code in {200, 404}, f"HTTP {code} {body}")
 
     print("\n" + ("ALL PASS" if ok else "SOME FAILED"))
     return 0 if ok else 1
