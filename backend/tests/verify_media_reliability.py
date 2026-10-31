@@ -6,6 +6,7 @@ database/auth boundaries and the external MinIO client are replaced.
 from __future__ import annotations
 
 import asyncio
+import gc
 import io
 import logging
 import sys
@@ -146,6 +147,46 @@ class BlockingLocalFileStore(TrackingLocalFileStore):
             if not self.release_read.wait(timeout=5):
                 raise AssertionError("thumbnail source read was never released")
         return super().read_bytes(file_path)
+
+
+class BlockingThumbnailSaveStore(TrackingLocalFileStore):
+    def __init__(self, derived_key: str) -> None:
+        super().__init__()
+        self.derived_key = derived_key
+        self.save_started = threading.Event()
+        self.release_save = threading.Event()
+
+    def save(
+        self,
+        file_path: str,
+        data: bytes,
+        content_type: str | None = None,
+    ) -> None:
+        if self._key(file_path) == self.derived_key:
+            self.save_started.set()
+            if not self.release_save.wait(timeout=5):
+                raise AssertionError("thumbnail save was never released")
+        super().save(file_path, data, content_type)
+
+
+class StaleMissLocalFileStore(TrackingLocalFileStore):
+    def __init__(self, derived_key: str) -> None:
+        super().__init__()
+        self.derived_key = derived_key
+        self.stale_next_open = False
+        self.stale_miss_observed = threading.Event()
+        self.release_stale_miss = threading.Event()
+
+    def open(self, file_path: str) -> ObjectHandle | None:
+        key = self._key(file_path)
+        if self.stale_next_open and key == self.derived_key:
+            self.stale_next_open = False
+            self.open_calls.append(key)
+            self.stale_miss_observed.set()
+            if not self.release_stale_miss.wait(timeout=5):
+                raise AssertionError("stale thumbnail miss was never released")
+            return None
+        return super().open(file_path)
 
 
 @contextmanager
@@ -378,14 +419,13 @@ async def call_thumb(
     *,
     headers: dict[str, str] | None = None,
 ):
-    with patched(tasks_api, task_owner_map=owner_map):
-        return await tasks_api.download_asset_thumb(
-            asset.task_id,
-            asset.file_name,
-            request=request(headers),
-            user=ADMIN,
-            db=ThumbDB(asset),
-        )
+    return await tasks_api.download_asset_thumb(
+        asset.task_id,
+        asset.file_name,
+        request=request(headers),
+        user=ADMIN,
+        db=ThumbDB(asset),
+    )
 
 
 async def response_bytes(response) -> bytes:
@@ -416,6 +456,14 @@ async def wait_until(predicate, timeout: float = 2.0) -> None:
             await asyncio.sleep(0)
 
     await asyncio.wait_for(poll(), timeout=timeout)
+
+
+async def completed_while_generation_blocked(task: asyncio.Task) -> bool:
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=0.25)
+    except TimeoutError:
+        return False
+    return True
 
 
 def thumbnail_task_registries() -> list[dict]:
@@ -464,6 +512,39 @@ async def test_image_thumb_has_no_in_memory_lru() -> None:
         if callable(value) and hasattr(value, "cache_info")
     ]
     assert not cached, cached
+
+
+async def test_lifecycle_lock_registry_releases_unused_keys() -> None:
+    lifecycle = getattr(thumbs, "thumbnail_lifecycle")
+    for index in range(20):
+        async with lifecycle([f"transient/thumb_{index}.jpg"]):
+            pass
+    gc.collect()
+    await asyncio.sleep(0)
+    registry = getattr(thumbs, "_thumbnail_lifecycle_locks")
+    assert not registry, list(registry)
+
+
+async def test_lifecycle_keys_are_acquired_in_sorted_order() -> None:
+    lifecycle = getattr(thumbs, "thumbnail_lifecycle")
+    entered: list[str] = []
+
+    async def own(keys: list[str], label: str) -> None:
+        async with lifecycle(keys):
+            entered.append(label)
+
+    async with lifecycle(["ordering/a"]):
+        first = asyncio.create_task(
+            own(["ordering/a", "ordering/b"], "first")
+        )
+        await asyncio.sleep(0)
+        second = asyncio.create_task(
+            own(["ordering/b", "ordering/a"], "second")
+        )
+        await asyncio.sleep(0)
+
+    await asyncio.wait_for(asyncio.gather(first, second), timeout=1)
+    assert entered == ["first", "second"], entered
 
 
 async def test_image_generation_persists_and_uses_worker_thread() -> None:
@@ -524,6 +605,31 @@ async def test_concurrent_requests_generate_once() -> None:
         assert store.save_calls.count(derived_key) == 1, store.save_calls
 
 
+async def test_stale_second_miss_does_not_regenerate_thumbnail() -> None:
+    source_key = "task-stale/source.png"
+    derived_key = "task-stale/thumb_source.png.jpg"
+    asset = make_asset("asset-stale", "task-stale", "source.png", "image/png")
+    store = StaleMissLocalFileStore(derived_key)
+    with temporary_local_store(store):
+        seed_local(store, source_key, patterned_png((500, 250)))
+        first = await call_thumb(asset)
+        assert isinstance(first, FileResponse), type(first)
+        await wait_until(
+            lambda: all(not registry for registry in thumbnail_task_registries())
+        )
+
+        store.stale_next_open = True
+        second_task = asyncio.create_task(call_thumb(asset))
+        await wait_for_thread_event(store.stale_miss_observed)
+        assert all(not registry for registry in thumbnail_task_registries())
+        store.release_stale_miss.set()
+        second = await second_task
+
+        assert isinstance(second, FileResponse), type(second)
+        assert store.read_calls.count(source_key) == 1, store.read_calls
+        assert store.save_calls.count(derived_key) == 1, store.save_calls
+
+
 async def test_cancelled_waiter_does_not_cancel_or_leak_generation() -> None:
     source_key = "task-cancel/source.png"
     derived_key = "task-cancel/thumb_source.png.jpg"
@@ -534,21 +640,24 @@ async def test_cancelled_waiter_does_not_cancel_or_leak_generation() -> None:
         cancelled = asyncio.create_task(call_thumb(asset))
         await wait_for_thread_event(store.read_started)
         survivor = asyncio.create_task(call_thumb(asset))
-        await wait_until(lambda: store.open_calls.count(derived_key) >= 2)
+        await asyncio.sleep(0)
         cancelled.cancel()
+        await asyncio.sleep(0)
+        retained_ownership = not cancelled.done()
+        store.release_read.set()
         try:
             await cancelled
         except asyncio.CancelledError:
             pass
         else:
             raise AssertionError("request cancellation was not propagated")
-        store.release_read.set()
         response = await survivor
         assert isinstance(response, FileResponse), type(response)
         await wait_until(
             lambda: all(not registry for registry in thumbnail_task_registries())
         )
         assert thumbnail_task_registries(), "no strongly held thumbnail task registry"
+        assert retained_ownership, "cancelled request released lifecycle ownership early"
         assert store.read_calls.count(source_key) == 1, store.read_calls
         assert store.save_calls.count(derived_key) == 1, store.save_calls
 
@@ -591,7 +700,10 @@ async def test_video_without_thumbnail_never_reads_source() -> None:
         store = raw_store
         assert isinstance(store, TrackingLocalFileStore)
         seed_local(store, source_key, b"video source bytes")
-        await expect_http(call_thumb(asset), 404)
+        await expect_http(
+            call_thumb(asset, headers={"If-None-Match": '"asset-video"'}),
+            404,
+        )
         assert source_key not in store.read_calls, store.read_calls
         assert not store.save_calls, store.save_calls
 
@@ -603,7 +715,10 @@ async def test_audio_never_generates_thumbnail() -> None:
         store = raw_store
         assert isinstance(store, TrackingLocalFileStore)
         seed_local(store, source_key, b"audio source bytes")
-        await expect_http(call_thumb(asset), 404)
+        await expect_http(
+            call_thumb(asset, headers={"If-None-Match": '"asset-audio"'}),
+            404,
+        )
         assert source_key not in store.read_calls, store.read_calls
         assert not store.save_calls, store.save_calls
 
@@ -719,6 +834,31 @@ async def test_asset_delete_removes_source_and_thumbnail() -> None:
         assert db.deleted == [asset] and db.commits == 1
 
 
+async def test_asset_delete_cannot_race_thumbnail_save() -> None:
+    asset = make_asset("asset-delete-race", "task-delete-race", "source.png", "image/png")
+    source_key = asset.file_path
+    derived_key = "task-delete-race/thumb_source.png.jpg"
+    db = AssetDeleteDB(asset)
+    store = BlockingThumbnailSaveStore(derived_key)
+    with temporary_local_store(store):
+        seed_local(store, source_key, patterned_png((500, 250)))
+        thumbnail_request = asyncio.create_task(call_thumb(asset))
+        await wait_for_thread_event(store.save_started)
+        deletion = asyncio.create_task(
+            assets_api.delete_asset(asset.id, user=ADMIN, db=db)
+        )
+        try:
+            completed_early = await completed_while_generation_blocked(deletion)
+        finally:
+            store.release_save.set()
+        await thumbnail_request
+        await deletion
+
+        assert not completed_early, "asset deletion committed before generation settled"
+        assert not store.exists(source_key)
+        assert not store.exists(derived_key), "thumbnail reappeared after asset deletion"
+
+
 async def test_task_delete_removes_sources_and_thumbnails() -> None:
     task = make_task("task-delete")
     asset = make_asset("asset-task-delete", task.id, "source.png", "image/png")
@@ -737,6 +877,30 @@ async def test_task_delete_removes_sources_and_thumbnails() -> None:
         assert body["files_removed"] == 1 and body["file_errors"] == []
         assert body["thumbnails_removed"] == 1 and body["thumbnail_errors"] == []
         assert db.deleted == [asset, task] and db.commits == 1
+
+
+async def test_task_delete_cannot_race_thumbnail_save() -> None:
+    task = make_task("task-delete-race")
+    asset = make_asset("asset-task-delete-race", task.id, "source.png", "image/png")
+    source_key = asset.file_path
+    derived_key = "task-delete-race/thumb_source.png.jpg"
+    db = TaskMutationDB(task, [asset])
+    store = BlockingThumbnailSaveStore(derived_key)
+    with temporary_local_store(store):
+        seed_local(store, source_key, patterned_png((500, 250)))
+        thumbnail_request = asyncio.create_task(call_thumb(asset))
+        await wait_for_thread_event(store.save_started)
+        deletion = asyncio.create_task(tasks_api.delete_task(task.id, user=ADMIN, db=db))
+        try:
+            completed_early = await completed_while_generation_blocked(deletion)
+        finally:
+            store.release_save.set()
+        await thumbnail_request
+        await deletion
+
+        assert not completed_early, "task deletion committed before generation settled"
+        assert not store.exists(source_key)
+        assert not store.exists(derived_key), "thumbnail reappeared after task deletion"
 
 
 async def test_retry_removes_sources_and_thumbnails() -> None:
@@ -762,6 +926,37 @@ async def test_retry_removes_sources_and_thumbnails() -> None:
         assert not store.exists(derived_key)
         assert store.delete_calls == [source_key, derived_key], store.delete_calls
         assert db.deleted == [asset] and db.commits == 1 and db.refreshes == 1
+        assert spawned == [task.id]
+
+
+async def test_retry_cannot_race_thumbnail_save() -> None:
+    task = make_task("task-retry-race", status="error")
+    asset = make_asset("asset-retry-race", task.id, "source.png", "image/png")
+    source_key = asset.file_path
+    derived_key = "task-retry-race/thumb_source.png.jpg"
+    db = TaskMutationDB(task, [asset])
+    store = BlockingThumbnailSaveStore(derived_key)
+    spawned: list[str] = []
+
+    async def spawn(task_id: str) -> bool:
+        spawned.append(task_id)
+        return True
+
+    with temporary_local_store(store), patched(tasks_api, spawn_task=spawn):
+        seed_local(store, source_key, patterned_png((500, 250)))
+        thumbnail_request = asyncio.create_task(call_thumb(asset))
+        await wait_for_thread_event(store.save_started)
+        retry = asyncio.create_task(tasks_api.retry_task(task.id, user=ADMIN, db=db))
+        try:
+            completed_early = await completed_while_generation_blocked(retry)
+        finally:
+            store.release_save.set()
+        await thumbnail_request
+        await retry
+
+        assert not completed_early, "retry committed before generation settled"
+        assert not store.exists(source_key)
+        assert not store.exists(derived_key), "thumbnail reappeared after retry cleanup"
         assert spawned == [task.id]
 
 
@@ -829,9 +1024,12 @@ TESTS = [
     ("EXIF orientation is applied", test_exif_orientation_is_applied),
     ("invalid image bytes return None", test_invalid_image_returns_none),
     ("image thumbnails have no in-memory LRU", test_image_thumb_has_no_in_memory_lru),
+    ("lifecycle lock registry releases unused keys", test_lifecycle_lock_registry_releases_unused_keys),
+    ("lifecycle keys are acquired in sorted order", test_lifecycle_keys_are_acquired_in_sorted_order),
     ("image generation persists through FileStore off-loop", test_image_generation_persists_and_uses_worker_thread),
     ("existing persistent thumbnail is reused", test_existing_thumbnail_is_reused_without_source_read),
     ("concurrent image requests generate exactly once", test_concurrent_requests_generate_once),
+    ("stale second miss does not regenerate a thumbnail", test_stale_second_miss_does_not_regenerate_thumbnail),
     ("request cancellation does not cancel or leak shared generation", test_cancelled_waiter_does_not_cancel_or_leak_generation),
     ("failed image generation returns 404 and clears in-flight state", test_failed_image_generation_returns_404_and_cleans_inflight),
     ("missing video thumbnail does not read source", test_video_without_thumbnail_never_reads_source),
@@ -839,16 +1037,20 @@ TESTS = [
     ("ETag, no-cache, and 304 revalidation work", test_etag_cache_headers_and_revalidation),
     ("object-backed thumbnail streams and closes its handle", test_object_thumbnail_streams_and_closes_handle),
     ("asset deletion removes source and thumbnail", test_asset_delete_removes_source_and_thumbnail),
+    ("asset deletion cannot race thumbnail persistence", test_asset_delete_cannot_race_thumbnail_save),
     ("task deletion removes sources and thumbnails", test_task_delete_removes_sources_and_thumbnails),
+    ("task deletion cannot race thumbnail persistence", test_task_delete_cannot_race_thumbnail_save),
     ("task retry removes sources and thumbnails", test_retry_removes_sources_and_thumbnails),
+    ("task retry cannot race thumbnail persistence", test_retry_cannot_race_thumbnail_save),
     ("cleanup failures are reported without restoring DB records", test_cleanup_failures_do_not_restore_database_records),
 ]
 
 
 async def main() -> int:
     print("=== Persistent thumbnail and derived-file reliability ===")
-    for name, test in TESTS:
-        await run_case(name, test)
+    with patched(tasks_api, task_owner_map=owner_map):
+        for name, test in TESTS:
+            await run_case(name, test)
     print(f"\n{PASS} passed, {FAIL} failed")
     return int(FAIL != 0)
 

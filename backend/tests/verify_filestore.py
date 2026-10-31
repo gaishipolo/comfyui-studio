@@ -10,6 +10,7 @@
 """
 import io
 import inspect
+import logging
 import shutil
 import sys
 import tempfile
@@ -51,6 +52,8 @@ class FakeS3:
         self.objects: dict[str, bytes] = {}
         self.types: dict[str, str] = {}
         self.calls: list[tuple] = []
+        self.stat_errors: dict[str, Exception] = {}
+        self.remove_errors: dict[str, Exception] = {}
 
     def put_object(self, bucket, key, data, length, content_type="application/octet-stream", **kw):
         self.calls.append(("put", bucket, key, content_type))
@@ -59,8 +62,10 @@ class FakeS3:
 
     def stat_object(self, bucket, key):
         self.calls.append(("stat", bucket, key))
+        if key in self.stat_errors:
+            raise self.stat_errors[key]
         if key not in self.objects:
-            raise RuntimeError("NoSuchKey")
+            raise FileNotFoundError(key)
         obj = type("S", (), {})()
         obj.size = len(self.objects[key])
         return obj
@@ -88,7 +93,24 @@ class FakeS3:
 
     def remove_object(self, bucket, key):
         self.calls.append(("remove", bucket, key))
+        if key in self.remove_errors:
+            raise self.remove_errors[key]
         self.objects.pop(key, None)
+
+
+class FakeS3Error(Exception):
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
+class LogCapture(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.messages: list[str] = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
 
 
 # ── 1. safe_key：归一 + 越界拒绝 ──────────────────────────────────
@@ -220,6 +242,46 @@ report("删除不存在的对象返回 (False, 文件本就不存在)",
        ok is False and reason == "文件本就不存在", f"{ok} / {reason!r}")
 report("对象不存在时不会白发 remove_object",
        not any(c[0] == "remove" for c in fake.calls[before:]))
+
+for missing_code in ("NoSuchKey", "NoSuchObject"):
+    key = f"t9/{missing_code}"
+    fake.stat_errors[key] = FakeS3Error(missing_code, "missing")
+    ok, reason = mstore.delete(key)
+    report(f"{missing_code} 明确映射为文件不存在",
+           ok is False and reason == "文件本就不存在", f"{ok} / {reason!r}")
+
+capture = LogCapture()
+old_level = filestore.logger.level
+old_propagate = filestore.logger.propagate
+filestore.logger.addHandler(capture)
+filestore.logger.setLevel(logging.WARNING)
+filestore.logger.propagate = False
+try:
+    fake.stat_errors["t9/private"] = FakeS3Error("AccessDenied", "invalid credentials")
+    auth_ok, auth_reason = mstore.delete("t9/private")
+    fake.stat_errors["t9/network"] = ConnectionError("network unavailable")
+    network_ok, network_reason = mstore.delete("t9/network")
+finally:
+    filestore.logger.removeHandler(capture)
+    filestore.logger.setLevel(old_level)
+    filestore.logger.propagate = old_propagate
+
+report("对象存储鉴权失败不会伪装成文件不存在",
+       auth_ok is False and auth_reason != "文件本就不存在" and "AccessDenied" in auth_reason,
+       repr(auth_reason))
+report("对象存储网络失败返回可诊断原因",
+       network_ok is False and network_reason != "文件本就不存在" and "network unavailable" in network_reason,
+       repr(network_reason))
+report("对象存储 stat 失败会记录日志",
+       any("private" in message and "AccessDenied" in message for message in capture.messages)
+       and any("network" in message and "network unavailable" in message for message in capture.messages),
+       repr(capture.messages))
+
+fake.objects["t9/disappeared"] = b"racy"
+fake.remove_errors["t9/disappeared"] = FakeS3Error("NoSuchKey", "gone after stat")
+ok, reason = mstore.delete("t9/disappeared")
+report("stat 后消失的对象仍按文件不存在处理",
+       ok is False and reason == "文件本就不存在", f"{ok} / {reason!r}")
 
 ok, reason = mstore.delete("t9/v.mp4")
 report("删除存在的对象返回 (True, '')", ok is True and reason == "", f"{ok} / {reason!r}")

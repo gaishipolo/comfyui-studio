@@ -17,7 +17,7 @@ from app.models.models import Asset, Task, Template, User
 from app.schemas.schemas import AssetResponse, AssetShareRequest
 from app.auth import get_current_user
 from app.filestore import open_asset
-from app.thumbs import cleanup_asset_files
+from app.thumbs import cleanup_asset_files, thumb_key, thumbnail_lifecycle
 from app.timeutils import parse_day as _parse_day
 from app.access import (
     can_modify_asset,
@@ -384,17 +384,19 @@ async def delete_asset(
             status_code=403, detail="只能删除自己提交的素材（或联系管理员）"
         )
 
-    # 记录是主体，文件清理是附带 —— 文件删不掉也要把记录删掉，如实上报原因
-    (file_removed, file_error), (thumbnail_removed, thumbnail_error) = (
-        await asyncio.to_thread(
-            cleanup_asset_files,
-            asset.file_path,
-            asset.task_id,
-            asset.file_name,
+    derived_key = thumb_key(asset.task_id, asset.file_name)
+    async with thumbnail_lifecycle([derived_key]):
+        # 记录是主体，文件清理是附带 —— 文件删不掉也要把记录删掉，如实上报原因
+        (file_removed, file_error), (thumbnail_removed, thumbnail_error) = (
+            await asyncio.to_thread(
+                cleanup_asset_files,
+                asset.file_path,
+                asset.task_id,
+                asset.file_name,
+            )
         )
-    )
-    await db.delete(asset)
-    await db.commit()
+        await db.delete(asset)
+        await db.commit()
 
     return {
         "message": "Asset deleted",

@@ -20,7 +20,12 @@ from app.services.task_service import (
 from app.auth import get_current_user
 from app.filestore import open_asset, read_asset_bytes, save_asset_file
 from app.media import guess_mime
-from app.thumbs import cleanup_asset_files, make_image_thumb, thumb_key
+from app.thumbs import (
+    cleanup_asset_files,
+    make_image_thumb,
+    thumb_key,
+    thumbnail_lifecycle,
+)
 from app.access import (
     can_modify_task,
     can_view_asset,
@@ -85,6 +90,27 @@ def _shared_thumbnail_generation(
             )
         )
     return task
+
+
+async def _wait_for_thumbnail_generation(task: asyncio.Task[bool]) -> bool:
+    cancellation: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+        except Exception:
+            break
+
+    try:
+        generated = task.result()
+    except BaseException:
+        if cancellation is not None:
+            raise cancellation
+        raise
+    if cancellation is not None:
+        raise cancellation
+    return generated
 
 
 @router.post("", response_model=list[TaskResponse])
@@ -248,80 +274,92 @@ async def download_asset_thumb(
     """Serve persistent image/video thumbnails after asset authorization."""
     safe_name = Path(filename).name
     safe_task_id = Path(task_id).name
-
-    result = await db.execute(
-        select(Asset).where(Asset.task_id == safe_task_id, Asset.file_name == safe_name)
-    )
-    asset = result.scalar_one_or_none()
-    if not asset:
-        raise HTTPException(status_code=404, detail="Asset file not found")
-
-    owners = await task_owner_map(db, {safe_task_id})
-    if not can_view_asset(user, owners.get(safe_task_id, ""), asset.is_shared):
-        raise HTTPException(status_code=404, detail="Asset file not found")
-
-    mime_type = asset.mime_type or guess_mime(safe_name)
-    is_image = mime_type.startswith("image/")
-    is_video = mime_type.startswith("video/")
-    if not (is_image or is_video):
-        raise HTTPException(status_code=404, detail="Thumbnail not found")
-
-    etag = f'"{asset.id}"'
-    headers = {
-        "ETag": etag,
-        "Cache-Control": "private, no-cache",
-    }
-    if_none_match = request.headers.get("if-none-match", "")
-    if any(
-        candidate.strip() in {"*", etag, f"W/{etag}"}
-        for candidate in if_none_match.split(",")
-    ):
-        return Response(status_code=304, headers=headers)
-
     derived_key = thumb_key(safe_task_id, safe_name)
-    handle = await asyncio.to_thread(open_asset, derived_key)
-    if handle is None:
-        if is_video:
-            # Never try to decode a missing video thumbnail as an image.
+
+    async with thumbnail_lifecycle([derived_key]):
+        result = await db.execute(
+            select(Asset).where(
+                Asset.task_id == safe_task_id,
+                Asset.file_name == safe_name,
+            )
+        )
+        asset = result.scalar_one_or_none()
+        if not asset:
+            raise HTTPException(status_code=404, detail="Asset file not found")
+
+        owners = await task_owner_map(db, {safe_task_id})
+        if not can_view_asset(user, owners.get(safe_task_id, ""), asset.is_shared):
+            raise HTTPException(status_code=404, detail="Asset file not found")
+
+        mime_type = asset.mime_type or guess_mime(safe_name)
+        is_image = mime_type.startswith("image/")
+        is_video = mime_type.startswith("video/")
+        if not (is_image or is_video):
             raise HTTPException(status_code=404, detail="Thumbnail not found")
 
-        generation = _shared_thumbnail_generation(asset.file_path, derived_key)
-        try:
-            generated = await asyncio.shield(generation)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            raise HTTPException(status_code=404, detail="Thumbnail not found")
-        if not generated:
-            raise HTTPException(status_code=404, detail="Thumbnail not found")
         handle = await asyncio.to_thread(open_asset, derived_key)
         if handle is None:
-            raise HTTPException(status_code=404, detail="Thumbnail not found")
+            if is_video:
+                # Never try to decode a missing video thumbnail as an image.
+                raise HTTPException(status_code=404, detail="Thumbnail not found")
 
-    if handle.local_path is not None:
-        local_path = handle.local_path
-        handle.close()
-        return FileResponse(
-            local_path,
-            media_type="image/jpeg",
-            headers=headers,
-        )
+            # Recheck while owning the lifecycle before registering work. This
+            # closes stale-miss races with a just-completed generation task.
+            handle = await asyncio.to_thread(open_asset, derived_key)
+            if handle is None:
+                generation = _shared_thumbnail_generation(
+                    asset.file_path,
+                    derived_key,
+                )
+                try:
+                    generated = await _wait_for_thumbnail_generation(generation)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    raise HTTPException(status_code=404, detail="Thumbnail not found")
+                if not generated:
+                    raise HTTPException(status_code=404, detail="Thumbnail not found")
+                handle = await asyncio.to_thread(open_asset, derived_key)
+                if handle is None:
+                    raise HTTPException(status_code=404, detail="Thumbnail not found")
 
-    def stream_thumbnail():
-        try:
-            yield from handle.iter_bytes()
-        finally:
+        etag = f'"{asset.id}"'
+        headers = {
+            "ETag": etag,
+            "Cache-Control": "private, no-cache",
+        }
+        if_none_match = request.headers.get("if-none-match", "")
+        if any(
+            candidate.strip() in {"*", etag, f"W/{etag}"}
+            for candidate in if_none_match.split(",")
+        ):
             handle.close()
+            return Response(status_code=304, headers=headers)
 
-    try:
-        return StreamingResponse(
-            stream_thumbnail(),
-            media_type="image/jpeg",
-            headers={**headers, "Content-Length": str(handle.size)},
-        )
-    except BaseException:
-        handle.close()
-        raise
+        if handle.local_path is not None:
+            local_path = handle.local_path
+            handle.close()
+            return FileResponse(
+                local_path,
+                media_type="image/jpeg",
+                headers=headers,
+            )
+
+        def stream_thumbnail():
+            try:
+                yield from handle.iter_bytes()
+            finally:
+                handle.close()
+
+        try:
+            return StreamingResponse(
+                stream_thumbnail(),
+                media_type="image/jpeg",
+                headers={**headers, "Content-Length": str(handle.size)},
+            )
+        except BaseException:
+            handle.close()
+            raise
 
 
 @router.post("/{task_id}/cancel", response_model=TaskResponse)
@@ -370,23 +408,29 @@ async def retry_task(
 
     # 清理上次运行遗留的素材（记录 + 文件），避免重试后素材翻倍
     result = await db.execute(select(Asset).where(Asset.task_id == task.id))
-    for old_asset in result.scalars().all():
-        await asyncio.to_thread(
-            cleanup_asset_files,
-            old_asset.file_path,
-            old_asset.task_id,
-            old_asset.file_name,
-        )
-        await db.delete(old_asset)
+    old_assets = result.scalars().all()
+    derived_keys = [
+        thumb_key(asset.task_id, asset.file_name)
+        for asset in old_assets
+    ]
+    async with thumbnail_lifecycle(derived_keys):
+        for old_asset in old_assets:
+            await asyncio.to_thread(
+                cleanup_asset_files,
+                old_asset.file_path,
+                old_asset.task_id,
+                old_asset.file_name,
+            )
+            await db.delete(old_asset)
 
-    # 清掉上一轮的取消登记，否则执行协程一进轮询就当成「已取消」直接退出
-    clear_cancel_request(task.id)
-    task.status = "pending"
-    task.error_msg = ""
-    task.progress = 0.0
-    task.result = {}
-    task.finished_at = None
-    await db.commit()
+        # 清掉上一轮的取消登记，否则执行协程一进轮询就当成「已取消」直接退出
+        clear_cancel_request(task.id)
+        task.status = "pending"
+        task.error_msg = ""
+        task.progress = 0.0
+        task.result = {}
+        task.finished_at = None
+        await db.commit()
     await db.refresh(task)
 
     await spawn_task(task.id)
@@ -425,27 +469,32 @@ async def delete_task(
     file_errors: list[str] = []
     thumbnails_removed = 0
     thumbnail_errors: list[str] = []
-    for asset in assets:
-        source_result, thumbnail_result = await asyncio.to_thread(
-            cleanup_asset_files,
-            asset.file_path,
-            asset.task_id,
-            asset.file_name,
-        )
-        source_removed, source_error = source_result
-        thumbnail_removed, thumbnail_error = thumbnail_result
-        if source_removed:
-            files_removed += 1
-        elif source_error and source_error != "文件本就不存在":
-            file_errors.append(f"{asset.id}: {source_error}")
-        if thumbnail_removed:
-            thumbnails_removed += 1
-        elif thumbnail_error:
-            thumbnail_errors.append(f"{asset.id}: {thumbnail_error}")
-        await db.delete(asset)
+    derived_keys = [
+        thumb_key(asset.task_id, asset.file_name)
+        for asset in assets
+    ]
+    async with thumbnail_lifecycle(derived_keys):
+        for asset in assets:
+            source_result, thumbnail_result = await asyncio.to_thread(
+                cleanup_asset_files,
+                asset.file_path,
+                asset.task_id,
+                asset.file_name,
+            )
+            source_removed, source_error = source_result
+            thumbnail_removed, thumbnail_error = thumbnail_result
+            if source_removed:
+                files_removed += 1
+            elif source_error and source_error != "文件本就不存在":
+                file_errors.append(f"{asset.id}: {source_error}")
+            if thumbnail_removed:
+                thumbnails_removed += 1
+            elif thumbnail_error:
+                thumbnail_errors.append(f"{asset.id}: {thumbnail_error}")
+            await db.delete(asset)
 
-    await db.delete(task)
-    await db.commit()
+        await db.delete(task)
+        await db.commit()
 
     return {
         "message": "Task deleted",

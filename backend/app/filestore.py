@@ -31,6 +31,30 @@ logger = logging.getLogger(__name__)
 # 素材文件的单次流式读取块大小
 _CHUNK = 1024 * 256
 
+_MISSING_OBJECT_CODES = {"NoSuchKey", "NoSuchObject"}
+
+
+def _object_error_code(exc: Exception) -> str:
+    code = getattr(exc, "code", "")
+    if code:
+        return str(code)
+    response = getattr(exc, "response", None)
+    if isinstance(response, dict):
+        error = response.get("Error", response)
+        if isinstance(error, dict) and error.get("Code"):
+            return str(error["Code"])
+    return ""
+
+
+def _object_error_reason(exc: Exception) -> str:
+    code = _object_error_code(exc)
+    parts = [type(exc).__name__]
+    if code:
+        parts.append(code)
+    if str(exc):
+        parts.append(str(exc))
+    return ": ".join(parts)
+
 
 # ────────────────────────────── 键的校验 ──────────────────────────────
 
@@ -302,16 +326,33 @@ class MinioFileStore:
         key = safe_key(file_path)
         if key is None:
             return False, "路径越界，未做任何文件操作"
-        client = self._c()
         try:
+            client = self._c()
             client.stat_object(self.bucket, key)
-        except Exception:
-            return False, "文件本就不存在"
+        except Exception as exc:
+            if (
+                isinstance(exc, FileNotFoundError)
+                or _object_error_code(exc) in _MISSING_OBJECT_CODES
+            ):
+                return False, "文件本就不存在"
+            reason = _object_error_reason(exc)
+            logger.warning(
+                "检查对象存储素材失败 %s/%s —— %s",
+                self.bucket,
+                key,
+                reason,
+            )
+            return False, reason
         try:
             client.remove_object(self.bucket, key)
             return True, ""
         except Exception as exc:
-            reason = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+            if (
+                isinstance(exc, FileNotFoundError)
+                or _object_error_code(exc) in _MISSING_OBJECT_CODES
+            ):
+                return False, "文件本就不存在"
+            reason = _object_error_reason(exc)
             logger.warning("删除对象存储素材失败 %s/%s —— %s", self.bucket, key, reason)
             return False, reason
 

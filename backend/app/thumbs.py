@@ -1,10 +1,14 @@
 """Image/video thumbnail conversion and derived-file helpers."""
+import asyncio
 import io
 import logging
 import os
 import shutil
 import subprocess
 import tempfile
+import weakref
+from collections.abc import AsyncIterator, Iterable
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from PIL import Image, ImageOps
@@ -12,6 +16,10 @@ from PIL import Image, ImageOps
 from app.filestore import delete_asset_file
 
 logger = logging.getLogger(__name__)
+
+_thumbnail_lifecycle_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
+    weakref.WeakValueDictionary()
+)
 
 # None = 还没找过；False = 找过了没有
 _FFMPEG: str | bool | None = None
@@ -81,6 +89,28 @@ def thumb_key(task_id: str, file_name: str) -> str:
     请求 404 → 前端退回原逻辑，不需要迁移，也不会多出素材记录。
     """
     return f"{task_id}/thumb_{file_name}.jpg"
+
+
+@asynccontextmanager
+async def thumbnail_lifecycle(keys: Iterable[str]) -> AsyncIterator[None]:
+    """Own thumbnail generation/cleanup for sorted storage keys."""
+    locks: list[asyncio.Lock] = []
+    for key in sorted(set(keys)):
+        lock = _thumbnail_lifecycle_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _thumbnail_lifecycle_locks[key] = lock
+        locks.append(lock)
+
+    acquired: list[asyncio.Lock] = []
+    try:
+        for lock in locks:
+            await lock.acquire()
+            acquired.append(lock)
+        yield
+    finally:
+        for lock in reversed(acquired):
+            lock.release()
 
 
 def make_image_thumb(data: bytes, max_edge: int = 400) -> bytes | None:
