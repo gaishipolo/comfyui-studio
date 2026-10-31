@@ -31,6 +31,7 @@ from app.thumbs import (
 from app.timeutils import parse_day as _parse_day
 from app.access import (
     can_modify_asset,
+    can_modify_asset_identity,
     can_view_asset,
     creator_display_names,
     is_admin,
@@ -383,6 +384,9 @@ async def delete_asset(
     素材本身没有归属字段，归属走 task.created_by —— 显式查一次，
     不能用 asset.task 懒加载（async 会话里抛 MissingGreenlet）。
     """
+    requester_id = user.id
+    requester_role = user.role
+
     async def delete_operation() -> tuple[tuple[bool, str], tuple[bool, str]]:
         # The route only carries asset_id, so first read the immutable task-id
         # hint, end that transaction, then reload all authoritative state while
@@ -401,7 +405,11 @@ async def delete_asset(
                 raise HTTPException(status_code=404, detail="Asset not found")
             task = await db.get(Task, owned_task_id)
             owner_id = task.created_by if task is not None else ""
-            if not can_modify_asset(user, owner_id):
+            if not can_modify_asset_identity(
+                requester_id,
+                requester_role,
+                owner_id,
+            ):
                 raise HTTPException(
                     status_code=403,
                     detail="只能删除自己提交的素材（或联系管理员）",

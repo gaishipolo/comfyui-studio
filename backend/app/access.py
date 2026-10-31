@@ -40,7 +40,12 @@ def can_view_asset(user: User, owner_id: str, is_shared: bool) -> bool:
 def can_modify_asset(user: User, owner_id: str) -> bool:
     """素材可改性（打标签/删除/共享开关）：仅本人或管理员。
     注意**不看 is_shared** —— 共享出去的素材别人只能看，不能动。"""
-    return is_admin(user) or (bool(owner_id) and owner_id == user.id)
+    return can_modify_asset_identity(user.id, user.role, owner_id)
+
+
+def can_modify_asset_identity(user_id: str, role: str, owner_id: str) -> bool:
+    """Asset write permission using scalars safe across transaction resets."""
+    return role == "admin" or (bool(owner_id) and owner_id == user_id)
 
 
 # ── 归属查询助手（显式 select，禁用懒加载 —— async 会话里抛 MissingGreenlet）──

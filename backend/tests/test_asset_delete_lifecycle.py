@@ -21,7 +21,7 @@ from app.api import assets as assets_api  # noqa: E402
 from app.api import tasks as tasks_api  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.filestore import asset_exists, reset_store, save_asset_file  # noqa: E402
-from app.models.models import Asset, Base, Task, Template  # noqa: E402
+from app.models.models import Asset, Base, Task, Template, User  # noqa: E402
 from app.services import task_service  # noqa: E402
 from app.thumbs import (  # noqa: E402
     cleanup_asset_files,
@@ -62,6 +62,13 @@ async def fixture(prefix: str):
                 status="cancelled",
                 params={},
                 result={},
+            ))
+            db.add(User(
+                id="admin",
+                username=f"admin-{prefix}",
+                password_hash="unused",
+                role="admin",
+                is_active=True,
             ))
             db.add(Asset(
                 id=asset_id,
@@ -219,12 +226,26 @@ async def test_cancelled_asset_delete_keeps_task_ownership_until_commit() -> Non
         assert not asset_exists(thumb_key(task_id, "image.png"))
 
 
+async def test_session_bound_user_survives_hint_transaction_reset() -> None:
+    async with fixture("orm-user-") as (sessions, task_id, asset_id):
+        async with sessions() as db:
+            user = await db.get(User, "admin")
+            assert user is not None
+            result = await assets_api.delete_asset(asset_id, user=user, db=db)
+
+        assert result["id"] == asset_id
+        assert await db_counts(sessions, task_id) == (0, 1, "cancelled")
+        assert not asset_exists(f"{task_id}/image.png")
+        assert not asset_exists(thumb_key(task_id, "image.png"))
+
+
 async def main() -> int:
     tests = [
         test_asset_delete_then_retry_serializes_without_stale_rows,
         test_retry_then_asset_delete_reloads_current_asset,
         test_task_delete_then_asset_delete_returns_404_not_500,
         test_cancelled_asset_delete_keeps_task_ownership_until_commit,
+        test_session_bound_user_survives_hint_transaction_reset,
     ]
     failures: list[str] = []
     for test in tests:
