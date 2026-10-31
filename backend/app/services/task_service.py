@@ -168,7 +168,11 @@ class TaskService:
                 await TaskService._save_asset(db, task, template, provider, output)
         else:
             task.status = "error"
-            task.error_msg = result.error or "Generation failed"
+            task.error_msg = (
+                safe_detail(RuntimeError(result.error))
+                if result.error
+                else "Generation failed"
+            )
             task.finished_at = datetime.utcnow()
 
         await db.commit()
@@ -283,24 +287,32 @@ class TaskService:
                     await db.commit()
                     return
 
-                provider = get_provider(template.engine)
-                task.status = "running"
-                task.started_at = task.started_at or datetime.utcnow()
-                await db.commit()
-
+                persisted_task_id = task.id
+                provider_task_id = task.provider_task_id
+                engine_name = template.engine
                 try:
-                    await TaskService._finish_task(db, task, template, provider, task.provider_task_id)
+                    provider = get_provider(engine_name)
+                    task.status = "running"
+                    task.started_at = task.started_at or datetime.utcnow()
+                    await db.commit()
+                    await TaskService._finish_task(
+                        db, task, template, provider, provider_task_id
+                    )
                 except Exception as e:  # noqa: BLE001
                     logger.error(
                         "Task resume failed task_id=%s provider=%s",
-                        task.id,
-                        template.engine,
+                        persisted_task_id,
+                        engine_name,
                         exc_info=(type(e), e, e.__traceback__),
                     )
-                    if not _cancel_requested_for(task.id):
-                        task.status = "error"
-                        task.error_msg = safe_detail(e)
-                        task.finished_at = datetime.utcnow()
+                    await db.rollback()
+                    if not _cancel_requested_for(persisted_task_id):
+                        failed_task = await db.get(Task, persisted_task_id)
+                        if failed_task is None:
+                            return
+                        failed_task.status = "error"
+                        failed_task.error_msg = safe_detail(e)
+                        failed_task.finished_at = datetime.utcnow()
                         await db.commit()
 
     @staticmethod

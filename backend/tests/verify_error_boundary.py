@@ -14,13 +14,16 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+import app.api.uploads as uploads_api
 import app.services.task_service as ts
 from app.config import settings
 from app.engines.base import GenerationProvider, GenerationResult, TaskStatus
 from app.models.models import Base, Task, Template
 from app.safe_detail import safe_detail
+from app.schemas.schemas import AssetUploadRequest
 from app.services.task_service import TaskService
 
 
@@ -44,11 +47,20 @@ class RecordHandler(logging.Handler):
 
 
 class FakeProvider(GenerationProvider):
-    def __init__(self, submit_error="", status_error="", output=b"data"):
+    def __init__(
+        self,
+        submit_error="",
+        status_error="",
+        upload_error="",
+        output=b"data",
+        result=None,
+    ):
         super().__init__()
         self.submit_error = submit_error
         self.status_error = status_error
+        self.upload_error = upload_error
         self.output = output
+        self.result = result or GenerationResult(status=TaskStatus.DONE, outputs=[])
 
     async def submit(self, ctx, params):
         if self.submit_error:
@@ -58,10 +70,15 @@ class FakeProvider(GenerationProvider):
     async def get_status(self, task_id):
         if self.status_error:
             raise RuntimeError(self.status_error)
-        return GenerationResult(status=TaskStatus.DONE, outputs=[])
+        return self.result
 
     async def download_output(self, filename, subfolder="", output_type="output"):
         return self.output
+
+    async def upload_input(self, data, filename):
+        if self.upload_error:
+            raise NotImplementedError(self.upload_error)
+        return filename
 
     async def health_check(self):
         return True
@@ -76,6 +93,41 @@ class FakeAssetDb:
 
     async def flush(self):
         return None
+
+
+class FakeUploadDb:
+    def __init__(self, asset):
+        self.asset = asset
+
+    async def get(self, model, asset_id):
+        return self.asset
+
+
+class OneShotCommitFailureSession(AsyncSession):
+    failure_message = ""
+    instances = []
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.injected_failure = False
+        self.needs_rollback = False
+        self.rollback_called = False
+        type(self).instances.append(self)
+
+    async def commit(self):
+        if not self.injected_failure:
+            self.injected_failure = True
+            self.needs_rollback = True
+            self.expire_all()
+            raise RuntimeError(self.failure_message)
+        if self.needs_rollback:
+            raise RuntimeError("rollback required before error persistence")
+        await super().commit()
+
+    async def rollback(self):
+        self.rollback_called = True
+        await super().rollback()
+        self.needs_rollback = False
 
 
 async def reset_db(engine):
@@ -176,6 +228,54 @@ async def main():
         report(f"case-insensitive {key} assignment is sanitized", value not in rendered, rendered)
     bearer = safe_detail(RuntimeError("provider rejected Bearer standalone.token.value"))
     report("standalone Bearer token is sanitized", "standalone.token.value" not in bearer, bearer)
+    long_exception = type("X" * 250, (Exception,), {})
+    long_type_detail = safe_detail(long_exception())
+    report("empty-message exception types are capped at 200 characters",
+           len(long_type_detail) <= 200, f"length={len(long_type_detail)}")
+
+    print("\n=== upload error boundary ===")
+    acquisition_raw = (
+        "unknown engine http://10.0.0.5/private?api_key=UPLOADSECRET "
+        "token=UPLOADSECRET"
+    )
+    with patch.object(
+        uploads_api,
+        "get_provider",
+        side_effect=ValueError(acquisition_raw),
+    ):
+        acquisition_error = None
+        try:
+            await uploads_api._forward_to_engine("missing", b"data", "input.png")
+        except HTTPException as exc:
+            acquisition_error = exc
+    acquisition_detail = str(acquisition_error.detail) if acquisition_error else ""
+    report("provider acquisition keeps 400 and sanitizes detail",
+           acquisition_error is not None
+           and acquisition_error.status_code == 400
+           and acquisition_detail.startswith("ValueError:")
+           and "10.0.0.5" not in acquisition_detail
+           and "UPLOADSECRET" not in acquisition_detail,
+           acquisition_detail)
+
+    unsupported_raw = "upload unsupported Bearer upload.secret token=UPLOADSECRET"
+    with patch.object(
+        uploads_api,
+        "get_provider",
+        return_value=FakeProvider(upload_error=unsupported_raw),
+    ):
+        unsupported_error = None
+        try:
+            await uploads_api._forward_to_engine("fake", b"data", "input.png")
+        except HTTPException as exc:
+            unsupported_error = exc
+    unsupported_detail = str(unsupported_error.detail) if unsupported_error else ""
+    report("unsupported upload keeps 400 and sanitizes detail",
+           unsupported_error is not None
+           and unsupported_error.status_code == 400
+           and unsupported_detail.startswith("NotImplementedError:")
+           and "upload.secret" not in unsupported_detail
+           and "UPLOADSECRET" not in unsupported_detail,
+           unsupported_detail)
 
     temp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
     temp_db.close()
@@ -234,6 +334,110 @@ async def main():
             "resume-failure",
             resume_raw,
         )
+
+        await reset_db(engine)
+        acquisition_raw = "provider lookup failed token=RESUMELOOKUPSECRET"
+        await seed_task(
+            session_factory,
+            "resume-provider-failure",
+            provider_task_id="provider-existing",
+        )
+
+        def fail_provider_lookup(engine_name):
+            raise ValueError(acquisition_raw)
+
+        ts.get_provider = fail_provider_lookup
+        handler.records.clear()
+        escaped = None
+        try:
+            await TaskService.resume_task("resume-provider-failure")
+        except Exception as exc:
+            escaped = exc
+        task = await load_task(session_factory, "resume-provider-failure")
+        report("resume provider acquisition failure is persisted safely",
+               escaped is None
+               and task.status == "error"
+               and task.error_msg.startswith("ValueError:")
+               and "RESUMELOOKUPSECRET" not in task.error_msg,
+               f"escaped={escaped!r} status={task.status} detail={task.error_msg}")
+        check_failure_log(
+            "resume provider acquisition log",
+            matching_record(handler.records, "resume-provider-failure"),
+            "resume-provider-failure",
+            acquisition_raw,
+        )
+
+        await reset_db(engine)
+        setup_raw = "running-state commit failed password=RESUMECOMMITSECRET"
+        await seed_task(
+            session_factory,
+            "resume-setup-failure",
+            provider_task_id="provider-existing",
+        )
+        OneShotCommitFailureSession.failure_message = setup_raw
+        OneShotCommitFailureSession.instances.clear()
+        failing_session_factory = async_sessionmaker(
+            engine,
+            class_=OneShotCommitFailureSession,
+            expire_on_commit=False,
+        )
+        ts.get_provider = lambda engine_name: FakeProvider()
+        ts.async_session = failing_session_factory
+        handler.records.clear()
+        escaped = None
+        try:
+            await TaskService.resume_task("resume-setup-failure")
+        except Exception as exc:
+            escaped = exc
+        finally:
+            ts.async_session = session_factory
+        task = await load_task(session_factory, "resume-setup-failure")
+        failed_session = OneShotCommitFailureSession.instances[-1]
+        report("resume setup failure rolls back and persists a safe error",
+               escaped is None
+               and failed_session.rollback_called
+               and task.status == "error"
+               and task.error_msg.startswith("RuntimeError:")
+               and "RESUMECOMMITSECRET" not in task.error_msg,
+               f"escaped={escaped!r} rollback={failed_session.rollback_called} "
+               f"status={task.status} detail={task.error_msg}")
+        check_failure_log(
+            "resume setup failure log",
+            matching_record(handler.records, "resume-setup-failure"),
+            "resume-setup-failure",
+            setup_raw,
+        )
+
+        await reset_db(engine)
+        terminal_raw = (
+            "provider terminal error http://10.0.0.5/result?api_key=RESULTSECRET "
+            "token=RESULTSECRET"
+        )
+        await seed_task(session_factory, "terminal-provider-error")
+        ts.get_provider = lambda engine_name: FakeProvider(result=GenerationResult(
+            status=TaskStatus.ERROR,
+            error=terminal_raw,
+        ))
+        await TaskService.execute_task("terminal-provider-error")
+        task = await load_task(session_factory, "terminal-provider-error")
+        report("terminal Provider errors are sanitized before persistence",
+               task.status == "error"
+               and task.error_msg.startswith("RuntimeError:")
+               and "10.0.0.5" not in task.error_msg
+               and "RESULTSECRET" not in task.error_msg
+               and len(task.error_msg) <= 200,
+               task.error_msg)
+
+        await reset_db(engine)
+        await seed_task(session_factory, "terminal-provider-fallback")
+        ts.get_provider = lambda engine_name: FakeProvider(result=GenerationResult(
+            status=TaskStatus.ERROR,
+            error="",
+        ))
+        await TaskService.execute_task("terminal-provider-fallback")
+        task = await load_task(session_factory, "terminal-provider-fallback")
+        report("empty terminal Provider errors keep the plain fallback",
+               task.error_msg == "Generation failed", task.error_msg)
 
         print("\n=== fire-and-forget exception consumption ===")
         original_execute = TaskService.execute_task
@@ -297,6 +501,46 @@ async def main():
             finally:
                 settings.WORKFLOW_DIR = original_workflow_dir
 
+        asset = SimpleNamespace(
+            task_id="upload-owner-task",
+            is_shared=False,
+            mime_type="image/png",
+            file_path="upload-owner-task/input.png",
+            file_name="input.png",
+            file_size=16,
+        )
+        upload_db = FakeUploadDb(asset)
+        upload_user = SimpleNamespace(id="owner", role="member")
+        started = threading.Event()
+        release = threading.Event()
+        state = {}
+
+        def blocking_asset_read(file_path):
+            started.set()
+            state["released"] = release.wait(timeout=1.0)
+            return b"asset-bytes"
+
+        async def fake_owner_map(db, task_ids):
+            return {"upload-owner-task": "owner"}
+
+        async def fake_forward(engine_name, data, filename):
+            return "engine-input.png"
+
+        with patch.object(uploads_api, "read_asset_bytes", blocking_asset_read), \
+                patch.object(uploads_api, "task_owner_map", fake_owner_map), \
+                patch.object(uploads_api, "_forward_to_engine", fake_forward):
+            await run_blocking_gate(
+                "from-asset reads run outside the event loop",
+                lambda: uploads_api.upload_from_asset(
+                    body=AssetUploadRequest(asset_id="asset-id", engine="fake"),
+                    user=upload_user,
+                    db=upload_db,
+                ),
+                started,
+                release,
+                state,
+            )
+
         fake_db = FakeAssetDb()
         task = SimpleNamespace(id="asset-task", params={})
         template = SimpleNamespace(category="image")
@@ -310,7 +554,7 @@ async def main():
 
         with patch.object(ts, "save_asset_file", blocking_save):
             await run_blocking_gate(
-                "FileStore writes run outside the event loop",
+                "source FileStore writes run outside the event loop",
                 lambda: TaskService._save_asset(
                     fake_db,
                     task,
@@ -336,7 +580,33 @@ async def main():
         with patch.object(ts, "save_asset_file", lambda *args, **kwargs: None), \
                 patch.object(ts, "make_video_thumb", blocking_thumbnail):
             await run_blocking_gate(
-                "video thumbnail work runs outside the event loop",
+                "video thumbnail generation runs outside the event loop",
+                lambda: TaskService._save_asset(
+                    fake_db,
+                    task,
+                    template,
+                    FakeProvider(output=b"video-bytes"),
+                    {"filename": "clip.mp4"},
+                ),
+                started,
+                release,
+                state,
+            )
+
+        fake_db = FakeAssetDb()
+        started = threading.Event()
+        release = threading.Event()
+        state = {}
+
+        def blocking_thumbnail_save(key, data, content_type="application/octet-stream"):
+            if content_type == "image/jpeg":
+                started.set()
+                state["released"] = release.wait(timeout=1.0)
+
+        with patch.object(ts, "save_asset_file", blocking_thumbnail_save), \
+                patch.object(ts, "make_video_thumb", lambda *args: b"thumbnail-bytes"):
+            await run_blocking_gate(
+                "video thumbnail FileStore writes run outside the event loop",
                 lambda: TaskService._save_asset(
                     fake_db,
                     task,

@@ -28,4 +28,4 @@ def safe_detail(exc: BaseException) -> str:
     msg = _BEARER_RE.sub("Bearer <redacted>", msg)
     msg = _SECRET_ASSIGNMENT_RE.sub(r"\1\2<redacted>", msg).strip()
     name = type(exc).__name__
-    return f"{name}: {msg}"[:200] if msg else name
+    return (f"{name}: {msg}" if msg else name)[:200]
