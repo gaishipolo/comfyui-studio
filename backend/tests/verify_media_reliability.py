@@ -410,6 +410,23 @@ class TaskMutationDB:
         self.refreshes += 1
 
 
+class ConcurrentRetryDB(TaskMutationDB):
+    def __init__(self, task: Task) -> None:
+        super().__init__(task, [])
+        self.get_calls = 0
+        self.both_loads_started = asyncio.Event()
+
+    async def get(self, _model, _identity):
+        self.get_calls += 1
+        if self.get_calls == 2:
+            self.both_loads_started.set()
+        await self.both_loads_started.wait()
+        return self.task
+
+    async def execute(self, _query) -> ScalarResult:
+        return ScalarResult([])
+
+
 def request(headers: dict[str, str] | None = None) -> Request:
     raw_headers = [
         (name.lower().encode("latin-1"), value.encode("latin-1"))
@@ -571,6 +588,50 @@ async def test_lifecycle_keys_are_acquired_in_sorted_order() -> None:
 
     await asyncio.wait_for(asyncio.gather(first, second), timeout=1)
     assert entered == ["first", "second"], entered
+
+
+async def test_cancelled_parent_observes_failed_child() -> None:
+    child_started = asyncio.Event()
+    release_child = asyncio.Event()
+    capture = LogCapture()
+    prior_level = thumbs.logger.level
+    prior_propagate = thumbs.logger.propagate
+
+    async def failing_child() -> None:
+        child_started.set()
+        await release_child.wait()
+        raise RuntimeError("commit failed after cancellation")
+
+    thumbs.logger.addHandler(capture)
+    thumbs.logger.setLevel(logging.ERROR)
+    thumbs.logger.propagate = False
+    try:
+        child = asyncio.create_task(
+            failing_child(),
+            name="failing-retry-mutation",
+        )
+        parent = asyncio.create_task(thumbs.wait_for_task_completion(child))
+        await child_started.wait()
+        parent.cancel()
+        await asyncio.sleep(0)
+        release_child.set()
+        try:
+            await parent
+        except BaseException as exc:
+            observed = exc
+        else:
+            raise AssertionError("failed child unexpectedly returned")
+    finally:
+        thumbs.logger.removeHandler(capture)
+        thumbs.logger.setLevel(prior_level)
+        thumbs.logger.propagate = prior_propagate
+
+    assert isinstance(observed, RuntimeError), type(observed)
+    assert "commit failed" in str(observed)
+    assert any(
+        "failing-retry-mutation" in message and "commit failed" in message
+        for message in capture.messages
+    ), capture.messages
 
 
 async def test_image_generation_persists_and_uses_worker_thread() -> None:
@@ -1000,6 +1061,48 @@ async def test_task_delete_removes_sources_and_thumbnails() -> None:
         assert db.deleted == [asset, task] and db.commits == 1
 
 
+async def test_zero_asset_task_delete_uses_task_lifecycle() -> None:
+    task = make_task("task-delete-empty")
+    db = TaskMutationDB(task, [])
+    lifecycle_key = getattr(thumbs, "task_lifecycle_key")(task.id)
+
+    async with thumbs.thumbnail_lifecycle([lifecycle_key]):
+        deletion = asyncio.create_task(tasks_api.delete_task(task.id, user=ADMIN, db=db))
+        await asyncio.sleep(0)
+        serialized = not deletion.done() and db.refreshes == 0 and db.commits == 0
+
+    body = await deletion
+    assert serialized, "zero-asset task deletion bypassed task lifecycle ownership"
+    assert body["assets_deleted"] == 0
+    assert db.deleted == [task] and db.commits == 1 and db.refreshes == 1
+
+
+async def test_task_delete_rejects_terminal_runner_before_cleanup() -> None:
+    task = make_task("task-delete-finishing", status="error")
+    asset = make_asset("asset-delete-finishing", task.id, "source.png", "image/png")
+    source_key = asset.file_path
+    derived_key = "task-delete-finishing/thumb_source.png.jpg"
+    db = TaskMutationDB(task, [asset])
+    with temporary_local_store() as raw_store:
+        store = raw_store
+        assert isinstance(store, TrackingLocalFileStore)
+        seed_local(store, source_key, b"source")
+        seed_local(store, derived_key, b"thumbnail")
+        tasks_api._running_tasks.add(task.id)
+        try:
+            error = await expect_http(
+                tasks_api.delete_task(task.id, user=ADMIN, db=db),
+                409,
+            )
+        finally:
+            tasks_api._running_tasks.discard(task.id)
+
+        assert "finishing" in str(error.detail).lower()
+        assert db.refreshes == 1 and db.deleted == [] and db.commits == 0
+        assert store.exists(source_key)
+        assert store.exists(derived_key)
+
+
 async def test_task_delete_cannot_race_thumbnail_save() -> None:
     task = make_task("task-delete-race")
     asset = make_asset("asset-task-delete-race", task.id, "source.png", "image/png")
@@ -1087,8 +1190,133 @@ async def test_retry_removes_sources_and_thumbnails() -> None:
         assert not store.exists(source_key)
         assert not store.exists(derived_key)
         assert store.delete_calls == [source_key, derived_key], store.delete_calls
-        assert db.deleted == [asset] and db.commits == 1 and db.refreshes == 1
+        assert db.deleted == [asset] and db.commits == 1 and db.refreshes == 2
         assert spawned == [task.id]
+
+
+async def test_retry_rejects_terminal_runner_before_cleanup() -> None:
+    task = make_task("task-retry-finishing", status="error")
+    asset = make_asset("asset-retry-finishing", task.id, "source.png", "image/png")
+    source_key = asset.file_path
+    derived_key = "task-retry-finishing/thumb_source.png.jpg"
+    db = TaskMutationDB(task, [asset])
+    with temporary_local_store() as raw_store:
+        store = raw_store
+        assert isinstance(store, TrackingLocalFileStore)
+        seed_local(store, source_key, b"source")
+        seed_local(store, derived_key, b"thumbnail")
+        tasks_api._running_tasks.add(task.id)
+        try:
+            error = await expect_http(
+                tasks_api.retry_task(task.id, user=ADMIN, db=db),
+                409,
+            )
+        finally:
+            tasks_api._running_tasks.discard(task.id)
+
+        assert "finishing" in str(error.detail).lower()
+        assert task.status == "error"
+        assert db.refreshes == 1 and db.deleted == [] and db.commits == 0
+        assert store.exists(source_key)
+        assert store.exists(derived_key)
+
+
+async def test_retry_reloads_assets_after_runner_finishes() -> None:
+    task = make_task("task-retry-final-asset", status="error")
+    db = TaskMutationDB(task, [])
+    asset = make_asset("asset-retry-final", task.id, "final.png", "image/png")
+    source_key = asset.file_path
+    derived_key = "task-retry-final-asset/thumb_final.png.jpg"
+    spawned: list[str] = []
+
+    async def spawn(task_id: str) -> bool:
+        spawned.append(task_id)
+        return True
+
+    lifecycle_key = thumbs.task_lifecycle_key(task.id)
+    with temporary_local_store() as raw_store, patched(tasks_api, spawn_task=spawn):
+        store = raw_store
+        assert isinstance(store, TrackingLocalFileStore)
+        tasks_api._running_tasks.add(task.id)
+        try:
+            async with thumbs.thumbnail_lifecycle([lifecycle_key]):
+                retry = asyncio.create_task(
+                    tasks_api.retry_task(task.id, user=ADMIN, db=db)
+                )
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                db.assets = [asset]
+                seed_local(store, source_key, b"final source")
+                seed_local(store, derived_key, b"final thumbnail")
+                tasks_api._running_tasks.discard(task.id)
+            await retry
+        finally:
+            tasks_api._running_tasks.discard(task.id)
+
+        assert db.deleted == [asset]
+        assert spawned == [task.id]
+        assert not store.exists(source_key)
+        assert not store.exists(derived_key)
+
+
+async def test_concurrent_zero_asset_retries_spawn_once() -> None:
+    task = make_task("task-retry-concurrent", status="error")
+    db = ConcurrentRetryDB(task)
+    spawned: list[str] = []
+    spawn_started = asyncio.Event()
+    release_spawn = asyncio.Event()
+
+    async def spawn(task_id: str) -> bool:
+        spawned.append(task_id)
+        spawn_started.set()
+        await release_spawn.wait()
+        return True
+
+    async def invoke_retry():
+        try:
+            return await tasks_api.retry_task(task.id, user=ADMIN, db=db)
+        except HTTPException as exc:
+            return exc
+
+    with patched(tasks_api, spawn_task=spawn):
+        first = asyncio.create_task(invoke_retry())
+        second = asyncio.create_task(invoke_retry())
+        await spawn_started.wait()
+        try:
+            await wait_until(lambda: len(spawned) == 2, timeout=0.25)
+        except TimeoutError:
+            pass
+        release_spawn.set()
+        results = await asyncio.gather(first, second)
+
+    failures = [result for result in results if isinstance(result, HTTPException)]
+    successes = [result for result in results if isinstance(result, Task)]
+    assert len(successes) == 1, results
+    assert len(failures) == 1 and failures[0].status_code == 409, results
+    assert spawned == [task.id], spawned
+    assert db.deleted == [] and db.commits == 1 and db.refreshes == 3
+    assert task.status == "pending"
+
+
+async def test_retry_spawn_refusal_persists_recoverable_error() -> None:
+    task = make_task("task-retry-spawn-refused", status="error")
+    db = TaskMutationDB(task, [])
+    spawn_calls: list[str] = []
+
+    async def refuse_spawn(task_id: str) -> bool:
+        spawn_calls.append(task_id)
+        return False
+
+    with patched(tasks_api, spawn_task=refuse_spawn):
+        error = await expect_http(
+            tasks_api.retry_task(task.id, user=ADMIN, db=db),
+            409,
+        )
+
+    assert "start" in str(error.detail).lower()
+    assert spawn_calls == [task.id]
+    assert task.status == "error" and task.error_msg
+    assert db.commits == 2 and db.refreshes == 3
 
 
 async def test_retry_cannot_race_thumbnail_save() -> None:
@@ -1185,7 +1413,7 @@ async def test_cancelled_retry_finishes_and_spawns_before_propagating() -> None:
         assert spawn_reached, "retry was left pending without spawning"
         assert lock_retained_through_spawn, "retry released lifecycle lock before spawn"
         assert cancellation_propagated
-        assert db.deleted == [asset] and db.commits == 1 and db.refreshes == 1
+        assert db.deleted == [asset] and db.commits == 1 and db.refreshes == 2
         assert task.status == "pending"
         assert spawned == [task.id]
         assert not store.exists(source_key)
@@ -1258,6 +1486,7 @@ TESTS = [
     ("image thumbnails have no in-memory LRU", test_image_thumb_has_no_in_memory_lru),
     ("lifecycle lock registry releases unused keys", test_lifecycle_lock_registry_releases_unused_keys),
     ("lifecycle keys are acquired in sorted order", test_lifecycle_keys_are_acquired_in_sorted_order),
+    ("failed child overrides earlier caller cancellation", test_cancelled_parent_observes_failed_child),
     ("image generation persists through FileStore off-loop", test_image_generation_persists_and_uses_worker_thread),
     ("existing persistent thumbnail is reused", test_existing_thumbnail_is_reused_without_source_read),
     ("concurrent image requests generate exactly once", test_concurrent_requests_generate_once),
@@ -1274,9 +1503,15 @@ TESTS = [
     ("asset deletion cannot race thumbnail persistence", test_asset_delete_cannot_race_thumbnail_save),
     ("cancelled asset deletion finishes before propagating", test_cancelled_asset_delete_finishes_mutation_before_propagating),
     ("task deletion removes sources and thumbnails", test_task_delete_removes_sources_and_thumbnails),
+    ("zero-asset task deletion uses task lifecycle", test_zero_asset_task_delete_uses_task_lifecycle),
+    ("task deletion rejects a finishing terminal runner", test_task_delete_rejects_terminal_runner_before_cleanup),
     ("task deletion cannot race thumbnail persistence", test_task_delete_cannot_race_thumbnail_save),
     ("cancelled task deletion finishes before propagating", test_cancelled_task_delete_finishes_mutation_before_propagating),
     ("task retry removes sources and thumbnails", test_retry_removes_sources_and_thumbnails),
+    ("retry rejects a finishing terminal runner", test_retry_rejects_terminal_runner_before_cleanup),
+    ("retry reloads assets after runner finishes", test_retry_reloads_assets_after_runner_finishes),
+    ("concurrent zero-asset retries spawn once", test_concurrent_zero_asset_retries_spawn_once),
+    ("retry spawn refusal persists recoverable error", test_retry_spawn_refusal_persists_recoverable_error),
     ("task retry cannot race thumbnail persistence", test_retry_cannot_race_thumbnail_save),
     ("cancelled retry finishes and spawns before propagating", test_cancelled_retry_finishes_and_spawns_before_propagating),
     ("cleanup failures are reported without restoring DB records", test_cleanup_failures_do_not_restore_database_records),

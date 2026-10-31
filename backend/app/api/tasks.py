@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import uuid
+from datetime import datetime
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, StreamingResponse
@@ -23,6 +24,7 @@ from app.media import guess_mime
 from app.thumbs import (
     cleanup_asset_files,
     make_image_thumb,
+    task_lifecycle_key,
     thumb_key,
     thumbnail_lifecycle,
     wait_for_task_completion,
@@ -390,35 +392,62 @@ async def retry_task(
     if task.status not in ("error", "cancelled"):
         raise HTTPException(status_code=400, detail="Only failed or cancelled tasks can be retried")
 
-    # 清理上次运行遗留的素材（记录 + 文件），避免重试后素材翻倍
-    result = await db.execute(select(Asset).where(Asset.task_id == task.id))
-    old_assets = result.scalars().all()
-    derived_keys = [
-        thumb_key(asset.task_id, asset.file_name)
-        for asset in old_assets
-    ]
+    task_key = task_lifecycle_key(task.id)
 
     async def retry_operation() -> Task:
-        async with thumbnail_lifecycle(derived_keys):
-            for old_asset in old_assets:
-                await asyncio.to_thread(
-                    cleanup_asset_files,
-                    old_asset.file_path,
-                    old_asset.task_id,
-                    old_asset.file_name,
-                )
-                await db.delete(old_asset)
-
-            # 清掉上一轮的取消登记，否则执行协程一进轮询就当成「已取消」直接退出
-            clear_cancel_request(task.id)
-            task.status = "pending"
-            task.error_msg = ""
-            task.progress = 0.0
-            task.result = {}
-            task.finished_at = None
-            await db.commit()
+        async with thumbnail_lifecycle([task_key]):
             await db.refresh(task)
-            await spawn_task(task.id)
+            if task.id in _running_tasks:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Task runner is still finishing; retry again shortly",
+                )
+            if task.status not in ("error", "cancelled"):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Task is no longer in a retryable terminal state",
+                )
+
+            # Load outputs only after the old runner is confirmed finished.
+            result = await db.execute(select(Asset).where(Asset.task_id == task.id))
+            old_assets = result.scalars().all()
+            derived_keys = [
+                thumb_key(asset.task_id, asset.file_name)
+                for asset in old_assets
+            ]
+            async with thumbnail_lifecycle(derived_keys):
+                for old_asset in old_assets:
+                    await asyncio.to_thread(
+                        cleanup_asset_files,
+                        old_asset.file_path,
+                        old_asset.task_id,
+                        old_asset.file_name,
+                    )
+                    await db.delete(old_asset)
+
+                # 清掉上一轮的取消登记，否则执行协程一进轮询就当成「已取消」直接退出
+                clear_cancel_request(task.id)
+                task.status = "pending"
+                task.error_msg = ""
+                task.progress = 0.0
+                task.result = {}
+                task.finished_at = None
+                await db.commit()
+                await db.refresh(task)
+                spawned = await spawn_task(task.id)
+                if not spawned:
+                    task.status = "error"
+                    task.error_msg = "Retry could not start; please retry again"
+                    task.finished_at = datetime.utcnow()
+                    await db.commit()
+                    await db.refresh(task)
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "Retry could not start; task returned to a "
+                            "recoverable error state"
+                        ),
+                    )
             return task
 
     operation = asyncio.create_task(
@@ -448,45 +477,54 @@ async def delete_task(
         )
 
     # 正在跑的任务不能删：后台协程还会往这条记录写进度/素材，删了就是竞态
-    if task.status == "running" or task.id in _running_tasks:
+    if task.status == "running":
         raise HTTPException(
             status_code=400, detail="任务正在执行中，请等它完成或失败后再删除"
         )
 
-    result = await db.execute(select(Asset).where(Asset.task_id == task.id))
-    assets = result.scalars().all()
-    derived_keys = [
-        thumb_key(asset.task_id, asset.file_name)
-        for asset in assets
-    ]
+    task_key = task_lifecycle_key(task.id)
 
     async def delete_operation() -> dict:
         files_removed = 0
         file_errors: list[str] = []
         thumbnails_removed = 0
         thumbnail_errors: list[str] = []
-        async with thumbnail_lifecycle(derived_keys):
-            for asset in assets:
-                source_result, thumbnail_result = await asyncio.to_thread(
-                    cleanup_asset_files,
-                    asset.file_path,
-                    asset.task_id,
-                    asset.file_name,
+        async with thumbnail_lifecycle([task_key]):
+            await db.refresh(task)
+            if task.status in ("pending", "running") or task.id in _running_tasks:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Task runner is still finishing; delete again shortly",
                 )
-                source_removed, source_error = source_result
-                thumbnail_removed, thumbnail_error = thumbnail_result
-                if source_removed:
-                    files_removed += 1
-                elif source_error and source_error != "文件本就不存在":
-                    file_errors.append(f"{asset.id}: {source_error}")
-                if thumbnail_removed:
-                    thumbnails_removed += 1
-                elif thumbnail_error:
-                    thumbnail_errors.append(f"{asset.id}: {thumbnail_error}")
-                await db.delete(asset)
 
-            await db.delete(task)
-            await db.commit()
+            result = await db.execute(select(Asset).where(Asset.task_id == task.id))
+            assets = result.scalars().all()
+            derived_keys = [
+                thumb_key(asset.task_id, asset.file_name)
+                for asset in assets
+            ]
+            async with thumbnail_lifecycle(derived_keys):
+                for asset in assets:
+                    source_result, thumbnail_result = await asyncio.to_thread(
+                        cleanup_asset_files,
+                        asset.file_path,
+                        asset.task_id,
+                        asset.file_name,
+                    )
+                    source_removed, source_error = source_result
+                    thumbnail_removed, thumbnail_error = thumbnail_result
+                    if source_removed:
+                        files_removed += 1
+                    elif source_error and source_error != "文件本就不存在":
+                        file_errors.append(f"{asset.id}: {source_error}")
+                    if thumbnail_removed:
+                        thumbnails_removed += 1
+                    elif thumbnail_error:
+                        thumbnail_errors.append(f"{asset.id}: {thumbnail_error}")
+                    await db.delete(asset)
+
+                await db.delete(task)
+                await db.commit()
 
         return {
             "message": "Task deleted",

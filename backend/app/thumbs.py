@@ -93,6 +93,11 @@ def thumb_key(task_id: str, file_name: str) -> str:
     return f"{task_id}/thumb_{file_name}.jpg"
 
 
+def task_lifecycle_key(task_id: str) -> str:
+    """Coordination key for mutations that affect a task as a whole."""
+    return f"task-lifecycle:{task_id}"
+
+
 @asynccontextmanager
 async def thumbnail_lifecycle(keys: Iterable[str]) -> AsyncIterator[None]:
     """Own thumbnail generation/cleanup for sorted storage keys."""
@@ -128,9 +133,14 @@ async def wait_for_task_completion(task: asyncio.Task[_T]) -> _T:
 
     try:
         result = task.result()
-    except BaseException:
+    except BaseException as exc:
         if cancellation is not None:
-            raise cancellation
+            logger.error(
+                "Lifecycle task failed after caller cancellation operation=%s: %s",
+                task.get_name(),
+                exc,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
         raise
     if cancellation is not None:
         raise cancellation
