@@ -29,6 +29,17 @@ from test_env import SERVICE_BASE_URL, SERVICE_HOST, SERVICE_PORT
 BASE = SERVICE_BASE_URL
 PYTHON = sys.executable
 BACKEND_DIR = str(Path(__file__).resolve().parents[1])  # .../backend
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def destructive_environment_error(platform_name=None, host=None) -> str:
+    platform_name = sys.platform if platform_name is None else platform_name
+    host = SERVICE_HOST if host is None else host
+    if platform_name != "win32":
+        return "本脚本只支持 Windows（依赖 netstat/taskkill）"
+    if (host or "").lower() not in _LOOPBACK_HOSTS:
+        return f"拒绝终止远程服务：测试 origin 必须是本机回环地址，当前 host={host!r}"
+    return ""
 
 
 def api(method, path, token=None, body=None):
@@ -115,6 +126,11 @@ def wait_healthy(timeout=30) -> bool:
 
 
 def main() -> int:
+    environment_error = destructive_environment_error()
+    if environment_error:
+        print(environment_error)
+        return 2
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--user", default="e2e-recover")
     ap.add_argument("--pass", dest="password", default="E2ePass!2026")

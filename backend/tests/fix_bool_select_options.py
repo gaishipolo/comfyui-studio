@@ -60,41 +60,66 @@ def fix_field(field: dict) -> dict:
     return out
 
 
-T = req("/auth/login", "POST", {"username": "admin", "password": "admin123"})[1]["access_token"]
-st, templates = req("/templates", token=T)
-if st != 200:
-    print(f"拉模板列表失败：HTTP {st}")
-    sys.exit(1)
-items = templates if isinstance(templates, list) else templates.get("items", [])
+def main() -> int:
+    st, login = req("/auth/login", "POST", {"username": "admin", "password": "admin123"})
+    if st != 200 or not isinstance(login, dict) or not login.get("access_token"):
+        print(f"登录失败：HTTP {st} {login}")
+        return 1
+    token = login["access_token"]
 
-print(f"{'模板':38s} {'字段':16s} 改动")
-print("-" * 96)
-changed = 0
-for t in items:
-    schema = t.get("input_schema") or {}
-    fields = schema.get("fields") or []
-    targets = [f for f in fields if needs_fix(f)]
-    if not targets:
-        continue
-    names = ", ".join(f["name"] for f in targets)
-    print(f"{t['name'][:36]:38s} {names:16s} options 字符串 → 布尔")
+    st, templates = req("/templates", token=token)
+    if st != 200:
+        print(f"拉模板列表失败：HTTP {st}")
+        return 1
+    items = templates if isinstance(templates, list) else templates.get("items", [])
 
-    new_fields = [fix_field(f) if needs_fix(f) else f for f in fields]
-    for f in targets:
-        fixed = next(x for x in new_fields if x["name"] == f["name"])
-        print(f"{'':38s} {'':16s}   {f['name']}: {f.get('options')} → {fixed['options']}"
-              f"  default {f.get('default')!r} → {fixed.get('default')!r}")
-    changed += 1
+    print(f"{'模板':38s} {'字段':16s} 改动")
+    print("-" * 96)
+    changed = 0
+    applied = 0
+    failed = 0
+    for template in items:
+        schema = template.get("input_schema") or {}
+        fields = schema.get("fields") or []
+        targets = [field for field in fields if needs_fix(field)]
+        if not targets:
+            continue
+        names = ", ".join(field["name"] for field in targets)
+        print(f"{template['name'][:36]:38s} {names:16s} options 字符串 → 布尔")
 
-    if APPLY:
-        st, _ = req(f"/templates/{t['id']}", "PUT",
-                    {"input_schema": {**schema, "fields": new_fields}}, token=T)
-        print(f"{'':38s} {'':16s}   写库: HTTP {st}")
+        new_fields = [fix_field(field) if needs_fix(field) else field for field in fields]
+        for field in targets:
+            fixed = next(item for item in new_fields if item["name"] == field["name"])
+            print(
+                f"{'':38s} {'':16s}   {field['name']}: "
+                f"{field.get('options')} → {fixed['options']}  "
+                f"default {field.get('default')!r} → {fixed.get('default')!r}"
+            )
+        changed += 1
 
-print("-" * 96)
-if changed == 0:
-    print("没有需要修的模板")
-elif APPLY:
-    print(f"已修 {changed} 个模板")
-else:
-    print(f"共 {changed} 个模板待修 —— 确认无误后加 --apply 执行")
+        if APPLY:
+            st, response = req(
+                f"/templates/{template['id']}",
+                "PUT",
+                {"input_schema": {**schema, "fields": new_fields}},
+                token=token,
+            )
+            print(
+                f"{'':38s} {'':16s}   写库: HTTP {st}"
+                + ("" if st == 200 else f"  {response}")
+            )
+            applied += int(st == 200)
+            failed += int(st != 200)
+
+    print("-" * 96)
+    if changed == 0:
+        print("没有需要修的模板")
+    elif APPLY:
+        print(f"已修 {applied} 个模板，失败 {failed} 个")
+    else:
+        print(f"共 {changed} 个模板待修 —— 确认无误后加 --apply 执行")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

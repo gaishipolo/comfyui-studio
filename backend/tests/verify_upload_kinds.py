@@ -18,6 +18,9 @@ import sys
 import urllib.error
 import urllib.request
 import uuid
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from test_env import API_BASE_URL
 
@@ -61,30 +64,96 @@ def upload(path, token, filename, data, extra=""):
         return e.code, json.loads(e.read() or b"{}")
 
 
-T = post_json("/auth/login", {"username": "admin", "password": "admin123"})["access_token"]
-ENGINE = "grsai_minimax_h3"  # 这个插件实现了 upload_input（图片+音频都收）
+def main() -> int:
+    returned_keys: list[str] = []
 
-print("\n[1] 按 kind 上传")
-st, data = upload("/upload/file", T, "ref.mp3", TINY_MP3, f"?engine={ENGINE}&kind=audio")
-report("音频 200", st == 200, f"HTTP {st} {str(data)[:80]}")
-report("返回 wbinput: 短标记", str(data.get("filename", "")).startswith("wbinput:"), str(data.get("filename"))[:40])
-report("回显 kind", data.get("kind") == "audio", str(data.get("kind")))
+    def remember_key(payload) -> None:
+        value = payload.get("filename", "") if isinstance(payload, dict) else ""
+        if value.startswith("wbinput:"):
+            returned_keys.append(value.removeprefix("wbinput:"))
 
-st, data = upload("/upload/file", T, "ref.png", TINY_PNG, f"?engine={ENGINE}&kind=image")
-report("图片 200", st == 200, f"HTTP {st}")
+    token = post_json(
+        "/auth/login",
+        {"username": "admin", "password": "admin123"},
+    )["access_token"]
+    engine = "grsai_minimax_h3"
 
-print("\n[2] 种类校验")
-st, data = upload("/upload/file", T, "ref.png", TINY_PNG, f"?engine={ENGINE}&kind=audio")
-report("图片冒充音频 → 400", st == 400, f"HTTP {st} {data.get('detail', '')[:40]}")
-st, data = upload("/upload/file", T, "ref.mp3", TINY_MP3, f"?engine={ENGINE}&kind=pdf")
-report("未知种类 → 400", st == 400, f"HTTP {st} {data.get('detail', '')[:40]}")
-st, data = upload("/upload/file", T, "empty.mp3", b"", f"?engine={ENGINE}&kind=audio")
-report("空文件 → 400", st == 400, f"HTTP {st}")
+    try:
+        print("\n[1] 按 kind 上传")
+        status, data = upload(
+            "/upload/file",
+            token,
+            "ref.mp3",
+            TINY_MP3,
+            f"?engine={engine}&kind=audio",
+        )
+        remember_key(data)
+        report("音频 200", status == 200, f"HTTP {status} {str(data)[:80]}")
+        report(
+            "返回 wbinput: 短标记",
+            str(data.get("filename", "")).startswith("wbinput:"),
+            str(data.get("filename"))[:40],
+        )
+        report("回显 kind", data.get("kind") == "audio", str(data.get("kind")))
 
-print("\n[3] 兼容老入口")
-st, data = upload("/upload/image", T, "old.png", TINY_PNG, f"?engine={ENGINE}")
-report("/upload/image 仍可用", st == 200, f"HTTP {st}")
+        status, data = upload(
+            "/upload/file",
+            token,
+            "ref.png",
+            TINY_PNG,
+            f"?engine={engine}&kind=image",
+        )
+        remember_key(data)
+        report("图片 200", status == 200, f"HTTP {status}")
 
-print()
-print("全部通过" if ok_all else "存在失败项")
-sys.exit(0 if ok_all else 1)
+        print("\n[2] 种类校验")
+        status, data = upload(
+            "/upload/file",
+            token,
+            "ref.png",
+            TINY_PNG,
+            f"?engine={engine}&kind=audio",
+        )
+        report("图片冒充音频 → 400", status == 400, f"HTTP {status} {data.get('detail', '')[:40]}")
+        status, data = upload(
+            "/upload/file",
+            token,
+            "ref.mp3",
+            TINY_MP3,
+            f"?engine={engine}&kind=pdf",
+        )
+        report("未知种类 → 400", status == 400, f"HTTP {status} {data.get('detail', '')[:40]}")
+        status, data = upload(
+            "/upload/file",
+            token,
+            "empty.mp3",
+            b"",
+            f"?engine={engine}&kind=audio",
+        )
+        report("空文件 → 400", status == 400, f"HTTP {status}")
+
+        print("\n[3] 兼容老入口")
+        status, data = upload(
+            "/upload/image",
+            token,
+            "old.png",
+            TINY_PNG,
+            f"?engine={engine}",
+        )
+        remember_key(data)
+        report("/upload/image 仍可用", status == 200, f"HTTP {status}")
+    finally:
+        from app.filestore import delete_asset_file
+
+        print("\n[4] 清理上传产物")
+        for key in returned_keys:
+            removed, reason = delete_asset_file(key)
+            report(f"删除 {key}", removed, reason)
+
+    print()
+    print("全部通过" if ok_all else "存在失败项")
+    return 0 if ok_all else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

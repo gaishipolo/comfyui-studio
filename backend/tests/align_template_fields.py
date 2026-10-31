@@ -139,16 +139,23 @@ def main():
     T = tok["access_token"]
 
     st, plugins = req("/plugins", token=T)
+    if st != 200:
+        print(f"拉插件列表失败：{st} {plugins}")
+        return 1
     items = plugins if isinstance(plugins, list) else plugins.get("items", [])
     by_name = {p.get("name"): p for p in items}
     print(f"插件 {len(items)} 个")
 
     st, tpls = req("/templates", token=T)
+    if st != 200:
+        print(f"拉模板列表失败：{st} {tpls}")
+        return 1
     tpls = tpls if isinstance(tpls, list) else tpls.get("items", [])
     print(f"模板 {len(tpls)} 个\n")
 
     changed = 0
     skipped = 0
+    failed = 0
     for t in tpls:
         name, engine, cap_kind = t.get("name"), t.get("engine"), t.get("capability")
         if args.only and args.only not in (name or ""):
@@ -188,12 +195,13 @@ def main():
             st, resp = req(f"/templates/{t['id']}", "PUT",
                            {"input_schema": {"fields": want}}, token=T)
             print(f"    → PUT {st}" + ("" if st == 200 else f"  {resp}"))
+            failed += int(st != 200)
         print()
 
     print(f"需要对齐 {changed} 个，跳过 {skipped} 个")
     if changed and not args.apply:
         print("（这是 dry-run，加 --apply 才写回）")
-    return 0
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

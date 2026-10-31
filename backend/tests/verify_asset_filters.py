@@ -15,6 +15,7 @@ import sys
 import urllib.error
 import urllib.request
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -88,6 +89,54 @@ async def seed(owner_id: str, created_at: datetime, name: str,
     return aid
 
 
+async def delete_member(username: str) -> bool:
+    from sqlalchemy import select
+
+    from app.database import async_session
+    from app.models.models import User
+
+    async with async_session() as database:
+        user = (
+            await database.execute(select(User).where(User.username == username))
+        ).scalar_one_or_none()
+        if user is None:
+            return True
+        await database.delete(user)
+        await database.commit()
+        return True
+
+
+@contextmanager
+def temporary_member():
+    name = f"deltest-{uuid.uuid4().hex[:8]}"
+    try:
+        status, _ = req(
+            "/auth/register",
+            "POST",
+            {"username": name, "password": "pw123456", "role": "member"},
+            token=ADMIN_T,
+        )
+        report("创建临时成员", status == 200, f"status={status}")
+        status, login = req(
+            "/auth/login",
+            "POST",
+            {"username": name, "password": "pw123456"},
+        )
+        if status != 200:
+            raise RuntimeError(f"临时成员登录失败: HTTP {status}")
+        yield name, login["access_token"], login["user"]["id"]
+    finally:
+        print("\n=== 清理 ===")
+        try:
+            for task_id in list(SEEDED_TASKS):
+                status, _ = req(f"/tasks/{task_id}", "DELETE", token=ADMIN_T)
+                report(f"清理任务 {task_id[:8]}", status in {200, 404}, f"status={status}")
+            status, _ = req(f"/templates/{TPL_ID}", "DELETE", token=ADMIN_T)
+            report("清理测试模板", status in {200, 404}, f"status={status}")
+        finally:
+            report("清理临时成员", asyncio.run(delete_member(name)), name)
+
+
 # 老素材（2026-10-01）归 admin，新素材（今天）也归 admin，再加一个今天的「他人」素材
 OLD = datetime(2026, 10, 1, 12, 0, 0)
 TODAY = datetime.now().replace(microsecond=0)
@@ -95,89 +144,71 @@ TODAY = datetime.now().replace(microsecond=0)
 a_old = asyncio.run(seed(ADMIN_ID, OLD, "old-asset"))
 a_new = asyncio.run(seed(ADMIN_ID, TODAY, "new-asset"))
 
-# 「他人」素材：建临时用户（跑完删），不用真实账号 —— 真实账号密码未知，登录会跳过断言
-MEMBER_NAME = f"deltest-{uuid.uuid4().hex[:8]}"
-st, _ = req("/auth/register", "POST",
-            {"username": MEMBER_NAME, "password": "pw123456", "role": "member"}, token=ADMIN_T)
-report("创建临时成员", st == 200, f"status={st}")
-_, m = req("/auth/login", "POST", {"username": MEMBER_NAME, "password": "pw123456"})
-MEMBER_T = m["access_token"]
-MEMBER_ID = m["user"]["id"]
-a_other = asyncio.run(seed(MEMBER_ID, TODAY, "other-asset"))
+with temporary_member() as (MEMBER_NAME, MEMBER_T, MEMBER_ID):
+    a_other = asyncio.run(seed(MEMBER_ID, TODAY, "other-asset"))
+    report("造好三份测试素材", True, f"old={a_old[:6]} new={a_new[:6]} other={a_other[:6]}")
 
-report("造好三份测试素材", True, f"old={a_old[:6]} new={a_new[:6]} other={a_other[:6]}")
+    print("\n=== 1. 时间范围 ===")
+    TODAY_STR = TODAY.strftime("%Y-%m-%d")
+    FUTURE_STR = (TODAY + timedelta(days=3)).strftime("%Y-%m-%d")
 
-print("\n=== 1. 时间范围 ===")
-TODAY_STR = TODAY.strftime("%Y-%m-%d")
-FUTURE_STR = (TODAY + timedelta(days=3)).strftime("%Y-%m-%d")
+    st, lst = req(f"/assets?created_from={TODAY_STR}&limit=200", token=ADMIN_T)
+    ids = {x["id"] for x in lst}
+    report("created_from 滤掉老素材", st == 200 and a_new in ids and a_old not in ids,
+           f"返回 {len(lst)} 条")
 
-st, lst = req(f"/assets?created_from={TODAY_STR}&limit=200", token=ADMIN_T)
-ids = {x["id"] for x in lst}
-report("created_from 滤掉老素材", st == 200 and a_new in ids and a_old not in ids,
-       f"返回 {len(lst)} 条")
+    st, lst = req(f"/assets?created_to={OLD.strftime('%Y-%m-%d')}&limit=200", token=ADMIN_T)
+    ids = {x["id"] for x in lst}
+    report("created_to 滤掉新素材（纯日期含当天全天）", st == 200 and a_old in ids and a_new not in ids,
+           f"返回 {len(lst)} 条")
 
-st, lst = req(f"/assets?created_to={OLD.strftime('%Y-%m-%d')}&limit=200", token=ADMIN_T)
-ids = {x["id"] for x in lst}
-report("created_to 滤掉新素材（纯日期含当天全天）", st == 200 and a_old in ids and a_new not in ids,
-       f"返回 {len(lst)} 条")
+    st, lst = req(f"/assets?created_from={TODAY_STR}&created_to={TODAY_STR}&limit=200", token=ADMIN_T)
+    ids = {x["id"] for x in lst}
+    report("同日范围只留今天的", st == 200 and a_new in ids and a_old not in ids, f"返回 {len(lst)} 条")
 
-st, lst = req(f"/assets?created_from={TODAY_STR}&created_to={TODAY_STR}&limit=200", token=ADMIN_T)
-ids = {x["id"] for x in lst}
-report("同日范围只留今天的", st == 200 and a_new in ids and a_old not in ids, f"返回 {len(lst)} 条")
+    st, lst = req(f"/assets?created_from={FUTURE_STR}&limit=200", token=ADMIN_T)
+    report("未来起点全部滤掉", st == 200 and len(lst) == 0, f"返回 {len(lst)} 条")
 
-st, lst = req(f"/assets?created_from={FUTURE_STR}&limit=200", token=ADMIN_T)
-report("未来起点全部滤掉", st == 200 and len(lst) == 0, f"返回 {len(lst)} 条")
+    print("\n=== 2. 创建人 ===")
+    st, lst = req(f"/assets?creator={MEMBER_ID}&limit=200", token=ADMIN_T)
+    ids = {x["id"] for x in lst}
+    report("creator 只留该用户的", st == 200 and a_other in ids and a_new not in ids and a_old not in ids,
+           f"返回 {len(lst)} 条")
 
-print("\n=== 2. 创建人 ===")
-st, lst = req(f"/assets?creator={MEMBER_ID}&limit=200", token=ADMIN_T)
-ids = {x["id"] for x in lst}
-report("creator 只留该用户的", st == 200 and a_other in ids and a_new not in ids and a_old not in ids,
-       f"返回 {len(lst)} 条")
+    st, lst = req(f"/assets?creator={ADMIN_ID}&limit=200", token=ADMIN_T)
+    ids = {x["id"] for x in lst}
+    report("creator=admin 留 admin 的", st == 200 and a_new in ids and a_old in ids and a_other not in ids,
+           f"返回 {len(lst)} 条")
 
-st, lst = req(f"/assets?creator={ADMIN_ID}&limit=200", token=ADMIN_T)
-ids = {x["id"] for x in lst}
-report("creator=admin 留 admin 的", st == 200 and a_new in ids and a_old in ids and a_other not in ids,
-       f"返回 {len(lst)} 条")
+    st, lst = req(f"/assets?creator={MEMBER_ID}&created_from=2026-10-27&limit=200", token=ADMIN_T)
+    ids = {x["id"] for x in lst}
+    report("组合筛选（人 + 时间）", st == 200 and ids == {a_other}, f"返回 {len(lst)} 条")
 
-st, lst = req(f"/assets?creator={MEMBER_ID}&created_from=2026-10-27&limit=200", token=ADMIN_T)
-ids = {x["id"] for x in lst}
-report("组合筛选（人 + 时间）", st == 200 and ids == {a_other}, f"返回 {len(lst)} 条")
+    st, lst = req(f"/assets?creator={ADMIN_ID}&limit=200", token=MEMBER_T)
+    ids = {x["id"] for x in lst}
+    report("member 借 creator 参数也穿不透隔离", st == 200 and a_new not in ids and a_old not in ids,
+           f"返回 {len(lst)} 条")
 
-# 隔离规则仍要生效：member 查别人的 creator 也只见共享的（默认全不共享 → 空）
-st, lst = req(f"/assets?creator={ADMIN_ID}&limit=200", token=MEMBER_T)
-ids = {x["id"] for x in lst}
-report("member 借 creator 参数也穿不透隔离", st == 200 and a_new not in ids and a_old not in ids,
-       f"返回 {len(lst)} 条")
+    print("\n=== kind 类型筛选 ===")
+    a_audio = asyncio.run(seed(ADMIN_ID, TODAY, "deltest-audio", mime="audio/mpeg", ext="mp3"))
 
-# ── 类型分栏（kind）：素材不只有图片了，列表要能按大类过滤 ──
-print("\n=== kind 类型筛选 ===")
-a_audio = asyncio.run(seed(ADMIN_ID, TODAY, "deltest-audio", mime="audio/mpeg", ext="mp3"))
+    st, rows = req("/assets?limit=200&kind=audio", token=ADMIN_T)
+    report("kind=audio 只返回音频",
+           st == 200 and all((a.get("mime_type") or "").startswith("audio/") for a in rows),
+           f"status={st} 共 {len(rows) if isinstance(rows, list) else '?'} 个")
+    report("kind=audio 能查到刚造的音频",
+           isinstance(rows, list) and any(a["id"] == a_audio for a in rows))
 
-st, rows = req("/assets?limit=200&kind=audio", token=ADMIN_T)
-report("kind=audio 只返回音频",
-       st == 200 and all((a.get("mime_type") or "").startswith("audio/") for a in rows),
-       f"status={st} 共 {len(rows) if isinstance(rows, list) else '?'} 个")
-report("kind=audio 能查到刚造的音频",
-       isinstance(rows, list) and any(a["id"] == a_audio for a in rows))
+    st, rows = req("/assets?limit=200&kind=image", token=ADMIN_T)
+    report("kind=image 不含音频",
+           st == 200 and all(not (a.get("mime_type") or "").startswith("audio/") for a in rows))
 
-st, rows = req("/assets?limit=200&kind=image", token=ADMIN_T)
-report("kind=image 不含音频",
-       st == 200 and all(not (a.get("mime_type") or "").startswith("audio/") for a in rows))
+    st, rows = req("/assets?limit=200&kind=video", token=ADMIN_T)
+    report("kind=video 不含图片/音频",
+           st == 200 and all((a.get("mime_type") or "").startswith("video/") for a in rows))
 
-st, rows = req("/assets?limit=200&kind=video", token=ADMIN_T)
-report("kind=video 不含图片/音频",
-       st == 200 and all((a.get("mime_type") or "").startswith("video/") for a in rows))
-
-st, _ = req("/assets?kind=xxx", token=ADMIN_T)
-report("非法 kind → 400（别静默当成全部）", st == 400, f"status={st}")
-
-print("\n=== 清理 ===")
-for tid in list(SEEDED_TASKS):
-    st, _ = req(f"/tasks/{tid}", "DELETE", token=ADMIN_T)
-    report(f"清理任务 {tid[:8]}", st == 200, f"status={st}")
-
-st, _ = req(f"/templates/{TPL_ID}", "DELETE", token=ADMIN_T)
-report("清理测试模板", st == 200, f"status={st}")
+    st, _ = req("/assets?kind=xxx", token=ADMIN_T)
+    report("非法 kind → 400（别静默当成全部）", st == 400, f"status={st}")
 
 print()
 print("全部通过 ✓" if ok_all else "存在失败 ✗")

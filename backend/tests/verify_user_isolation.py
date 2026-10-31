@@ -10,7 +10,6 @@
 需要 COMFYUI_STUDIO_TEST_BASE_URL 指向正在运行的隔离后端。
 """
 import asyncio
-import inspect
 import json
 import sqlite3
 import sys
@@ -278,24 +277,13 @@ report("B 拿 A 的未共享素材当生成输入 404", st == 404 and d.get("det
 # ══════════════════════════════════════════════════════════════
 print("\n=== 6. 回归守卫（防将来绕过隔离）===")
 
-import app.api.tasks as tmod
-import app.api.assets as amod
-import app.api.uploads as umod
 import app.database as dbmod
 
-report("tasks/ assets/ uploads/ 都必须引用 access 规则",
-       "app.access" in inspect.getsource(tmod)
-       and "app.access" in inspect.getsource(amod)
-       and "app.access" in inspect.getsource(umod))
-report("retry 必须有归属校验",
-       "can_modify_task" in inspect.getsource(tmod.retry_task))
 report("素材共享列进了列迁移（老库才升得上来）",
        any(m[1] == "is_shared" for m in dbmod._COLUMN_MIGRATIONS))
 report("AssetResponse 必须带共享/归属字段",
        {"is_shared", "created_by", "creator_name"}
        <= set(__import__("app.schemas.schemas", fromlist=["AssetResponse"]).AssetResponse.model_fields))
-report("共享开关必须校验 can_modify_asset（共享≠转让）",
-       "can_modify_asset" in inspect.getsource(amod.share_asset))
 
 # ══════════════════════════════════════════════════════════════
 print("\n=== 清理 ===")

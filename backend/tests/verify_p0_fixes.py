@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import os
 import sys
 import tempfile
 import time
@@ -40,6 +41,7 @@ from test_env import SERVICE_BASE_URL  # noqa: E402
 
 BASE = SERVICE_BASE_URL
 ADMIN_PASSWORD = "admin123"
+FORCE_FAILURE_ENV = "COMFYUI_STUDIO_P0_FORCE_FAILURE_AFTER_PLUGIN_UPLOAD"
 PASS = 0
 FAIL = 0
 
@@ -151,7 +153,7 @@ class P0ContractProvider(GenerationProvider):
     return source.encode()
 
 
-def service_contracts(plugin_name: str) -> str | None:
+def service_contracts(plugin_name: str) -> None:
     print("\n=== isolated service contracts ===")
     code, body = req(
         "POST",
@@ -162,107 +164,119 @@ def service_contracts(plugin_name: str) -> str | None:
     if code != 200 or not isinstance(body, dict) or not body.get("access_token"):
         return None
     token = body["access_token"]
+    plugin_uploaded = False
 
-    ids = [str(uuid.uuid4()) for _ in range(51)]
-    code, body = req(
-        "POST",
-        "/api/assets/batch-download",
-        token=token,
-        json_body=ids,
-        raw=True,
-    )
-    report("51 assets are rejected before archive work", code == 400, f"HTTP {code}")
-    report("archive limit response identifies 50", b"50" in body, body[:100])
+    try:
+        ids = [str(uuid.uuid4()) for _ in range(51)]
+        code, body = req(
+            "POST",
+            "/api/assets/batch-download",
+            token=token,
+            json_body=ids,
+            raw=True,
+        )
+        report("51 assets are rejected before archive work", code == 400, f"HTTP {code}")
+        report("archive limit response identifies 50", b"50" in body, body[:100])
 
-    oversized = b"x" * (20 * 1024 * 1024 + 1)
-    code, body = multipart(
-        "/api/upload/file",
-        token,
-        "oversized.png",
-        oversized,
-        "image/png",
-        "?kind=image",
-    )
-    report("image upload rejects max plus one byte", code == 400, f"HTTP {code}")
-    report("image limit response identifies 20MB", "20MB" in str(body), body)
-
-    code, body = multipart(
-        "/api/plugins/upload",
-        token,
-        f"{plugin_name}.py",
-        provider_source(plugin_name, "P0 contract v1"),
-        "text/x-python",
-    )
-    report("unique temporary Provider uploads", code == 200, f"HTTP {code} {body}")
-    if code == 200:
+        oversized = b"x" * (20 * 1024 * 1024 + 1)
         code, body = multipart(
             "/api/upload/file",
             token,
-            "tiny.png",
-            b"small-image-fixture",
+            "oversized.png",
+            oversized,
             "image/png",
-            f"?engine={urllib.parse.quote(plugin_name)}&kind=image",
+            "?kind=image",
         )
-        report(
-            "small upload reaches temporary Provider",
-            code == 200 and str(body.get("filename", "")).startswith("p0:tiny.png:"),
-            f"HTTP {code} {body}",
-        )
-
-        code, body = multipart(
-            "/api/upload/file",
-            token,
-            "leak.png",
-            b"small-image-fixture",
-            "image/png",
-            f"?engine={urllib.parse.quote(plugin_name)}&kind=image",
-        )
-        detail = str(body.get("detail", "")) if isinstance(body, dict) else str(body)
-        report("Provider upload failures remain 502", code == 502, f"HTTP {code}")
-        report(
-            "Provider upload failure is sanitized",
-            all(
-                secret not in detail
-                for secret in (
-                    "192.168.0.1",
-                    "URLSECRET",
-                    "HEADERSECRET",
-                    "PASSWORDSECRET",
-                )
-            )
-            and "<url>" in detail
-            and "<redacted>" in detail,
-            detail,
-        )
+        report("image upload rejects max plus one byte", code == 400, f"HTTP {code}")
+        report("image limit response identifies 20MB", "20MB" in str(body), body)
 
         code, body = multipart(
             "/api/plugins/upload",
             token,
-            f"{plugin_name}-upgrade.py",
-            provider_source(plugin_name, "P0 contract v2"),
+            f"{plugin_name}.py",
+            provider_source(plugin_name, "P0 contract v1"),
             "text/x-python",
         )
-        report("replacement is keyed by declared Provider.name", code == 200, f"HTTP {code}")
-        code, plugins = req("GET", "/api/plugins", token=token)
-        current = next(
-            (item for item in plugins if item.get("name") == plugin_name),
-            {},
-        ) if isinstance(plugins, list) else {}
-        report("replacement updates the registered Provider", current.get("label") == "P0 contract v2")
+        plugin_uploaded = code == 200
+        report("unique temporary Provider uploads", plugin_uploaded, f"HTTP {code} {body}")
+        if plugin_uploaded and os.environ.get(FORCE_FAILURE_ENV) == "1":
+            raise RuntimeError("forced failure after temporary Provider upload")
 
-    code, body = multipart(
-        "/api/plugins/upload",
-        token,
-        "reserved.py",
-        provider_source("comfyui", "reserved"),
-        "text/x-python",
-    )
-    report(
-        "reserved built-in Provider name is rejected",
-        code == 400 and "内置" in str(body),
-        f"HTTP {code} {body}",
-    )
-    return token
+        if plugin_uploaded:
+            code, body = multipart(
+                "/api/upload/file",
+                token,
+                "tiny.png",
+                b"small-image-fixture",
+                "image/png",
+                f"?engine={urllib.parse.quote(plugin_name)}&kind=image",
+            )
+            report(
+                "small upload reaches temporary Provider",
+                code == 200 and str(body.get("filename", "")).startswith("p0:tiny.png:"),
+                f"HTTP {code} {body}",
+            )
+
+            code, body = multipart(
+                "/api/upload/file",
+                token,
+                "leak.png",
+                b"small-image-fixture",
+                "image/png",
+                f"?engine={urllib.parse.quote(plugin_name)}&kind=image",
+            )
+            detail = str(body.get("detail", "")) if isinstance(body, dict) else str(body)
+            report("Provider upload failures remain 502", code == 502, f"HTTP {code}")
+            report(
+                "Provider upload failure is sanitized",
+                all(
+                    secret not in detail
+                    for secret in (
+                        "192.168.0.1",
+                        "URLSECRET",
+                        "HEADERSECRET",
+                        "PASSWORDSECRET",
+                    )
+                )
+                and "<url>" in detail
+                and "<redacted>" in detail,
+                detail,
+            )
+
+            code, body = multipart(
+                "/api/plugins/upload",
+                token,
+                f"{plugin_name}-upgrade.py",
+                provider_source(plugin_name, "P0 contract v2"),
+                "text/x-python",
+            )
+            report("replacement is keyed by declared Provider.name", code == 200, f"HTTP {code}")
+            code, plugins = req("GET", "/api/plugins", token=token)
+            current = next(
+                (item for item in plugins if item.get("name") == plugin_name),
+                {},
+            ) if isinstance(plugins, list) else {}
+            report("replacement updates the registered Provider", current.get("label") == "P0 contract v2")
+
+        code, body = multipart(
+            "/api/plugins/upload",
+            token,
+            "reserved.py",
+            provider_source("comfyui", "reserved"),
+            "text/x-python",
+        )
+        report(
+            "reserved built-in Provider name is rejected",
+            code == 400 and "内置" in str(body),
+            f"HTTP {code} {body}",
+        )
+    finally:
+        if plugin_uploaded:
+            try:
+                code, _ = req("DELETE", f"/api/plugins/{plugin_name}", token=token)
+                report("temporary Provider is removed", code in {200, 404}, f"HTTP {code}")
+            except Exception as exc:  # noqa: BLE001 - cleanup failure must affect aggregate exit
+                report("temporary Provider cleanup", False, f"{type(exc).__name__}: {exc}")
 
 
 def sanitizer_contract() -> None:
@@ -474,18 +488,10 @@ def run_contract(name: str, contract) -> None:
 def main() -> int:
     started = time.monotonic()
     plugin_name = f"p0_contract_{uuid.uuid4().hex[:10]}"
-    token: str | None = None
     try:
-        token = service_contracts(plugin_name)
+        service_contracts(plugin_name)
     except Exception as exc:  # noqa: BLE001 - offline contracts should still run
         report("isolated service contracts", False, f"{type(exc).__name__}: {exc}")
-    finally:
-        if token:
-            try:
-                code, _ = req("DELETE", f"/api/plugins/{plugin_name}", token=token)
-                report("temporary Provider is removed", code in {200, 404}, f"HTTP {code}")
-            except Exception as exc:  # noqa: BLE001
-                report("temporary Provider cleanup", False, f"{type(exc).__name__}: {exc}")
 
     run_contract("sanitizer contract", sanitizer_contract)
     run_contract("temporary archive contract", archive_contract)

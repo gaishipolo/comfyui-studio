@@ -59,6 +59,7 @@ async def main():
             before[key] = json.loads(r.scalar_one())
 
     # 跑两次迁移（验证幂等 + 边界）
+    all_rounds_ok = True
     for round_no in (1, 2):
         async with engine.begin() as conn:
             await conn.run_sync(_unescape_json_columns)
@@ -89,6 +90,7 @@ async def main():
                     shown = repr(sample)[:42]
                     print(f"  {clean('✅')} {key:22} 存储含转义={is_ascii!s:5} 值={shown}")
 
+        all_rounds_ok &= ok_all
         print(f"  -> 第{round_no}轮 {'全部无损' if ok_all else '存在损坏'}\n")
 
     # 专项：字面 \u1234 必须原样保留，不能被"解码"成 A
@@ -101,8 +103,9 @@ async def main():
 
     await engine.dispose()
     DB.unlink()
-    print(f"\n结论: {'迁移对边界数据安全' if ok_literal else '迁移会破坏边界数据 —— 必须修'}")
-    return 0 if ok_literal else 1
+    all_ok = all_rounds_ok and ok_literal
+    print(f"\n结论: {'迁移对边界数据安全' if all_ok else '迁移会破坏边界数据 —— 必须修'}")
+    return 0 if all_ok else 1
 
 
 sys.exit(asyncio.run(main()))

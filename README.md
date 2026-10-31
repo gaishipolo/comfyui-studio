@@ -142,7 +142,7 @@ npm run build                  # 产物在 frontend/dist
 | 临时或隔离资源，不起 FastAPI | 13 | `verify_batch_archive.py`、`verify_error_boundary.py`、`verify_filestore.py`、`verify_filestore_live.py`、`verify_grsai_plugins.py`、`verify_json_ascii.py`、`verify_json_migration.py`、`verify_json_migration_edge.py`、`verify_media_reliability.py`、`verify_multi_image.py`、`verify_queue_and_auth.py`、`verify_tag_json_each.py`、`verify_tag_persist.py` |
 | 隔离 FastAPI 服务 | 13 | `verify_asset_filters.py`、`verify_delete_assets_tasks.py`、`verify_delete_semantics.py`、`verify_frontend_contract.py`、`verify_multi_image_api.py`、`verify_p0_fixes.py`、`verify_plugin_loader.py`、`verify_prod_deploy.py`、`verify_schema_normalization.py`、`verify_template_export.py`、`verify_upload_kinds.py`、`verify_usage_stats.py`、`verify_user_isolation.py` |
 | 隔离服务 + 真实 ComfyUI | 2 | `verify_b5_b6.py`、`verify_from_asset_upload.py` |
-| 破坏性重启（不计入 36 个 verify 脚本） | - | `e2e_restart_recovery.py` |
+| 破坏性重启（不计入 36 个 verify 脚本） | - | `e2e_restart_recovery.py`（仅 Windows） |
 
 所有命令从 `backend/` 运行。服务脚本读取 `COMFYUI_STUDIO_TEST_BASE_URL`（值是服务 origin，不含 `/api`）；未设置时为兼容手工运行而默认使用 `http://127.0.0.1:8000`。例如：
 
@@ -153,11 +153,18 @@ $env:COMFYUI_STUDIO_TEST_BASE_URL = "http://127.0.0.1:8765"
 
 服务脚本固定用 `admin` / `admin123`。只可对全新、可丢弃的数据库设置 `ADMIN_INITIAL_PASSWORD=admin123`；已有管理员时该变量不会重置密码。服务回归会创建、修改和删除数据库行、插件文件、工作流及素材，禁止指向用户正在使用的服务。
 
+部分脚本还有额外前置条件：
+
+- `verify_prod_deploy.py`：先在 `frontend/` 执行 `npm ci` 和 `npm run build`，服务的 `FRONTEND_DIST` 必须指向这份非空构建产物；隔离数据库还要至少有一个模板，才能验证业务响应不是空壳。
+- `verify_template_export.py`：隔离服务中必须预置至少一个绑定现有工作流文件的模板，并让 `WORKFLOW_DIR` 指向对应工作流快照。
+- `verify_b5_b6.py`：需要真实 ComfyUI、一个名称含 `Flux2` 的可用模板及其工作流；脚本会真实提交生成任务，不属于离线回归。
+- `e2e_upload_generate.py`：需要真实 ComfyUI，并在任何请求前校验 `COMFYUI_STUDIO_E2E_IMAGE_PATH` 和 `COMFYUI_STUDIO_E2E_TEMPLATE_ID`；可用 `COMFYUI_STUDIO_E2E_ENGINE` 覆盖默认 `comfyui`。模板必须接受 `ref_image`、`prompt`、`width`、`height` 参数，图片路径必须是隔离测试夹具。
+
 `verify_plugin_loader.py`、`verify_from_asset_upload.py`、`verify_usage_stats.py`、`verify_user_isolation.py`、`verify_tag_json_each.py` 和 `verify_tag_persist.py` 仍直接打开 `backend/workbench.db`；`e2e_restart_recovery.py` 和维护脚本 `backfill_video_thumbs.py` 也有同样约束。因此完整服务回归要在一次性 worktree 中使用该默认 SQLite 文件名。worktree 独占且数据库不受 Git 跟踪，测试后可删除，不会接触原工作区数据库。
 
 `verify_filestore_live.py` 会先探测配置的 MinIO，再退回进程内 S3 线格式服务；不允许外连时不要运行它。`verify_multi_image.py` 会写配置的存储目录，也必须使用隔离 `STORAGE_DIR`。
 
-真实 ComfyUI 分类会提交任务；`e2e_upload_generate.py` 也属于这一类。`e2e_restart_recovery.py` 是单独的破坏性重启脚本，会终止并重启目标端口上的后端，不计入上述 36 个脚本，不能混入普通回归。UI、真实文生图和破坏性重启结果均不能由离线或服务契约脚本代替。
+真实 ComfyUI 分类会提交任务；`e2e_upload_generate.py` 也属于这一类。`e2e_restart_recovery.py` 是 **Windows-only、破坏性、仅限隔离 worktree** 的脚本，会终止并重启配置的本机回环端口；它拒绝远程 origin，不计入上述 36 个脚本，并明确排除在普通回归和稳定基线验证之外。UI、真实文生图和破坏性重启结果均不能由离线或服务契约脚本代替。
 
 ## 目录结构
 

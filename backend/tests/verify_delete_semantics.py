@@ -1,96 +1,179 @@
-"""删除 vs 停用 语义验证 —— 两个不同按钮不能是同一个行为
+"""Verify that template disable and delete remain distinct operations."""
 
-停用 = is_active=False，保留记录、名称仍占用
-删除 = 物理删除，名称可重新使用
-有任务记录的模板不允许删除（保护历史）
-"""
-import json, sys, urllib.error, urllib.request, uuid
+import asyncio
+import json
+import sys
+import urllib.error
+import urllib.request
+import uuid
+from pathlib import Path
 
-from test_env import API_BASE_URL
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from test_env import API_BASE_URL  # noqa: E402
+
 
 BASE = API_BASE_URL
-ok_all = True
 
 
 def req(path, method="GET", data=None, token=None):
-    r = urllib.request.Request(BASE + path, method=method)
-    r.add_header("Content-Type", "application/json")
+    request = urllib.request.Request(BASE + path, method=method)
+    request.add_header("Content-Type", "application/json")
     if token:
-        r.add_header("Authorization", "Bearer " + token)
+        request.add_header("Authorization", "Bearer " + token)
     body = json.dumps(data).encode() if data is not None else None
     try:
-        with urllib.request.urlopen(r, body) as resp:
-            return resp.status, json.loads(resp.read() or b"{}")
-    except urllib.error.HTTPError as e:
-        return e.code, json.loads(e.read() or b"{}")
+        with urllib.request.urlopen(request, body) as response:
+            return response.status, json.loads(response.read() or b"{}")
+    except urllib.error.HTTPError as exc:
+        return exc.code, json.loads(exc.read() or b"{}")
 
 
-def report(label, cond, detail=""):
-    global ok_all
-    ok_all &= bool(cond)
-    print(f"  [{'OK' if cond else 'FAIL'}] {label}" + (f"  {detail}" if detail else ""))
+async def seed_task(template_id: str, owner_id: str) -> str:
+    from app.database import async_session
+    from app.models.models import Task
+
+    task_id = uuid.uuid4().hex
+    async with async_session() as database:
+        database.add(Task(
+            id=task_id,
+            template_id=template_id,
+            created_by=owner_id,
+            batch_id=uuid.uuid4().hex,
+            status="done",
+            progress=100.0,
+            params={},
+            result={},
+            error_msg="",
+        ))
+        await database.commit()
+    return task_id
 
 
-_, tok = req("/auth/login", "POST", {"username": "admin", "password": "admin123"})
-T = tok["access_token"]
+def main() -> int:
+    ok = True
 
-N = f"删除语义-{uuid.uuid4().hex[:8]}"
+    def report(label, condition, detail=""):
+        nonlocal ok
+        ok &= bool(condition)
+        print(f"  [{'OK' if condition else 'FAIL'}] {label}" + (f"  {detail}" if detail else ""))
 
-print("=== 1. 创建 → 删除 → 名称应可复用 ===")
-st, tpl = req("/templates", "POST", {"name": N, "is_active": True}, token=T)
-report("创建模板", st == 200, f"status={st}")
-tid = tpl["id"]
+    status, login = req(
+        "/auth/login",
+        "POST",
+        {"username": "admin", "password": "admin123"},
+    )
+    if status != 200 or not login.get("access_token"):
+        print(f"登录失败：HTTP {status} {login}")
+        return 1
+    token = login["access_token"]
+    owner_id = login["user"]["id"]
 
-st, _ = req(f"/templates/{tid}", "DELETE", token=T)
-report("删除模板", st == 200, f"status={st}")
+    cleanup_templates: list[str] = []
+    cleanup_tasks: list[str] = []
+    try:
+        reusable_name = f"删除语义-{uuid.uuid4().hex[:8]}"
+        print("=== 1. 创建 → 删除 → 名称应可复用 ===")
+        status, template = req(
+            "/templates",
+            "POST",
+            {"name": reusable_name, "is_active": True},
+            token=token,
+        )
+        report("创建模板", status == 200, f"status={status}")
+        if status != 200:
+            return 1
+        first_id = template["id"]
+        cleanup_templates.append(first_id)
 
-# 删除后不应出现在任何列表里
-st, alls = req("/templates?include_inactive=true", token=T)
-names = [t["name"] for t in alls]
-report("删除后从列表消失", N not in names, f"剩 {len(names)} 个模板")
+        status, _ = req(f"/templates/{first_id}", "DELETE", token=token)
+        report("删除模板", status == 200, f"status={status}")
+        if status == 200:
+            cleanup_templates.remove(first_id)
 
-# 关键：名称可复用
-st, tpl2 = req("/templates", "POST", {"name": N, "is_active": True}, token=T)
-report("名称可重新使用", st == 200, f"status={st}")
-if st == 200:
-    tid2 = tpl2["id"]
-else:
-    tid2 = None
+        status, templates = req("/templates?include_inactive=true", token=token)
+        names = [item["name"] for item in templates] if status == 200 else []
+        report("删除后从列表消失", status == 200 and reusable_name not in names)
 
-print("\n=== 2. 停用 ≠ 删除：停用后名称仍被占用 ===")
-M = f"停用语义-{uuid.uuid4().hex[:8]}"
-st, tplm = req("/templates", "POST", {"name": M, "is_active": True}, token=T)
-report("创建模板 M", st == 200)
-tidm = tplm["id"]
+        status, replacement = req(
+            "/templates",
+            "POST",
+            {"name": reusable_name, "is_active": True},
+            token=token,
+        )
+        report("名称可重新使用", status == 200, f"status={status}")
+        if status == 200:
+            cleanup_templates.append(replacement["id"])
 
-st, _ = req(f"/templates/{tidm}", "PUT", {"is_active": False}, token=T)
-report("停用模板 M", st == 200)
+        print("\n=== 2. 停用 ≠ 删除：停用后名称仍被占用 ===")
+        disabled_name = f"停用语义-{uuid.uuid4().hex[:8]}"
+        status, disabled = req(
+            "/templates",
+            "POST",
+            {"name": disabled_name, "is_active": True},
+            token=token,
+        )
+        report("创建模板 M", status == 200)
+        if status != 200:
+            return 1
+        disabled_id = disabled["id"]
+        cleanup_templates.append(disabled_id)
 
-st, alls = req("/templates?include_inactive=true", token=T)
-report("停用后仍出现在管理列表", M in [t["name"] for t in alls])
+        status, _ = req(
+            f"/templates/{disabled_id}",
+            "PUT",
+            {"is_active": False},
+            token=token,
+        )
+        report("停用模板 M", status == 200)
+        status, templates = req("/templates?include_inactive=true", token=token)
+        report(
+            "停用后仍出现在管理列表",
+            status == 200 and disabled_name in [item["name"] for item in templates],
+        )
+        status, _ = req("/templates", "POST", {"name": disabled_name}, token=token)
+        report("停用后名称仍被占用(应 400)", status == 400, f"status={status}")
 
-st, _ = req("/templates", "POST", {"name": M}, token=T)
-report("停用后名称仍被占用(应 400)", st == 400, f"status={st}")
+        print("\n=== 3. 有任务记录的模板不允许删除 ===")
+        used_name = f"使用中语义-{uuid.uuid4().hex[:8]}"
+        status, used = req(
+            "/templates",
+            "POST",
+            {"name": used_name, "is_active": True},
+            token=token,
+        )
+        report("创建使用中模板", status == 200, f"status={status}")
+        if status != 200:
+            return 1
+        used_id = used["id"]
+        cleanup_templates.append(used_id)
+        used_task_id = asyncio.run(seed_task(used_id, owner_id))
+        cleanup_tasks.append(used_task_id)
 
-print("\n=== 3. 有任务记录的模板不允许删除 ===")
-# 找一个真正有任务的模板
-st, tasks = req("/tasks?limit=50", token=T)
-used_tid = tasks[0]["template_id"] if tasks else None
-if used_tid:
-    st, body = req(f"/templates/{used_tid}", "DELETE", token=T)
-    report("带任务的模板删除被拒(应 400)", st == 400,
-           f"status={st} detail={body.get('detail', '')[:40]}")
-    # 仍应存在
-    st, _ = req(f"/templates/{used_tid}", token=T)
-    report("被拒后模板仍在", st == 200)
-else:
-    print("  [SKIP] 无任务数据，跳过")
+        status, body = req(f"/templates/{used_id}", "DELETE", token=token)
+        report(
+            "带任务的模板删除被拒(应 400)",
+            status == 400,
+            f"status={status} detail={body.get('detail', '')[:40]}",
+        )
+        status, _ = req(f"/templates/{used_id}", token=token)
+        report("被拒后模板仍在", status == 200)
+    finally:
+        print("\n=== 4. 清理 ===")
+        for task_id in cleanup_tasks:
+            status, _ = req(f"/tasks/{task_id}", "DELETE", token=token)
+            report(f"清理任务 {task_id[:8]}", status in {200, 404}, f"status={status}")
+        for template_id in cleanup_templates:
+            status, _ = req(f"/templates/{template_id}", "DELETE", token=token)
+            report(
+                f"清理模板 {template_id[:8]}",
+                status in {200, 404},
+                f"status={status}",
+            )
 
-print("\n=== 4. 清理 ===")
-for tid in [tid2, tidm]:
-    if tid:
-        st, _ = req(f"/templates/{tid}", "DELETE", token=T)
-        report(f"清理 {tid[:8]}", st == 200, f"status={st}")
+    print(f"\n结果: {'[OK] 删除/停用语义正确' if ok else '[FAIL] 语义有问题'}")
+    return 0 if ok else 1
 
-print(f"\n结果: {'[OK] 删除/停用语义正确' if ok_all else '[FAIL] 语义有问题'}")
-sys.exit(0 if ok_all else 1)
+
+if __name__ == "__main__":
+    sys.exit(main())
