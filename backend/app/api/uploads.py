@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.engines.factory import get_provider
+from app.engines.factory import acquire_provider
 from app.filestore import open_asset, read_asset_bytes
 from app.models.models import Asset, User
 from app.auth import get_current_user
@@ -61,11 +61,12 @@ def _kind_rules(kind: str) -> dict:
 async def _forward_to_engine(engine: str, data: bytes, name: str) -> str:
     """把字节推进引擎，返回引擎侧文件名（表单直接当字段值用）。"""
     try:
-        provider = get_provider(engine)
+        lease = acquire_provider(engine)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=safe_detail(e))
     try:
-        return await provider.upload_input(data, name)
+        with lease as provider:
+            return await provider.upload_input(data, name)
     except NotImplementedError as e:
         raise HTTPException(status_code=400, detail=safe_detail(e))
     except Exception as e:  # noqa: BLE001 —— 引擎侧报错统一收成 502

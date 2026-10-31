@@ -23,6 +23,7 @@ import app.services.task_service as ts
 from app.engines.base import GenerationResult, TaskStatus
 from app.engines.comfyui import ComfyUIProvider
 from app.services.task_service import TaskService, clear_cancel_request
+from provider_test_utils import lease_acquirer
 
 ok_all = True
 
@@ -265,12 +266,14 @@ print("=== cancel_task 状态机 ===")
 def run_cancel(task_obj, template_obj=None, provider=None):
     ts._cancel_requested.clear()
     db = FakeDB(task=task_obj, template=template_obj)
-    real = ts.get_provider
-    ts.get_provider = lambda engine: provider or FakeProvider()
+    real = ts.acquire_provider
+    ts.acquire_provider = lease_acquirer(
+        lambda engine: provider or FakeProvider()
+    )
     try:
         return asyncio.run(TaskService.cancel_task(db, task_obj.id)), db
     finally:
-        ts.get_provider = real
+        ts.acquire_provider = real
 
 
 for terminal in ("done", "error", "cancelled"):

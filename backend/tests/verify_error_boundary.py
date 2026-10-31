@@ -26,6 +26,7 @@ from app.models.models import Base, Task, Template
 from app.safe_detail import safe_detail
 from app.schemas.schemas import AssetUploadRequest
 from app.services.task_service import TaskService
+from provider_test_utils import lease_acquirer
 
 
 ok_all = True
@@ -241,7 +242,7 @@ async def main():
     )
     with patch.object(
         uploads_api,
-        "get_provider",
+        "acquire_provider",
         side_effect=ValueError(acquisition_raw),
     ):
         acquisition_error = None
@@ -261,8 +262,10 @@ async def main():
     unsupported_raw = "upload unsupported Bearer upload.secret token=UPLOADSECRET"
     with patch.object(
         uploads_api,
-        "get_provider",
-        return_value=FakeProvider(upload_error=unsupported_raw),
+        "acquire_provider",
+        new=lease_acquirer(
+            lambda _engine: FakeProvider(upload_error=unsupported_raw)
+        ),
     ):
         unsupported_error = None
         try:
@@ -283,7 +286,7 @@ async def main():
     engine = create_async_engine(f"sqlite+aiosqlite:///{temp_db.name}")
     session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     original_session = ts.async_session
-    original_get_provider = ts.get_provider
+    original_acquire_provider = ts.acquire_provider
     ts.async_session = session_factory
 
     handler = RecordHandler()
@@ -296,7 +299,9 @@ async def main():
             "Authorization: Bearer abc.def.ghi token=TOPSECRET password=hunter2"
         )
         await seed_task(session_factory, "execute-failure")
-        ts.get_provider = lambda engine_name: FakeProvider(submit_error=execute_raw)
+        ts.acquire_provider = lease_acquirer(
+            lambda engine_name: FakeProvider(submit_error=execute_raw)
+        )
         handler.records.clear()
         await TaskService.execute_task("execute-failure")
         task = await load_task(session_factory, "execute-failure")
@@ -319,7 +324,9 @@ async def main():
             "resume-failure",
             provider_task_id="provider-existing",
         )
-        ts.get_provider = lambda engine_name: FakeProvider(status_error=resume_raw)
+        ts.acquire_provider = lease_acquirer(
+            lambda engine_name: FakeProvider(status_error=resume_raw)
+        )
         handler.records.clear()
         await TaskService.resume_task("resume-failure")
         task = await load_task(session_factory, "resume-failure")
@@ -347,7 +354,7 @@ async def main():
         def fail_provider_lookup(engine_name):
             raise ValueError(acquisition_raw)
 
-        ts.get_provider = fail_provider_lookup
+        ts.acquire_provider = lease_acquirer(fail_provider_lookup)
         handler.records.clear()
         escaped = None
         try:
@@ -382,7 +389,9 @@ async def main():
             class_=OneShotCommitFailureSession,
             expire_on_commit=False,
         )
-        ts.get_provider = lambda engine_name: FakeProvider()
+        ts.acquire_provider = lease_acquirer(
+            lambda engine_name: FakeProvider()
+        )
         ts.async_session = failing_session_factory
         handler.records.clear()
         escaped = None
@@ -415,10 +424,12 @@ async def main():
             "token=RESULTSECRET"
         )
         await seed_task(session_factory, "terminal-provider-error")
-        ts.get_provider = lambda engine_name: FakeProvider(result=GenerationResult(
-            status=TaskStatus.ERROR,
-            error=terminal_raw,
-        ))
+        ts.acquire_provider = lease_acquirer(
+            lambda engine_name: FakeProvider(result=GenerationResult(
+                status=TaskStatus.ERROR,
+                error=terminal_raw,
+            ))
+        )
         await TaskService.execute_task("terminal-provider-error")
         task = await load_task(session_factory, "terminal-provider-error")
         report("terminal Provider errors are sanitized before persistence",
@@ -431,10 +442,12 @@ async def main():
 
         await reset_db(engine)
         await seed_task(session_factory, "terminal-provider-fallback")
-        ts.get_provider = lambda engine_name: FakeProvider(result=GenerationResult(
-            status=TaskStatus.ERROR,
-            error="",
-        ))
+        ts.acquire_provider = lease_acquirer(
+            lambda engine_name: FakeProvider(result=GenerationResult(
+                status=TaskStatus.ERROR,
+                error="",
+            ))
+        )
         await TaskService.execute_task("terminal-provider-fallback")
         task = await load_task(session_factory, "terminal-provider-fallback")
         report("empty terminal Provider errors keep the plain fallback",
@@ -478,7 +491,9 @@ async def main():
             await seed_task(session_factory, "workflow-read", workflow_file=workflow_path.name)
             original_workflow_dir = settings.WORKFLOW_DIR
             settings.WORKFLOW_DIR = Path(workflow_dir)
-            ts.get_provider = lambda engine_name: FakeProvider()
+            ts.acquire_provider = lease_acquirer(
+                lambda engine_name: FakeProvider()
+            )
             started = threading.Event()
             release = threading.Event()
             state = {}
@@ -623,7 +638,7 @@ async def main():
     finally:
         ts.logger.removeHandler(handler)
         ts.async_session = original_session
-        ts.get_provider = original_get_provider
+        ts.acquire_provider = original_acquire_provider
         await engine.dispose()
         Path(temp_db.name).unlink(missing_ok=True)
 

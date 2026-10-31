@@ -472,7 +472,7 @@ async def import_template(
 
     # 引擎 / 能力对不上不算错误：模板可以先落地，等插件装上就能用。
     # 但必须说出来，否则用户会以为是插件坏了
-    from app.engines.factory import get_provider, list_engines
+    from app.engines.factory import acquire_provider, list_engines
 
     if data.engine not in list_engines():
         warnings.append(
@@ -481,7 +481,8 @@ async def import_template(
         )
     elif data.capability:
         try:
-            caps = get_provider(data.engine).capabilities
+            with acquire_provider(data.engine) as provider:
+                caps = provider.capabilities
             kinds = set(caps.keys()) if isinstance(caps, dict) else {c.get("kind") for c in caps}
             if data.capability not in kinds:
                 warnings.append(

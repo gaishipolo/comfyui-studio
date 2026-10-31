@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session
 from app.models.models import Task, Template, Asset
-from app.engines.factory import get_provider
+from app.engines.factory import acquire_provider
 from app.engines.base import GenerationResult, TaskStatus
 from app.config import settings
 from app.filestore import save_asset_file
@@ -189,8 +189,8 @@ class TaskService:
             template = await db.get(Template, task.template_id)
             engine = template.engine if template else "comfyui"
             try:
-                provider = get_provider(engine)
-                await provider.cancel(task.provider_task_id)
+                with acquire_provider(engine) as provider:
+                    await provider.cancel(task.provider_task_id)
             except NotImplementedError:
                 # 这个引擎不支持取消：本地状态照样记成 cancelled，只是引擎那边会跑完
                 pass
@@ -285,51 +285,56 @@ class TaskService:
                 await db.commit()
 
                 try:
-                    provider = get_provider(template.engine)
+                    with acquire_provider(template.engine) as provider:
+                        # 加载工作流 JSON —— 仅当模板配置了 workflow_file 时才需要
+                        # （通用 API 引擎通常不依赖 ComfyUI 工作流文件）
+                        workflow: dict = {}
+                        if template.workflow_file:
+                            workflow_path = settings.WORKFLOW_DIR / Path(template.workflow_file).name
+                            if not workflow_path.exists():
+                                raise FileNotFoundError(f"Workflow file not found: {template.workflow_file}")
+                            # to_thread：同步磁盘读不能占着事件循环（整个服务会一起停摆）
+                            raw = await asyncio.to_thread(workflow_path.read_text, encoding="utf-8")
+                            workflow = json.loads(raw)
 
-                    # 加载工作流 JSON —— 仅当模板配置了 workflow_file 时才需要
-                    # （通用 API 引擎通常不依赖 ComfyUI 工作流文件）
-                    workflow: dict = {}
-                    if template.workflow_file:
-                        workflow_path = settings.WORKFLOW_DIR / Path(template.workflow_file).name
-                        if not workflow_path.exists():
-                            raise FileNotFoundError(f"Workflow file not found: {template.workflow_file}")
-                        # to_thread：同步磁盘读不能占着事件循环（整个服务会一起停摆）
-                        raw = await asyncio.to_thread(workflow_path.read_text, encoding="utf-8")
-                        workflow = json.loads(raw)
+                        # 提交上下文统一组装，Provider 各取所需：
+                        # ComfyUI 用 _workflow/_param_mapping（在 submit 内做节点注入），
+                        # HTTP 类用 _capability 调 build_payload。isinstance 特判没了。
+                        ctx = {
+                            "_type": template.category,
+                            "_capability": template.capability or template.category,
+                            "_template_name": template.name,
+                            "_workflow": workflow,
+                            "_param_mapping": template.param_mapping,
+                        }
 
-                    # 提交上下文统一组装，Provider 各取所需：
-                    # ComfyUI 用 _workflow/_param_mapping（在 submit 内做节点注入），
-                    # HTTP 类用 _capability 调 build_payload。isinstance 特判没了。
-                    ctx = {
-                        "_type": template.category,
-                        "_capability": template.capability or template.category,
-                        "_template_name": template.name,
-                        "_workflow": workflow,
-                        "_param_mapping": template.param_mapping,
-                    }
+                        # 请求体快照：审计 + 重跑依据，不受后续配置/插件代码变更影响。
+                        # Provider 提交时把实际发出的 payload 记进 last_request（基类默认 None，
+                        # ComfyUI 的 payload 是整个工作流太大不记，params+param_mapping 已可重放）
+                        prompt_id = await provider.submit(ctx, task.params)
+                        snapshot = getattr(provider, "last_request", None)
+                        if snapshot is not None:
+                            task.result = {**(task.result or {}), "_request": snapshot}
+                        task.provider_task_id = prompt_id
+                        await db.commit()
 
-                    # 请求体快照：审计 + 重跑依据，不受后续配置/插件代码变更影响。
-                    # Provider 提交时把实际发出的 payload 记进 last_request（基类默认 None，
-                    # ComfyUI 的 payload 是整个工作流太大不记，params+param_mapping 已可重放）
-                    prompt_id = await provider.submit(ctx, task.params)
-                    snapshot = getattr(provider, "last_request", None)
-                    if snapshot is not None:
-                        task.result = {**(task.result or {}), "_request": snapshot}
-                    task.provider_task_id = prompt_id
-                    await db.commit()
+                        # 取消竞态：用户可能在 submit 还没返回时就点了取消，
+                        # 那会儿 cancel_task 拿不到 prompt_id、通知不了引擎。
+                        # 这里补一刀，否则那条 prompt 会照跑不误、白占显存。
+                        if _cancel_requested_for(task.id):
+                            try:
+                                await provider.cancel(prompt_id)
+                            except Exception as e:  # noqa: BLE001
+                                print(f"[TaskService] 补刀取消引擎任务失败: {e}")
+                            return
 
-                    # 取消竞态：用户可能在 submit 还没返回时就点了取消，
-                    # 那会儿 cancel_task 拿不到 prompt_id、通知不了引擎。
-                    # 这里补一刀，否则那条 prompt 会照跑不误、白占显存。
-                    if _cancel_requested_for(task.id):
-                        try:
-                            await provider.cancel(prompt_id)
-                        except Exception as e:  # noqa: BLE001
-                            print(f"[TaskService] 补刀取消引擎任务失败: {e}")
-                        return
-
-                    await TaskService._finish_task(db, task, template, provider, prompt_id)
+                        await TaskService._finish_task(
+                            db,
+                            task,
+                            template,
+                            provider,
+                            prompt_id,
+                        )
 
                 except Exception as e:
                     logger.error(
@@ -368,13 +373,17 @@ class TaskService:
                 provider_task_id = task.provider_task_id
                 engine_name = template.engine
                 try:
-                    provider = get_provider(engine_name)
-                    task.status = "running"
-                    task.started_at = task.started_at or datetime.utcnow()
-                    await db.commit()
-                    await TaskService._finish_task(
-                        db, task, template, provider, provider_task_id
-                    )
+                    with acquire_provider(engine_name) as provider:
+                        task.status = "running"
+                        task.started_at = task.started_at or datetime.utcnow()
+                        await db.commit()
+                        await TaskService._finish_task(
+                            db,
+                            task,
+                            template,
+                            provider,
+                            provider_task_id,
+                        )
                 except Exception as e:  # noqa: BLE001
                     logger.error(
                         "Task resume failed task_id=%s provider=%s",

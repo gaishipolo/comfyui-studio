@@ -26,6 +26,7 @@ from app.models.models import Task, Template
 from app.services import task_service as task_service_module
 from app.services.task_service import TaskService
 from app.thumbs import thumb_key
+from provider_test_utils import lease_acquirer
 from test_env import SERVICE_BASE_URL
 
 
@@ -124,7 +125,7 @@ class _B5FakeGenericProvider:
 async def verify_b5_in_process(check) -> bool:
     provider = _B5FakeGenericProvider()
     original_session_factory = task_service_module.async_session
-    original_get_provider = task_service_module.get_provider
+    original_acquire_provider = task_service_module.acquire_provider
     conditions: list[bool] = []
     database_removed = False
 
@@ -184,7 +185,7 @@ async def verify_b5_in_process(check) -> bool:
                 await db.commit()
 
             task_service_module.async_session = session_factory
-            task_service_module.get_provider = fake_get_provider
+            task_service_module.acquire_provider = lease_acquirer(fake_get_provider)
             await TaskService.execute_task(task_id)
 
             async with session_factory() as db:
@@ -236,7 +237,7 @@ async def verify_b5_in_process(check) -> bool:
             verify("B5 in-process 执行不抛异常", False, f"{type(exc).__name__}: {exc}")
         finally:
             task_service_module.async_session = original_session_factory
-            task_service_module.get_provider = original_get_provider
+            task_service_module.acquire_provider = original_acquire_provider
             await engine.dispose()
             for candidate in (
                 db_path,

@@ -21,6 +21,7 @@ from app.api import uploads as uploads_api
 from app.filestore import ObjectHandle
 from app.models.models import Asset
 from app.schemas.schemas import AssetUploadRequest
+from provider_test_utils import lease_acquirer
 
 
 MB = 1024 * 1024
@@ -84,7 +85,11 @@ async def owner_map(_db, task_ids: set[str]) -> dict[str, str]:
 @contextmanager
 def route_dependencies(*, provider, open_asset, read_asset_bytes, owners=owner_map):
     with ExitStack() as stack:
-        stack.enter_context(patch.object(uploads_api, "get_provider", lambda _engine: provider))
+        stack.enter_context(patch.object(
+            uploads_api,
+            "acquire_provider",
+            lease_acquirer(lambda _engine: provider),
+        ))
         # create=True makes the RED run reach an assertion even before production
         # imports open_asset.
         stack.enter_context(patch.object(uploads_api, "open_asset", open_asset, create=True))

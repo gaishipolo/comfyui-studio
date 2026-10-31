@@ -22,6 +22,7 @@ from app.filestore import asset_exists, reset_store  # noqa: E402
 from app.models.models import Asset, Base, Task, Template  # noqa: E402
 from app.services.task_service import TaskService  # noqa: E402
 from app.thumbs import thumb_key  # noqa: E402
+from provider_test_utils import lease_acquirer  # noqa: E402
 
 
 class FakeProvider:
@@ -154,7 +155,11 @@ async def test_cancel_wins_while_done_output_save_is_blocked() -> None:
         with (
             patch.object(task_service_module, "save_asset_file", blocking_save),
             patch.object(task_service_module, "make_video_thumb", lambda *_args: b"thumb"),
-            patch.object(task_service_module, "get_provider", lambda _name: provider),
+            patch.object(
+                task_service_module,
+                "acquire_provider",
+                lease_acquirer(lambda _name: provider),
+            ),
         ):
             async with sessions() as finish_db:
                 task = await finish_db.get(Task, task_id)
@@ -195,7 +200,11 @@ async def test_cancel_wins_over_provider_error_completion() -> None:
             status=TaskStatus.ERROR,
             error="provider failed",
         ))
-        with patch.object(task_service_module, "get_provider", lambda _name: provider):
+        with patch.object(
+            task_service_module,
+            "acquire_provider",
+            lease_acquirer(lambda _name: provider),
+        ):
             async with sessions() as finish_db:
                 task = await finish_db.get(Task, task_id)
                 template = await finish_db.get(Template, template_id)
@@ -240,7 +249,11 @@ async def test_finish_holds_terminal_lock_then_cancel_conflicts() -> None:
             expire_on_commit=False,
         )
 
-        with patch.object(task_service_module, "get_provider", lambda _name: provider):
+        with patch.object(
+            task_service_module,
+            "acquire_provider",
+            lease_acquirer(lambda _name: provider),
+        ):
             async with finish_sessions() as finish_db:
                 task = await finish_db.get(Task, task_id)
                 template = await finish_db.get(Template, template_id)

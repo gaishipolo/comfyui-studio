@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import get_current_user
 from app.access import is_admin
 from app.database import get_db
-from app.engines.factory import get_provider, set_engine_config, unregister_provider
+from app.engines.factory import acquire_provider, set_engine_config, unregister_provider
 from app.engines.plugin_loader import (
     PLUGIN_DIR,
     PluginError,
@@ -227,10 +227,11 @@ async def test_plugin(
     """健康检查 —— 真调一次 provider.health_check()，验证配置与连通性"""
     _require_admin(user)
     try:
-        provider = get_provider(name)
+        lease = acquire_provider(name)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"引擎未启用: {e}") from e
-    ok = await provider.health_check()
+    with lease as provider:
+        ok = await provider.health_check()
     return {"ok": ok, "detail": "" if ok else "health_check 未通过（检查 base_url / api_key 配置）"}
 
 

@@ -39,6 +39,7 @@ from app.schemas.auth_schemas import ChangePasswordRequest, ResetPasswordRequest
 from app.api.auth_api import change_own_password, reset_user_password, update_user
 from app.auth import hash_password, verify_password, require_admin
 from fastapi import HTTPException
+from provider_test_utils import lease_acquirer
 
 ok_all = True
 
@@ -179,7 +180,7 @@ async def main():
         await add_task(db, f"tg{i}", "tpl-gate")
     prov = FakeProvider()
     prov.hold = 0.12          # 让先到的两个在 submit 里重叠，峰值才测得出来
-    ts.get_provider = lambda engine: prov
+    ts.acquire_provider = lease_acquirer(lambda engine: prov)
 
     await asyncio.gather(*[TaskService.execute_task(f"tg{i}") for i in range(5)])
     report(f"5 个并发任务峰值并发 ≤ {want}", prov.peak <= want, f"peak={prov.peak}")
@@ -235,7 +236,7 @@ async def main():
     await add_task(db, "tr1", "tpl-res", status="running", provider_task_id="p-resume")
     prov = FakeProvider()
     prov.result = GenerationResult(status=TaskStatus.DONE, outputs=[])
-    ts.get_provider = lambda engine: prov
+    ts.acquire_provider = lease_acquirer(lambda engine: prov)
 
     await TaskService.resume_task("tr1")
     t = await reload(Task, "tr1")
@@ -247,7 +248,7 @@ async def main():
 
     await add_task(db, "tr2", "tpl-res", status="running", provider_task_id="")  # 没提交成
     prov2 = FakeProvider()
-    ts.get_provider = lambda engine: prov2
+    ts.acquire_provider = lease_acquirer(lambda engine: prov2)
     await TaskService.resume_task("tr2")
     t2 = await reload(Task, "tr2")
     report("没有 provider_task_id 的接不回去 → 原样不动", t2.status == "running",
@@ -279,7 +280,7 @@ async def main():
 
     ts.spawn_task = fake_spawn
     prov = FakeProvider()
-    ts.get_provider = lambda engine: prov
+    ts.acquire_provider = lease_acquirer(lambda engine: prov)
     outcome = await TaskService.reap_stale_tasks()
     ts.spawn_task = orig_spawn
 
@@ -304,7 +305,7 @@ async def main():
     await add_template(db, "tpl-e2e", "端到端模板")
     await add_task(db, "rp-live", "tpl-e2e", status="running", provider_task_id="p-live")
     prov = FakeProvider()
-    ts.get_provider = lambda engine: prov
+    ts.acquire_provider = lease_acquirer(lambda engine: prov)
     await TaskService.reap_stale_tasks()
     await asyncio.sleep(0.3)          # 让 spawn 出来的协程跑完
     rp_live = await reload(Task, "rp-live")
@@ -450,18 +451,18 @@ async def main():
     report("配置变更要能立刻打掉缓存（改完 key 不该还显示离线）",
            "on_change(invalidate_cache)" in hsrc)
     report("admin 诊断可以跳过缓存", '"fresh"' in hsrc or "fresh: bool" in hsrc)
-    original_health_provider = health_api.get_provider
+    original_health_provider = health_api.acquire_provider
 
     def failing_health_provider(engine_name):
         raise RuntimeError(
             "probe http://10.0.0.5/private?api_key=TOPSECRET token=TOPSECRET"
         )
 
-    health_api.get_provider = failing_health_provider
+    health_api.acquire_provider = lease_acquirer(failing_health_provider)
     try:
         probe_result = await health_api._probe("secret-test")
     finally:
-        health_api.get_provider = original_health_provider
+        health_api.acquire_provider = original_health_provider
     probe_detail = probe_result.get("detail", "")
     report("引擎异常详情脱敏（抹掉 URL 和凭证）",
            "10.0.0.5" not in probe_detail and "TOPSECRET" not in probe_detail,

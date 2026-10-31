@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, Query
 from app.auth import get_current_user
 from app.engines import factory
 from app.engines.base import GenerationProvider
-from app.engines.factory import get_provider, list_engines
+from app.engines.factory import acquire_provider, list_engines
 from app.models.models import User
 from app.safe_detail import safe_detail as _safe_detail
 
@@ -32,13 +32,13 @@ async def _probe(engine_name: str) -> dict:
     """探测单个引擎。任何异常都收成结果字段，绝不向上抛 ——
     一个引擎坏了不该让整个探活接口 500。"""
     try:
-        provider = get_provider(engine_name)
-        # 插件没实现 health_check 时基类返回 None —— 那是「不知道」，
-        # 不能当成「离线」，否则每个没写的插件都会天天误报
-        if type(provider).health_check is GenerationProvider.health_check:
-            return {"name": engine_name, "status": "unknown", "detail": "该引擎未实现健康检查"}
-        ok = await asyncio.wait_for(provider.health_check(), timeout=_PROBE_TIMEOUT)
-        return {"name": engine_name, "status": "connected" if ok else "disconnected"}
+        with acquire_provider(engine_name) as provider:
+            # 插件没实现 health_check 时基类返回 None —— 那是「不知道」，
+            # 不能当成「离线」，否则每个没写的插件都会天天误报
+            if type(provider).health_check is GenerationProvider.health_check:
+                return {"name": engine_name, "status": "unknown", "detail": "该引擎未实现健康检查"}
+            ok = await asyncio.wait_for(provider.health_check(), timeout=_PROBE_TIMEOUT)
+            return {"name": engine_name, "status": "connected" if ok else "disconnected"}
     except asyncio.TimeoutError:
         return {
             "name": engine_name,

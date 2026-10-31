@@ -80,6 +80,33 @@ class _RaisingProvider(_ProviderStub):
         raise RuntimeError("close exploded")
 
 
+class _LeaseProvider(_ProviderStub):
+    name = "lifecycle_lease"
+    instances: list["_LeaseProvider"] = []
+
+    def __init__(self, config: dict | None = None):
+        super().__init__(config)
+        self.close_calls = 0
+        self.closed = asyncio.Event()
+        self.use_started = asyncio.Event()
+        self.release_use = asyncio.Event()
+        type(self).instances.append(self)
+
+    async def blocked_use(self) -> bool:
+        self.use_started.set()
+        await self.release_use.wait()
+        return self.close_calls == 0
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        self.closed.set()
+
+
+class _LeaseReplacementProvider(_LeaseProvider):
+    name = "lifecycle_lease_replacement"
+    instances: list["_LeaseReplacementProvider"] = []
+
+
 class _AsyncSessionStub:
     async def __aenter__(self):
         return object()
@@ -113,6 +140,141 @@ class ProviderLifecycleSyncTests(unittest.TestCase):
 
 
 class ProviderLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    def acquire(self, engine_name: str):
+        acquire_provider = getattr(factory, "acquire_provider", None)
+        self.assertTrue(callable(acquire_provider), "factory.acquire_provider is missing")
+        return acquire_provider(engine_name)
+
+    async def _wait_closed(self, provider: _LeaseProvider) -> None:
+        await asyncio.wait_for(provider.closed.wait(), timeout=0.5)
+        await asyncio.sleep(0)
+
+    async def test_replacement_waits_for_active_lease_then_closes_once(self):
+        engine_name = "lifecycle_leased_replacement"
+        _LeaseProvider.instances.clear()
+        _LeaseReplacementProvider.instances.clear()
+        factory.register_provider(engine_name, _LeaseProvider)
+
+        async def active_use():
+            async with self.acquire(engine_name) as provider:
+                usable = await provider.blocked_use()
+                self.assertTrue(usable)
+
+        use = asyncio.create_task(active_use())
+        old = None
+        try:
+            while not _LeaseProvider.instances and not use.done():
+                await asyncio.sleep(0)
+            if use.done():
+                await use
+            old = _LeaseProvider.instances[-1]
+            await asyncio.wait_for(old.use_started.wait(), timeout=0.5)
+
+            factory.register_provider(engine_name, _LeaseReplacementProvider)
+            await asyncio.sleep(0)
+            new = factory.get_provider(engine_name)
+
+            self.assertIsNot(new, old)
+            self.assertIsInstance(new, _LeaseReplacementProvider)
+            self.assertEqual(0, old.close_calls)
+            old.release_use.set()
+            await asyncio.wait_for(use, timeout=0.5)
+            await self._wait_closed(old)
+            self.assertEqual(1, old.close_calls)
+
+            await factory.close_all_providers()
+            self.assertEqual(1, old.close_calls)
+        finally:
+            if old is not None:
+                old.release_use.set()
+            await asyncio.gather(use, return_exceptions=True)
+            factory.unregister_provider(engine_name)
+            await factory.close_all_providers()
+
+    async def test_config_change_waits_for_active_lease_and_new_get_uses_config(self):
+        engine_name = "lifecycle_leased_config"
+        _LeaseProvider.instances.clear()
+        factory.register_provider(engine_name, _LeaseProvider)
+        factory.set_engine_config(engine_name, {"version": 1})
+        lease = self.acquire(engine_name)
+        old = _LeaseProvider.instances[-1]
+
+        try:
+            factory.set_engine_config(engine_name, {"version": 2})
+            await asyncio.sleep(0)
+            new = factory.get_provider(engine_name)
+            self.assertIsNot(new, old)
+            self.assertEqual(2, new.config["version"])
+            self.assertEqual(0, old.close_calls)
+
+            async with lease as leased:
+                self.assertIs(leased, old)
+                self.assertEqual(0, leased.close_calls)
+            await self._wait_closed(old)
+            self.assertEqual(1, old.close_calls)
+        finally:
+            factory.unregister_provider(engine_name)
+            await factory.close_all_providers()
+
+    async def test_disable_waits_for_active_lease_and_rejects_new_get(self):
+        engine_name = "lifecycle_leased_disable"
+        _LeaseProvider.instances.clear()
+        factory.register_provider(engine_name, _LeaseProvider)
+        lease = self.acquire(engine_name)
+        old = _LeaseProvider.instances[-1]
+
+        try:
+            factory.unregister_provider(engine_name)
+            await asyncio.sleep(0)
+            with self.assertRaises(ValueError):
+                factory.get_provider(engine_name)
+            self.assertEqual(0, old.close_calls)
+
+            async with lease as leased:
+                self.assertIs(leased, old)
+                self.assertEqual(0, leased.close_calls)
+            await self._wait_closed(old)
+            self.assertEqual(1, old.close_calls)
+        finally:
+            factory.unregister_provider(engine_name)
+            await factory.close_all_providers()
+
+    async def test_shutdown_waits_for_active_lease_without_duplicate_close(self):
+        engine_name = "lifecycle_leased_shutdown"
+        _LeaseProvider.instances.clear()
+        factory.register_provider(engine_name, _LeaseProvider)
+        lease = self.acquire(engine_name)
+        old = _LeaseProvider.instances[-1]
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def active_use():
+            async with lease as provider:
+                entered.set()
+                await release.wait()
+                self.assertEqual(0, provider.close_calls)
+
+        use = asyncio.create_task(active_use())
+        shutdown = None
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=0.5)
+            shutdown = asyncio.create_task(factory.close_all_providers())
+            await asyncio.sleep(0.02)
+            self.assertFalse(shutdown.done())
+            self.assertEqual(0, old.close_calls)
+
+            release.set()
+            await asyncio.wait_for(use, timeout=0.5)
+            await asyncio.wait_for(shutdown, timeout=0.5)
+            self.assertEqual(1, old.close_calls)
+        finally:
+            release.set()
+            await asyncio.gather(use, return_exceptions=True)
+            if shutdown is not None:
+                await asyncio.gather(shutdown, return_exceptions=True)
+            factory.unregister_provider(engine_name)
+            await factory.close_all_providers()
+
     async def test_close_all_times_out_a_provider_that_never_closes(self):
         engine_name = "lifecycle_never_closes"
         missing = object()
