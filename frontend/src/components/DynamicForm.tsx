@@ -29,6 +29,34 @@ interface FieldPreview {
   asset?: Asset
 }
 
+const isFileField = (field: TemplateField) =>
+  field.type === 'file_upload' || field.type === 'image_upload'
+
+const initialFieldValue = (
+  field: TemplateField,
+  initialValues?: Record<string, unknown>,
+): unknown => {
+  const prefill = initialValues?.[field.name]
+  return prefill !== undefined && prefill !== null ? prefill : (field.default ?? '')
+}
+
+const initialFilePreviews = (
+  fields: TemplateField[],
+  initialValues?: Record<string, unknown>,
+): Record<string, FieldPreview[]> => {
+  const result: Record<string, FieldPreview[]> = {}
+  for (const field of fields) {
+    if (!isFileField(field)) continue
+    const value = initialFieldValue(field, initialValues)
+    const values = field.multiple ? (Array.isArray(value) ? value : []) : [value]
+    const items = values
+      .filter((item) => item !== '' && item !== null && item !== undefined)
+      .map((item) => ({ name: String(item) }))
+    if (items.length) result[field.name] = items
+  }
+  return result
+}
+
 /** 选中的文件是不是这个字段声明的种类。
  *  `<input accept>` 只是文件对话框的提示，用户可以切到「所有文件」绕过，
  *  所以落盘前必须自己再拦一次 —— 否则音频字段能塞进图片，到插件才炸。 */
@@ -46,8 +74,7 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
   const [values, setValues] = useState<Record<string, unknown>>(() => {
     const init: Record<string, unknown> = {}
     for (const f of fields) {
-      const prefill = initialValues?.[f.name]
-      init[f.name] = prefill !== undefined && prefill !== null ? prefill : (f.default ?? '')
+      init[f.name] = initialFieldValue(f, initialValues)
     }
     return init
   })
@@ -55,14 +82,58 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [uploading, setUploading] = useState<Record<string, boolean>>({})
   // 只有引擎接受上传后才发布预览。单值长度恒为 1，多值与 values 同序对齐。
-  const [previews, setPreviews] = useState<Record<string, FieldPreview[]>>({})
+  const [previews, setPreviews] = useState<Record<string, FieldPreview[]>>(() =>
+    initialFilePreviews(fields, initialValues),
+  )
   // object URL 必须手动回收，换图/移除/卸载漏一个就漏一块内存
-  const previewUrls = useRef<Record<string, (string | null)[]>>({})
+  const previewUrls = useRef<Record<string, (string | null)[]>>(
+    Object.fromEntries(
+      Object.entries(previews).map(([name, items]) => [name, items.map(() => null)]),
+    ),
+  )
+  const mounted = useRef(true)
+  const operationGeneration = useRef<Record<string, number>>({})
+  const pendingOperations = useRef<Record<string, number>>({})
   // 「从素材库选择」弹窗当前服务于哪个字段（null = 未打开）
   const [pickerFor, setPickerFor] = useState<TemplateField | null>(null)
 
   const setValue = (name: string, val: unknown) =>
     setValues((prev) => ({ ...prev, [name]: val }))
+
+  const beginFieldOperation = (name: string) => {
+    const generation = (operationGeneration.current[name] ?? 0) + 1
+    operationGeneration.current[name] = generation
+    pendingOperations.current[name] = (pendingOperations.current[name] ?? 0) + 1
+    if (mounted.current) setUploading((prev) => ({ ...prev, [name]: true }))
+    return generation
+  }
+
+  const invalidateFieldOperation = (name: string) => {
+    operationGeneration.current[name] = (operationGeneration.current[name] ?? 0) + 1
+  }
+
+  const isCurrentFieldOperation = (name: string, generation: number) =>
+    mounted.current && operationGeneration.current[name] === generation
+
+  const finishFieldOperation = (name: string) => {
+    const remaining = Math.max(0, (pendingOperations.current[name] ?? 1) - 1)
+    pendingOperations.current[name] = remaining
+    if (mounted.current) {
+      setUploading((prev) => ({ ...prev, [name]: remaining > 0 }))
+    }
+  }
+
+  const hasPendingFileOperation = () =>
+    Object.values(pendingOperations.current).some((count) => count > 0)
+
+  const disposePreview = (preview: FieldPreview) => {
+    if (preview.objectUrl) URL.revokeObjectURL(preview.objectUrl)
+  }
+
+  const completionOptions = (name: string, generation: number) => ({
+    isCurrent: () => isCurrentFieldOperation(name, generation),
+    disposePreview,
+  })
 
   const localPreview = (file: File): FieldPreview => ({
     name: file.name,
@@ -99,6 +170,7 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
 
   /** 多图字段：删掉第 index 张 —— 预览与表单值同步移除（上传未完成的图值不存在，只删预览） */
   const removeImageAt = (field: TemplateField, index: number) => {
+    invalidateFieldOperation(field.name)
     removePreviewAt(field.name, index)
     setValues((prev) => {
       const cur = Array.isArray(prev[field.name]) ? (prev[field.name] as string[]) : []
@@ -119,18 +191,25 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
     })
   }
 
+  const removeSingleFile = (name: string) => {
+    invalidateFieldOperation(name)
+    clearPreviews(name)
+    setValue(name, '')
+  }
+
   // 卸载时把还挂着的 object URL 全部回收
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
       for (const urls of Object.values(previewUrls.current)) {
         for (const url of urls) {
           if (url) URL.revokeObjectURL(url)
         }
       }
       previewUrls.current = {}
-    },
-    [],
-  )
+    }
+  }, [])
 
   // 上传参考文件到生成引擎，入参使用引擎侧文件名。
   // 多文件字段（field.multiple）逐个串行上传后追加进数组，失败只回滚那一个。
@@ -153,24 +232,28 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
 
     if (!field.multiple) {
       const file = files[0]
-      setUploading((prev) => ({ ...prev, [field.name]: true }))
+      const generation = beginFieldOperation(field.name)
       try {
         const completed = await completeUpload(
           () => uploadInput(file, template.engine, kind),
           () => localPreview(file),
           { name: file.name },
+          completionOptions(field.name, generation),
         )
+        if (!completed) return
         setValue(field.name, completed.value)
         setSinglePreview(field.name, completed.preview)
       } catch (err) {
-        alert(`上传失败: ${err instanceof Error ? err.message : err}`)
+        if (isCurrentFieldOperation(field.name, generation)) {
+          alert(`上传失败: ${err instanceof Error ? err.message : err}`)
+        }
       } finally {
-        setUploading((prev) => ({ ...prev, [field.name]: false }))
+        finishFieldOperation(field.name)
       }
       return
     }
 
-    setUploading((prev) => ({ ...prev, [field.name]: true }))
+    const generation = beginFieldOperation(field.name)
     try {
       for (const file of files) {
         try {
@@ -178,18 +261,21 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
             () => uploadInput(file, template.engine, kind),
             () => localPreview(file),
             { name: file.name },
+            completionOptions(field.name, generation),
           )
+          if (!completed) break
           setValues((prev) => {
             const cur = Array.isArray(prev[field.name]) ? (prev[field.name] as string[]) : []
             return { ...prev, [field.name]: [...cur, completed.value] }
           })
           appendPreview(field.name, completed.preview)
         } catch (err) {
+          if (!isCurrentFieldOperation(field.name, generation)) break
           alert(`上传失败: ${err instanceof Error ? err.message : err}`)
         }
       }
     } finally {
-      setUploading((prev) => ({ ...prev, [field.name]: false }))
+      finishFieldOperation(field.name)
     }
   }
 
@@ -202,7 +288,7 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
     if (assets.length === 0) return
     const multi = !!field.multiple
     const picked = multi ? assets : assets.slice(0, 1)
-    setUploading((prev) => ({ ...prev, [field.name]: true }))
+    const generation = beginFieldOperation(field.name)
     let failed = 0
     const failReasons: string[] = []
     try {
@@ -212,7 +298,9 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
             () => uploadFromAsset(item.id, template.engine),
             () => assetPreview(item),
             { name: item.file_name },
+            completionOptions(field.name, generation),
           )
+          if (!completed) break
           if (multi) {
             setValues((prev) => {
               const cur = Array.isArray(prev[field.name]) ? (prev[field.name] as string[]) : []
@@ -224,16 +312,17 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
             setSinglePreview(field.name, completed.preview)
           }
         } catch (err) {
+          if (!isCurrentFieldOperation(field.name, generation)) break
           failed++
           const msg = err instanceof Error ? err.message : String(err)
           failReasons.push(`${item.file_name}: ${msg}`)
         }
       }
     } finally {
-      setUploading((prev) => ({ ...prev, [field.name]: false }))
+      finishFieldOperation(field.name)
     }
     // 批量时只在最后报一次总数，别一个个弹
-    if (failed) {
+    if (failed && isCurrentFieldOperation(field.name, generation)) {
       const sizeMsg = failReasons.some((r) => /超过.*MB/.test(r))
         ? '（部分素材超出可用大小上限，无法提交给生成引擎）'
         : '常见原因：素材文件已从磁盘删除，或引擎不可达。'
@@ -354,6 +443,7 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
           type="file"
           accept={`${kind}/*`}
           multiple={isMulti}
+          disabled={busy}
           className="visually-hidden"
           id={uploadId}
           onChange={(e) => {
@@ -374,28 +464,37 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
                   key={`${item.objectUrl ?? item.asset?.id ?? item.name}-${i}`}
                   className="flex items-center gap-sm border border-rule bg-paper-2 px-sm py-2xs"
                 >
-                  {kind === 'audio' && item.objectUrl ? (
-                    <audio
-                      src={item.objectUrl}
-                      controls
-                      className="h-8 max-w-64"
-                      aria-label={item.name}
-                    />
-                  ) : (
+                  <div className="min-w-0 flex-1">
+                    {item.asset ? (
+                      <AuthMedia
+                        src={getAssetUrl(item.asset.task_id, item.asset.file_name)}
+                        alt={item.name}
+                        mime={item.asset.mime_type}
+                        controls
+                        className="max-h-40 max-w-full"
+                      />
+                    ) : kind === 'audio' && item.objectUrl ? (
+                      <audio
+                        src={item.objectUrl}
+                        controls
+                        className="h-8 max-w-64"
+                        aria-label={item.name}
+                      />
+                    ) : null}
                     <span className="min-w-0 flex-1 truncate text-sm text-ink">
                       {item.name || `${unit} ${i + 1}`}
                     </span>
-                  )}
+                  </div>
                   <button
                     type="button"
                     className="btn-danger-quiet"
+                    aria-label={`移除${item.name}`}
                     disabled={busy}
                     onClick={() => {
                       if (isMulti) {
                         removeImageAt(field, i)
                       } else {
-                        clearPreviews(field.name)
-                        setValue(field.name, '')
+                        removeSingleFile(field.name)
                       }
                     }}
                   >
@@ -408,6 +507,7 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
           <div className="mt-xs flex flex-wrap items-center gap-sm">
             <label
               htmlFor={uploadId}
+              aria-disabled={busy}
               className={`btn-quiet cursor-pointer ${busy ? 'pointer-events-none opacity-50' : ''}`}
             >
               {rows.length ? `继续添加${unit}` : `上传${unit}`}
@@ -450,13 +550,16 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
         role="img"
         aria-label={`${preview.name}（预览不可用）`}
       >
-        预览不可用
+        {preview.name}
       </div>
     )
   }
 
+  const anyFileUploading = Object.values(uploading).some(Boolean)
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
+    if (submitting || hasPendingFileOperation()) return
     // 过滤掉空值（多图字段的 [] 也算空）
     const params: Record<string, unknown> = {}
     for (const [k, v] of Object.entries(values)) {
@@ -541,12 +644,14 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
         const isMulti = !!field.multiple
         const items = previews[field.name] ?? []
         const preview = items[0]
+        const busy = !!uploading[field.name]
         return (
           <div className="border border-rule bg-paper">
             <input
               type="file"
               accept="image/*"
               multiple={isMulti}
+              disabled={busy}
               className="visually-hidden"
               id={`upload-${field.name}`}
               onChange={(e) => {
@@ -570,7 +675,7 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
                           className="absolute right-0 top-0 h-5 w-5 border border-rule bg-paper text-xs leading-none text-ink disabled:opacity-40"
                           aria-label={`移除第 ${i + 1} 张`}
                           // 上传中禁止删：删掉会让后面追加的图与预览位置错位
-                          disabled={!!uploading[field.name]}
+                          disabled={busy}
                           onClick={() => removeImageAt(field, i)}
                         >
                           ×
@@ -580,27 +685,28 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
                   </div>
                 ) : (
                   <div className="border border-dashed border-muted px-md py-lg text-center text-sm text-ink-2">
-                    {uploading[field.name] ? '上传中…' : `还没有选择${field.label}`}
+                    {busy ? '上传中…' : `还没有选择${field.label}`}
                   </div>
                 )}
                 <div className="mt-xs flex flex-wrap items-center gap-sm">
                   {/* 上传中锁住入口：并发上传会让追加顺序与预览位置错位 */}
                   <label
                     htmlFor={`upload-${field.name}`}
-                    className={`btn-quiet cursor-pointer ${uploading[field.name] ? 'pointer-events-none opacity-50' : ''}`}
+                    aria-disabled={busy}
+                    className={`btn-quiet cursor-pointer ${busy ? 'pointer-events-none opacity-50' : ''}`}
                   >
                     添加图片
                   </label>
                   <button
                     type="button"
                     className="btn-quiet"
-                    disabled={!!uploading[field.name]}
+                    disabled={busy}
                     onClick={() => setPickerFor(field)}
                   >
                     从素材库
                   </button>
                   <span className="text-xs text-muted">
-                    {uploading[field.name]
+                    {busy
                       ? '上传中…'
                       : items.length > 0
                         ? `已选 ${items.length} 张`
@@ -616,26 +722,33 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm text-ink">{preview.name}</p>
                   <p className="mt-2xs text-xs text-muted">
-                    {uploading[field.name]
+                    {busy
                       ? '上传中…'
                       : value
                         ? `已上传到 ${template.engine}`
                         : '待上传'}
                   </p>
                   <div className="mt-xs flex gap-xs">
-                    <label htmlFor={`upload-${field.name}`} className="btn-quiet cursor-pointer">
+                    <label
+                      htmlFor={`upload-${field.name}`}
+                      aria-disabled={busy}
+                      className={`btn-quiet cursor-pointer ${busy ? 'pointer-events-none opacity-50' : ''}`}
+                    >
                       更换
                     </label>
-                    <button type="button" className="btn-quiet" onClick={() => setPickerFor(field)}>
+                    <button
+                      type="button"
+                      className="btn-quiet"
+                      disabled={busy}
+                      onClick={() => setPickerFor(field)}
+                    >
                       从素材库
                     </button>
                     <button
                       type="button"
                       className="btn-danger-quiet"
-                      onClick={() => {
-                        clearPreviews(field.name)
-                        setValue(field.name, '')
-                      }}
+                      disabled={busy}
+                      onClick={() => removeSingleFile(field.name)}
                     >
                       移除
                     </button>
@@ -648,30 +761,49 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
                   <p className="truncate text-sm text-ink">{String(value)}</p>
                   <p className="mt-2xs text-xs text-muted">已上传到 {template.engine}</p>
                 </div>
-                <label htmlFor={`upload-${field.name}`} className="btn-quiet cursor-pointer">
+                <label
+                  htmlFor={`upload-${field.name}`}
+                  aria-disabled={busy}
+                  className={`btn-quiet cursor-pointer ${busy ? 'pointer-events-none opacity-50' : ''}`}
+                >
                   更换
                 </label>
-                <button type="button" className="btn-quiet" onClick={() => setPickerFor(field)}>
+                <button
+                  type="button"
+                  className="btn-quiet"
+                  disabled={busy}
+                  onClick={() => setPickerFor(field)}
+                >
                   从素材库
                 </button>
                 <button
                   type="button"
                   className="btn-danger-quiet"
-                  onClick={() => setValue(field.name, '')}
+                  disabled={busy}
+                  onClick={() => removeSingleFile(field.name)}
                 >
                   移除
                 </button>
               </div>
             ) : (
               <div className="border border-dashed border-muted px-md py-lg text-center text-sm text-ink-2">
-                {uploading[field.name] ? (
+                {busy ? (
                   <span className="text-accent">上传中…</span>
                 ) : (
                   <div className="flex flex-wrap items-center justify-center gap-sm">
-                    <label htmlFor={`upload-${field.name}`} className="btn-quiet cursor-pointer">
+                    <label
+                      htmlFor={`upload-${field.name}`}
+                      aria-disabled={busy}
+                      className={`btn-quiet cursor-pointer ${busy ? 'pointer-events-none opacity-50' : ''}`}
+                    >
                       点击上传{field.label}
                     </label>
-                    <button type="button" className="btn-quiet" onClick={() => setPickerFor(field)}>
+                    <button
+                      type="button"
+                      className="btn-quiet"
+                      disabled={busy}
+                      onClick={() => setPickerFor(field)}
+                    >
                       从素材库选择
                     </button>
                   </div>
@@ -757,10 +889,10 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
         </div>
         <button
           type="submit"
-          disabled={submitting}
+          disabled={submitting || anyFileUploading}
           className="btn btn-primary flex-1 justify-center"
         >
-          {submitting ? '提交中…' : '开始生成'}
+          {submitting ? '提交中…' : anyFileUploading ? '文件上传中…' : '开始生成'}
         </button>
       </div>
 

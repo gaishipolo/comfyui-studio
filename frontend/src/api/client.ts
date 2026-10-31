@@ -388,7 +388,15 @@ export async function fetchAssetBlob(
     if (options?.silent) return null
     throw new AssetFetchError(resp.status, message)
   }
-  return resp.blob()
+  try {
+    return await resp.blob()
+  } catch (error) {
+    if (options?.signal?.aborted || (error instanceof DOMException && error.name === 'AbortError')) {
+      throw error
+    }
+    if (options?.silent) return null
+    throw new AssetFetchError(0, '资源加载失败（网络错误）')
+  }
 }
 
 /** 带鉴权打开素材（新标签），用于替代 <a href> 直链 */

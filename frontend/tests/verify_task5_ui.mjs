@@ -23,6 +23,7 @@ const USER = {
 }
 
 const imageFile = (name) => ({ name, mimeType: 'image/png', buffer: PNG })
+const mediaFile = (name, mimeType) => ({ name, mimeType, buffer: Buffer.from('task-5-media') })
 
 function template(fields) {
   return {
@@ -44,14 +45,14 @@ function template(fields) {
   }
 }
 
-function asset(fileName = 'asset.png') {
+function asset(fileName = 'asset.png', mimeType = 'image/png', id = 'asset-task-5') {
   return {
-    id: 'asset-task-5',
+    id,
     task_id: 'asset-task',
     file_path: `asset-task/${fileName}`,
     file_name: fileName,
     file_size: PNG.length,
-    mime_type: 'image/png',
+    mime_type: mimeType,
     tags: [],
     meta: {},
     is_shared: false,
@@ -59,6 +60,21 @@ function asset(fileName = 'asset.png') {
     creator_name: 'Owner',
     created_at: '2026-10-31T00:00:00',
   }
+}
+
+async function dispatchFiles(page, inputId, files) {
+  await page.evaluate(
+    ({ inputId: id, files: incoming }) => {
+      const input = document.querySelector(id)
+      for (const file of incoming) {
+        const transfer = new DataTransfer()
+        transfer.items.add(new File([new Uint8Array([1, 2, 3])], file.name, { type: file.type }))
+        input.files = transfer.files
+        input.dispatchEvent(new Event('change', { bubbles: true }))
+      }
+    },
+    { inputId, files },
+  )
 }
 
 function deferred() {
@@ -131,7 +147,7 @@ async function stopPreview(child) {
   }
 }
 
-async function openForm(browser, { fields, assets = [], apiHandler }) {
+async function openForm(browser, { fields, assets = [], initialValues, apiHandler }) {
   const context = await browser.newContext()
   const page = await context.newPage()
   const submitted = []
@@ -161,6 +177,26 @@ async function openForm(browser, { fields, assets = [], apiHandler }) {
     }
     window.__assetFetchSignals = []
     window.__objectUrlRecords = []
+    window.__renderedMedia = []
+    const mediaObserver = new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        for (const node of mutation.addedNodes) {
+          if (!(node instanceof Element)) continue
+          const media = [
+            ...(node.matches('audio, video') ? [node] : []),
+            ...node.querySelectorAll('audio, video'),
+          ]
+          for (const element of media) {
+            window.__renderedMedia.push({
+              tag: element.tagName.toLowerCase(),
+              label: element.getAttribute('aria-label'),
+              controls: element.controls,
+            })
+          }
+        }
+      }
+    })
+    mediaObserver.observe(document, { childList: true, subtree: true })
     const nativeCreateObjectUrl = URL.createObjectURL.bind(URL)
     const nativeRevokeObjectUrl = URL.revokeObjectURL.bind(URL)
     URL.createObjectURL = (object) => {
@@ -193,6 +229,23 @@ async function openForm(browser, { fields, assets = [], apiHandler }) {
   }, USER)
 
   const activeTemplate = template(fields)
+  const prefillTask = initialValues
+    ? {
+        id: 'task-5-prefill',
+        template_id: activeTemplate.id,
+        created_by: USER.id,
+        batch_id: 'task-5-batch',
+        status: 'done',
+        progress: 100,
+        params: initialValues,
+        provider_task_id: 'provider-task-5',
+        result: { outputs: [] },
+        error_msg: '',
+        created_at: '2026-10-31T00:00:00',
+        started_at: '2026-10-31T00:00:00',
+        finished_at: '2026-10-31T00:01:00',
+      }
+    : null
   await page.route('**/api/**', async (route) => {
     const request = route.request()
     const url = new URL(request.url())
@@ -206,7 +259,9 @@ async function openForm(browser, { fields, assets = [], apiHandler }) {
       return json(route, [{ name: 'fake', status: 'connected' }])
     }
     if (url.pathname === '/api/assets') return json(route, assets)
-    if (url.pathname === '/api/tasks' && request.method() === 'GET') return json(route, [])
+    if (url.pathname === '/api/tasks' && request.method() === 'GET') {
+      return json(route, prefillTask ? [prefillTask] : [])
+    }
     if (url.pathname === '/api/tasks' && request.method() === 'POST') {
       submitted.push(request.postDataJSON())
       return json(route, [])
@@ -218,7 +273,14 @@ async function openForm(browser, { fields, assets = [], apiHandler }) {
   })
 
   await page.goto(BASE_URL)
-  await page.getByText(activeTemplate.name, { exact: true }).click()
+  if (prefillTask) {
+    await page.getByRole('button', { name: '任务', exact: true }).click()
+    await page.getByRole('button', { name: '生成任务', exact: true }).click()
+    await page.getByRole('button', { name: '用这些参数再生成', exact: true }).click()
+    await page.getByText('已带入原任务参数，改一改再提交即可', { exact: true }).waitFor()
+  } else {
+    await page.getByText(activeTemplate.name, { exact: true }).click()
+  }
   return { context, page, submitted, dialogs, consoleErrors }
 }
 
@@ -334,6 +396,505 @@ async function testMultipleUploadsStayAligned(browser) {
   } finally {
     releaseFirst.resolve()
     await closeChecked(state)
+  }
+}
+
+async function testPendingUploadsBlockSubmission(browser) {
+  const scenarios = [
+    {
+      name: 'initial upload',
+      pendingAttempt: 1,
+      fields: [
+        { name: 'single', label: 'Initial upload', type: 'file_upload', accept: 'image', required: false },
+      ],
+      start: async (state) => {
+        await state.page.locator('#upload-single').setInputFiles(imageFile('initial.png'))
+      },
+    },
+    {
+      name: 'replacement upload',
+      pendingAttempt: 2,
+      fields: [
+        { name: 'single', label: 'Replacement upload', type: 'file_upload', accept: 'image', required: false },
+      ],
+      prepare: async (state) => {
+        await state.page.locator('#upload-single').setInputFiles(imageFile('existing.png'))
+        await state.page.locator('img[alt="existing.png"]').waitFor()
+      },
+      start: async (state) => {
+        await state.page.locator('#upload-single').setInputFiles(imageFile('replacement.png'))
+      },
+    },
+    {
+      name: 'multi upload with accepted prefix',
+      pendingAttempt: 2,
+      fields: [
+        {
+          name: 'multiple',
+          label: 'Prefix upload',
+          type: 'file_upload',
+          accept: 'image',
+          required: false,
+          multiple: true,
+        },
+      ],
+      start: async (state) => {
+        await state.page.locator('#upload-multiple').setInputFiles([
+          imageFile('prefix.png'),
+          imageFile('pending.png'),
+        ])
+      },
+    },
+  ]
+
+  for (const scenario of scenarios) {
+    const started = deferred()
+    const release = deferred()
+    let attempts = 0
+    const state = await openForm(browser, {
+      fields: scenario.fields,
+      apiHandler: async ({ route, url }) => {
+        if (url.pathname !== '/api/upload/file') return false
+        attempts += 1
+        if (attempts === scenario.pendingAttempt) {
+          started.resolve()
+          await release.promise
+        }
+        await json(route, { filename: attempts === 1 ? 'engine-existing.png' : `engine-${attempts}.png` })
+        return true
+      },
+    })
+
+    try {
+      if (scenario.prepare) await scenario.prepare(state)
+      await scenario.start(state)
+      await started.promise
+      await state.page.waitForTimeout(0)
+
+      const submitButton = state.page.getByRole('button', { name: /开始生成|文件上传中/ })
+      const label = await submitButton.textContent()
+      const disabled = await submitButton.isDisabled()
+      await state.page.locator('form').evaluate((form) => form.requestSubmit())
+      await state.page.waitForTimeout(100)
+      const submitCalls = state.submitted.length
+
+      release.resolve()
+      await waitUntil(
+        state.page,
+        () => Promise.resolve(attempts >= scenario.pendingAttempt),
+        'upload did not finish',
+      )
+      assert.equal(label?.trim(), '文件上传中…', `${scenario.name} did not show pending label`)
+      assert.equal(disabled, true, `${scenario.name} submit button stayed enabled`)
+      assert.equal(submitCalls, 0, `${scenario.name} reached onSubmit while upload was pending`)
+    } finally {
+      release.resolve()
+      await closeChecked(state)
+    }
+  }
+}
+
+async function testSingleReplacementGenerations(browser) {
+  const releases = new Map()
+  const started = new Map()
+  const finished = new Map()
+  for (const attempt of [2, 3, 4, 5]) {
+    releases.set(attempt, deferred())
+    started.set(attempt, deferred())
+    finished.set(attempt, deferred())
+  }
+  let attempts = 0
+  const state = await openForm(browser, {
+    fields: [
+      { name: 'single', label: 'Racing replacement', type: 'file_upload', accept: 'image', required: false },
+    ],
+    apiHandler: async ({ route, url }) => {
+      if (url.pathname !== '/api/upload/file') return false
+      attempts += 1
+      const attempt = attempts
+      if (attempt === 1) {
+        await json(route, { filename: 'engine-baseline.png' })
+        return true
+      }
+      started.get(attempt).resolve()
+      await releases.get(attempt).promise
+      await json(route, { filename: `engine-race-${attempt}.png` })
+      finished.get(attempt).resolve()
+      return true
+    },
+  })
+
+  try {
+    await state.page.locator('#upload-single').setInputFiles(imageFile('baseline.png'))
+    await state.page.locator('img[alt="baseline.png"]').waitFor()
+
+    await dispatchFiles(state.page, '#upload-single', [
+      { name: 'race-2.png', type: 'image/png' },
+      { name: 'race-3.png', type: 'image/png' },
+    ])
+    await Promise.all([started.get(2).promise, started.get(3).promise])
+    await state.page.waitForTimeout(0)
+
+    const field = state.page.locator('#upload-single').locator('..')
+    const controls = {
+      input: await state.page.locator('#upload-single').isDisabled(),
+      picker: await field.getByRole('button', { name: /从素材库/ }).isDisabled(),
+      remove: await field.getByRole('button', { name: '移除' }).isDisabled(),
+      label: await field.locator('label[for="upload-single"]').getAttribute('aria-disabled'),
+    }
+
+    releases.get(2).resolve()
+    await finished.get(2).promise
+    await state.page.waitForTimeout(50)
+    const olderFinishedState = {
+      submitDisabled: await state.page.getByRole('button', { name: /开始生成|文件上传中/ }).isDisabled(),
+      submitLabel: (await state.page.getByRole('button', { name: /开始生成|文件上传中/ }).textContent())?.trim(),
+      baseline: await state.page.locator('img[alt="baseline.png"]').count(),
+      stale: await state.page.locator('img[alt="race-2.png"]').count(),
+    }
+    releases.get(3).resolve()
+    await finished.get(3).promise
+    await state.page.locator('img[alt="race-3.png"]').waitFor()
+
+    await dispatchFiles(state.page, '#upload-single', [
+      { name: 'race-4.png', type: 'image/png' },
+      { name: 'race-5.png', type: 'image/png' },
+    ])
+    await Promise.all([started.get(4).promise, started.get(5).promise])
+    releases.get(5).resolve()
+    await finished.get(5).promise
+    await state.page.locator('img[alt="race-5.png"]').waitFor()
+    releases.get(4).resolve()
+    await finished.get(4).promise
+    await state.page.waitForTimeout(50)
+
+    assert.deepEqual(controls, { input: true, picker: true, remove: true, label: 'true' })
+    assert.deepEqual(
+      olderFinishedState,
+      { submitDisabled: true, submitLabel: '文件上传中…', baseline: 1, stale: 0 },
+      'older completion changed state or cleared the newer busy operation',
+    )
+    assert.equal(await state.page.locator('img[alt="race-5.png"]').count(), 1)
+    assert.equal(await state.page.locator('img[alt="race-4.png"]').count(), 0)
+  } finally {
+    for (const release of releases.values()) release.resolve()
+    await closeChecked(state)
+  }
+}
+
+async function testRemoveInvalidatesPendingReplacement(browser) {
+  const replacementStarted = deferred()
+  const releaseReplacement = deferred()
+  const replacementFinished = deferred()
+  let attempts = 0
+  const state = await openForm(browser, {
+    fields: [
+      { name: 'single', label: 'Remove race', type: 'file_upload', accept: 'image', required: false },
+    ],
+    apiHandler: async ({ route, url }) => {
+      if (url.pathname !== '/api/upload/file') return false
+      attempts += 1
+      if (attempts === 1) {
+        await json(route, { filename: 'engine-existing.png' })
+      } else {
+        replacementStarted.resolve()
+        await releaseReplacement.promise
+        await json(route, { filename: 'engine-restored.png' })
+        replacementFinished.resolve()
+      }
+      return true
+    },
+  })
+
+  try {
+    await state.page.locator('#upload-single').setInputFiles(imageFile('existing.png'))
+    await state.page.locator('img[alt="existing.png"]').waitFor()
+    await state.page.evaluate(() => {
+      const input = document.querySelector('#upload-single')
+      const transfer = new DataTransfer()
+      transfer.items.add(new File([new Uint8Array([1])], 'pending.png', { type: 'image/png' }))
+      input.files = transfer.files
+      input.dispatchEvent(new Event('change', { bubbles: true }))
+      const remove = input.parentElement.querySelector('.btn-danger-quiet')
+      // Controls are asserted disabled separately; invoke the rendered handler to model an
+      // already-queued remove event crossing the upload state update.
+      const propsKey = Object.keys(remove).find((key) => key.startsWith('__reactProps$'))
+      remove[propsKey].onClick()
+    })
+    await replacementStarted.promise
+    releaseReplacement.resolve()
+    await replacementFinished.promise
+    await state.page.waitForTimeout(50)
+
+    assert.equal(await state.page.locator('img[alt="existing.png"]').count(), 0)
+    assert.equal(await state.page.locator('img[alt="pending.png"]').count(), 0)
+    await state.page.locator('form').evaluate((form) => form.requestSubmit())
+    await waitUntil(state.page, () => Promise.resolve(state.submitted.length === 1), 'removed form did not submit')
+    assert.equal(Object.hasOwn(state.submitted[0].params, 'single'), false)
+  } finally {
+    releaseReplacement.resolve()
+    await closeChecked(state)
+  }
+}
+
+async function testPendingDirectUploadUnmountDoesNotCreatePreview(browser) {
+  const uploadStarted = deferred()
+  const releaseUpload = deferred()
+  const uploadFinished = deferred()
+  const state = await openForm(browser, {
+    fields: [
+      { name: 'single', label: 'Unmount upload', type: 'file_upload', accept: 'image', required: false },
+    ],
+    apiHandler: async ({ route, url }) => {
+      if (url.pathname !== '/api/upload/file') return false
+      uploadStarted.resolve()
+      await releaseUpload.promise
+      await json(route, { filename: 'engine-after-unmount.png' })
+      uploadFinished.resolve()
+      return true
+    },
+  })
+
+  try {
+    await state.page.locator('#upload-single').setInputFiles(imageFile('after-unmount.png'))
+    await uploadStarted.promise
+    const before = await state.page.evaluate(() => window.__objectUrlRecords.length)
+    await state.page.getByRole('button', { name: '任务', exact: true }).click()
+    releaseUpload.resolve()
+    await uploadFinished.promise
+    await state.page.waitForTimeout(50)
+    const records = await state.page.evaluate(() => window.__objectUrlRecords)
+    assert.equal(records.length, before, 'upload completion created an object URL after unmount')
+    assert(records.every((record) => record.revoked), 'unmount left an object URL active')
+  } finally {
+    releaseUpload.resolve()
+    await closeChecked(state)
+  }
+}
+
+async function testAssetMultipleUploadsStaySerialAndAligned(browser) {
+  const secondStarted = deferred()
+  const releaseSecond = deferred()
+  let attempts = 0
+  const assets = [
+    asset('asset-first.png', 'image/png', 'asset-first'),
+    asset('asset-failed.png', 'image/png', 'asset-failed'),
+    asset('asset-third.png', 'image/png', 'asset-third'),
+  ]
+  const state = await openForm(browser, {
+    fields: [
+      {
+        name: 'multiple',
+        label: 'Multiple assets',
+        type: 'file_upload',
+        accept: 'image',
+        required: false,
+        multiple: true,
+      },
+    ],
+    assets,
+    apiHandler: async ({ route, url }) => {
+      if (url.pathname === '/api/upload/from-asset') {
+        attempts += 1
+        if (attempts === 2) {
+          secondStarted.resolve()
+          await releaseSecond.promise
+          await json(route, { detail: 'middle asset failed' }, 502)
+        } else {
+          await json(route, { filename: attempts === 1 ? 'engine-asset-first.png' : 'engine-asset-third.png' })
+        }
+        return true
+      }
+      if (url.pathname.endsWith('/thumb')) {
+        await route.fulfill({ status: 200, contentType: 'image/png', body: PNG })
+        return true
+      }
+      return false
+    },
+  })
+
+  try {
+    const field = state.page.locator('#upload-multiple').locator('..')
+    await field.getByRole('button', { name: /从素材库/ }).click()
+    for (const item of assets) {
+      await state.page.locator(`button[title="${item.file_name}"]`).click()
+    }
+    await state.page.getByRole('button', { name: /确定/ }).click()
+    await secondStarted.promise
+    assert.equal(attempts, 2, 'asset multi upload was not serial')
+    releaseSecond.resolve()
+    await waitUntil(state.page, () => Promise.resolve(attempts === 3), 'third asset was not forwarded')
+    await waitUntil(state.page, () => Promise.resolve(state.dialogs.length === 1), 'asset multi failure alert missing')
+    await state.page.locator('img[alt="asset-third.png"]').waitFor()
+    assert.equal(await state.page.locator('img[alt="asset-first.png"]').count(), 1)
+    assert.equal(await state.page.locator('img[alt="asset-failed.png"]').count(), 0)
+
+    await state.page.getByRole('button', { name: '开始生成' }).click()
+    await waitUntil(state.page, () => Promise.resolve(state.submitted.length === 1), 'asset multi form did not submit')
+    assert.deepEqual(state.submitted[0].params.multiple, [
+      'engine-asset-first.png',
+      'engine-asset-third.png',
+    ])
+  } finally {
+    releaseSecond.resolve()
+    await closeChecked(state)
+  }
+}
+
+async function testPrefilledImageListAlignment(browser) {
+  let attempts = 0
+  const state = await openForm(browser, {
+    fields: [
+      {
+        name: 'images',
+        label: 'Prefilled images',
+        type: 'file_upload',
+        accept: 'image',
+        required: false,
+        multiple: true,
+      },
+    ],
+    initialValues: { images: ['old-image.png'] },
+    apiHandler: async ({ route, url }) => {
+      if (url.pathname !== '/api/upload/file') return false
+      attempts += 1
+      await json(route, { filename: `engine-new-${attempts}.png` })
+      return true
+    },
+  })
+
+  try {
+    assert.equal(await state.page.getByText('old-image.png', { exact: true }).count(), 1)
+    await state.page.locator('#upload-images').setInputFiles(imageFile('new-image.png'))
+    await state.page.locator('img[alt="new-image.png"]').waitFor()
+    await state.page.getByRole('button', { name: '移除第 2 张' }).click()
+    await state.page.getByRole('button', { name: '开始生成' }).click()
+    await waitUntil(state.page, () => Promise.resolve(state.submitted.length === 1), 'image prefill first submit missing')
+    assert.deepEqual(state.submitted[0].params.images, ['old-image.png'])
+
+    await state.page.locator('#upload-images').setInputFiles(imageFile('new-image-2.png'))
+    await state.page.locator('img[alt="new-image-2.png"]').waitFor()
+    await state.page.getByRole('button', { name: '移除第 1 张' }).click()
+    await state.page.getByRole('button', { name: '开始生成' }).click()
+    await waitUntil(state.page, () => Promise.resolve(state.submitted.length === 2), 'image prefill second submit missing')
+    assert.deepEqual(state.submitted[1].params.images, ['engine-new-2.png'])
+  } finally {
+    await closeChecked(state)
+  }
+}
+
+async function testPrefilledAudioListAlignment(browser) {
+  let attempts = 0
+  const state = await openForm(browser, {
+    fields: [
+      {
+        name: 'audio',
+        label: 'Prefilled audio',
+        type: 'file_upload',
+        accept: 'audio',
+        required: false,
+        multiple: true,
+      },
+    ],
+    initialValues: { audio: ['old-audio.wav'] },
+    apiHandler: async ({ route, url }) => {
+      if (url.pathname !== '/api/upload/file') return false
+      attempts += 1
+      await json(route, { filename: `engine-audio-${attempts}.wav` })
+      return true
+    },
+  })
+
+  try {
+    assert.equal(await state.page.getByText('old-audio.wav', { exact: true }).count(), 1)
+    await state.page.locator('#upload-audio').setInputFiles(mediaFile('new-audio.wav', 'audio/wav'))
+    await state.page.getByText('new-audio.wav', { exact: true }).waitFor()
+    await state.page.getByRole('button', { name: '移除new-audio.wav' }).click()
+    await state.page.getByRole('button', { name: '开始生成' }).click()
+    await waitUntil(state.page, () => Promise.resolve(state.submitted.length === 1), 'audio prefill first submit missing')
+    assert.deepEqual(state.submitted[0].params.audio, ['old-audio.wav'])
+
+    await state.page.locator('#upload-audio').setInputFiles(mediaFile('new-audio-2.wav', 'audio/wav'))
+    await state.page.getByText('new-audio-2.wav', { exact: true }).waitFor()
+    await state.page.getByRole('button', { name: '移除old-audio.wav' }).click()
+    await state.page.getByRole('button', { name: '开始生成' }).click()
+    await waitUntil(state.page, () => Promise.resolve(state.submitted.length === 2), 'audio prefill second submit missing')
+    assert.deepEqual(state.submitted[1].params.audio, ['engine-audio-2.wav'])
+  } finally {
+    await closeChecked(state)
+  }
+}
+
+async function testRemoteAudioAndVideoPreviewAfterForward(browser) {
+  for (const scenario of [
+    { kind: 'audio', mime: 'audio/wav', fileName: 'remote.wav', tag: 'audio' },
+    { kind: 'video', mime: 'video/mp4', fileName: 'remote.mp4', tag: 'video' },
+  ]) {
+    const forwardStarted = deferred()
+    const releaseForward = deferred()
+    let forwarded = false
+    let rawAfterForward = 0
+    let thumbAfterForward = 0
+    const item = asset(scenario.fileName, scenario.mime, `asset-${scenario.kind}`)
+    const state = await openForm(browser, {
+      fields: [
+        {
+          name: 'media',
+          label: `Remote ${scenario.kind}`,
+          type: 'file_upload',
+          accept: scenario.kind,
+          required: false,
+        },
+      ],
+      assets: [item],
+      apiHandler: async ({ route, url }) => {
+        if (url.pathname === '/api/upload/from-asset') {
+          forwardStarted.resolve()
+          await releaseForward.promise
+          forwarded = true
+          await json(route, { filename: `engine-${scenario.fileName}` })
+          return true
+        }
+        if (url.pathname.endsWith('/thumb')) {
+          if (forwarded) thumbAfterForward += 1
+          await route.fulfill({ status: 200, contentType: 'image/png', body: PNG })
+          return true
+        }
+        if (url.pathname.includes('/assets/')) {
+          if (forwarded) rawAfterForward += 1
+          await route.fulfill({ status: 200, contentType: scenario.mime, body: Buffer.from('invalid-media') })
+          return true
+        }
+        return false
+      },
+    })
+
+    try {
+      const field = state.page.locator('#upload-media').locator('..')
+      await field.getByRole('button', { name: /从素材库/ }).click()
+      await state.page.locator(`button[title="${scenario.fileName}"]`).click()
+      await forwardStarted.promise
+      assert.equal(rawAfterForward, 0, `${scenario.kind} preview requested before forwarding`)
+      releaseForward.resolve()
+      await waitUntil(
+        state.page,
+        () =>
+          state.page.evaluate(
+            ({ tag, fileName }) =>
+              window.__renderedMedia.some(
+                (entry) => entry.tag === tag && entry.label === fileName && entry.controls,
+              ),
+            { tag: scenario.tag, fileName: scenario.fileName },
+          ),
+        `${scenario.kind} AuthMedia element was not rendered`,
+      )
+      assert.equal(rawAfterForward, 1, `${scenario.kind} did not request authenticated original`)
+      assert.equal(thumbAfterForward, 0, `${scenario.kind} form preview incorrectly requested a thumbnail`)
+      await state.page.getByText(scenario.fileName, { exact: true }).waitFor()
+    } finally {
+      releaseForward.resolve()
+      await closeChecked(state)
+    }
   }
 }
 
@@ -731,6 +1292,14 @@ async function testAbortOnSourceChange(browser) {
 const tests = [
   ['single replacement is atomic', testSingleReplacementIsAtomic],
   ['multiple uploads stay aligned', testMultipleUploadsStayAligned],
+  ['pending uploads block submission', testPendingUploadsBlockSubmission],
+  ['single replacement generations are race-safe', testSingleReplacementGenerations],
+  ['remove invalidates a pending replacement', testRemoveInvalidatesPendingReplacement],
+  ['pending direct upload unmount does not create preview', testPendingDirectUploadUnmountDoesNotCreatePreview],
+  ['asset multiple uploads stay serial and aligned', testAssetMultipleUploadsStaySerialAndAligned],
+  ['prefilled image list stays aligned', testPrefilledImageListAlignment],
+  ['prefilled audio list stays aligned', testPrefilledAudioListAlignment],
+  ['remote audio and video preview after forwarding', testRemoteAudioAndVideoPreviewAfterForward],
   ['failed asset replacement keeps old state', testFailedAssetReplacementKeepsOldState],
   ['accepted asset keeps value when preview fails', testAcceptedAssetUsesThumbWithoutRollingBackValue],
   ['authenticated media status matrix', testMediaStatuses],

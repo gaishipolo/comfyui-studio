@@ -142,6 +142,25 @@ async def test_authoritative_size_rejects_stale_metadata_before_read() -> None:
         assert closed == [db_size], closed
 
 
+async def test_oversized_metadata_rejects_before_filestore_or_provider() -> None:
+    provider = FakeProvider()
+
+    def forbidden_file_work(_path: str):
+        raise AssertionError("oversized DB metadata must reject before FileStore access")
+
+    await expect_http(
+        call_route(
+            make_asset(file_size=20 * MB + 1),
+            provider=provider,
+            open_asset=forbidden_file_work,
+            read_asset_bytes=forbidden_file_work,
+        ),
+        400,
+        "20MB",
+    )
+    assert provider.calls == [], provider.calls
+
+
 async def test_post_read_size_rejects_growth_before_provider() -> None:
     limit = 20 * MB
     provider = FakeProvider()
@@ -288,6 +307,7 @@ async def test_permissions_mime_and_missing_bytes_keep_existing_contract() -> No
 async def main() -> None:
     tests = [
         test_authoritative_size_rejects_stale_metadata_before_read,
+        test_oversized_metadata_rejects_before_filestore_or_provider,
         test_post_read_size_rejects_growth_before_provider,
         test_missing_handle_is_404_without_read_or_provider,
         test_exact_size_limits_are_accepted_and_forwarded_once,
