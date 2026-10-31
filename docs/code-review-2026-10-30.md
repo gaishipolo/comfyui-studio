@@ -26,7 +26,14 @@
 
 存储边界：`verify_filestore_live.py` 在强制的进程内 S3 线格式服务上通过，**没有运行或声称验证真实 MinIO**。
 
-关注项：`verify_from_asset_upload.py` 只上传输入、未提交任务；四个远端 Comfy Asset 引用均已删除并查询为空，但 Comfy 的公开 Asset DELETE 按设计保留非 preview 的物理 input 文件，因此 `/view` 仍能读取 `ref_3ff9bd2d.png`、`ref_b5ecf8a4.png`、`ref_955ed0b8.png`、`ref_1f3489e5.png`。没有通过未批准的远程文件系统访问强行删除。
+关注项：`verify_from_asset_upload.py` 只上传输入、未提交任务；四个远端 Comfy input Asset 引用均已删除并查询为空，但公开 Asset DELETE 按设计保留非 preview 的物理 input 文件，因此 `/view` 仍能读取 `ref_3ff9bd2d.png`、`ref_b5ecf8a4.png`、`ref_955ed0b8.png`、`ref_1f3489e5.png`。Fix Round 1 又通过受支持的 Asset API 删除了真实生成记录 `202a60a5-913c-4350-aee4-32de549d8a96`（204，随后 lookup 404、名称查询为空），但对应 temp 文件 `ComfyUI_temp_fstqj_00003_.png` 的 `/view?type=temp` 仍为 200。准确远端残留是四个 input 文件加一个生成 temp 文件；没有通过远程文件系统或未记录的破坏性端点强删。
+
+### Task 7 Fix Round 1
+
+- 未再次提交真实生成；上面的真实任务、prompt、素材和缩略图证据保持原样。
+- 新增本地假服务契约，最终 **6 passed / 0 failed**：B5/B6 任一创建响应返回额外 ID 时全部非终态任务会被取消且全部 ID 会被删除；模板 ID/引擎/工作流/三项映射/输出节点不符时在任何任务提交前失败；非 loopback 或当前可连接的 generic origin 在 B5 前拒绝。
+- `verify_b5_b6.py` 现在要求显式 `COMFYUI_STUDIO_B5_B6_TEMPLATE_ID` 和 `COMFYUI_STUDIO_TEST_GENERIC_BASE_URL`，并要求后者与脚本环境中的 `GENERIC_API_BASE_URL` 一致；随后通过鉴权 `/api/engines` 确认 `generic_api=disconnected`。不再按名称子串选择真实模板。
+- Comfy 生成 temp Asset 引用删除与五个远端文件的 `/view` 状态均使用公开、受支持 API 复核；队列仍为 running/pending 0/0。
 
 ---
 

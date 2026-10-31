@@ -157,7 +157,7 @@ $env:COMFYUI_STUDIO_TEST_BASE_URL = "http://127.0.0.1:8765"
 
 - `verify_prod_deploy.py`：先在 `frontend/` 执行 `npm ci` 和 `npm run build`，服务的 `FRONTEND_DIST` 必须指向这份非空构建产物；隔离数据库还要至少有一个模板，才能验证业务响应不是空壳。
 - `verify_template_export.py`：隔离服务中必须预置至少一个绑定现有工作流文件的模板，并让 `WORKFLOW_DIR` 指向对应工作流快照。
-- `verify_b5_b6.py`：需要真实 ComfyUI、一个名称含 `Flux2` 的可用模板及其工作流；脚本会真实提交生成任务，不属于离线回归。
+- `verify_b5_b6.py`：会真实提交生成任务，不属于离线回归。必须显式设置 `COMFYUI_STUDIO_B5_B6_TEMPLATE_ID` 为本轮预置模板的精确 ID；该模板必须是 `comfyui` 引擎、绑定 `image_flux2_klein_text_to_image.json`，参数映射必须精确为 `prompt -> 76.inputs.value`、`width -> 103.inputs.value`、`height -> 106.inputs.value`，输出节点必须仅为 `108`。还必须设置 `COMFYUI_STUDIO_TEST_GENERIC_BASE_URL` 为当前不可达的 loopback HTTP(S) origin，并把同一值作为 `GENERIC_API_BASE_URL` 传给隔离后端；脚本会在 B5 前拒绝非 loopback、可连接、两变量不一致或 `/api/engines` 中 `generic_api` 非 `disconnected` 的配置。
 - `e2e_upload_generate.py`：需要真实 ComfyUI，并在任何请求前校验 `COMFYUI_STUDIO_E2E_IMAGE_PATH` 和 `COMFYUI_STUDIO_E2E_TEMPLATE_ID`；可用 `COMFYUI_STUDIO_E2E_ENGINE` 覆盖默认 `comfyui`。模板必须接受 `ref_image`、`prompt`、`width`、`height` 参数，图片路径必须是隔离测试夹具。
 
 `verify_plugin_loader.py`、`verify_from_asset_upload.py`、`verify_usage_stats.py`、`verify_user_isolation.py`、`verify_tag_json_each.py` 和 `verify_tag_persist.py` 仍直接打开 `backend/workbench.db`；`e2e_restart_recovery.py` 和维护脚本 `backfill_video_thumbs.py` 也有同样约束。因此完整服务回归要在一次性 worktree 中使用该默认 SQLite 文件名。worktree 独占且数据库不受 Git 跟踪，测试后可删除，不会接触原工作区数据库。
