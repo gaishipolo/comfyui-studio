@@ -13,7 +13,7 @@ import sys
 import tempfile
 import threading
 import types
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Iterator
@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi import HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from PIL import Image
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from starlette.requests import Request
 
 # These route functions receive an authenticated user directly in this verifier.
@@ -42,8 +43,9 @@ import app.api.tasks as tasks_api
 import app.filestore as filestore
 import app.thumbs as thumbs
 from app.config import settings
+from app.database import Base
 from app.filestore import LocalFileStore, MinioFileStore, ObjectHandle, safe_key
-from app.models.models import Asset, Task
+from app.models.models import Asset, Task, Template
 
 
 PASS = 0
@@ -240,6 +242,23 @@ def selected_store(store) -> Iterator[None]:
         filestore._store = original_store
 
 
+@asynccontextmanager
+async def temporary_sqlite_sessions():
+    with tempfile.TemporaryDirectory(prefix="media-reliability-db-") as raw_dir:
+        database_path = (Path(raw_dir) / "media.sqlite3").resolve().as_posix()
+        engine = create_async_engine(f"sqlite+aiosqlite:///{database_path}")
+        try:
+            async with engine.begin() as connection:
+                await connection.run_sync(Base.metadata.create_all)
+            yield async_sessionmaker(
+                engine,
+                class_=AsyncSession,
+                expire_on_commit=False,
+            )
+        finally:
+            await engine.dispose()
+
+
 def seed_local(store: LocalFileStore, key: str, data: bytes) -> None:
     LocalFileStore.save(store, key, data)
 
@@ -392,9 +411,11 @@ class TaskMutationDB:
         self.assets = assets
         self.deleted: list[object] = []
         self.commits = 0
+        self.gets = 0
         self.refreshes = 0
 
     async def get(self, _model, _identity):
+        self.gets += 1
         return self.task
 
     async def execute(self, _query) -> ScalarResult:
@@ -414,14 +435,10 @@ class ConcurrentRetryDB(TaskMutationDB):
     def __init__(self, task: Task) -> None:
         super().__init__(task, [])
         self.get_calls = 0
-        self.both_loads_started = asyncio.Event()
 
     async def get(self, _model, _identity):
         self.get_calls += 1
-        if self.get_calls == 2:
-            self.both_loads_started.set()
-        await self.both_loads_started.wait()
-        return self.task
+        return await super().get(_model, _identity)
 
     async def execute(self, _query) -> ScalarResult:
         return ScalarResult([])
@@ -494,6 +511,12 @@ async def wait_until(predicate, timeout: float = 2.0) -> None:
             await asyncio.sleep(0)
 
     await asyncio.wait_for(poll(), timeout=timeout)
+
+
+def lifecycle_waiter_count(key: str) -> int:
+    lock = thumbs._thumbnail_lifecycle_locks.get(key)
+    waiters = getattr(lock, "_waiters", None) if lock is not None else None
+    return len(waiters) if waiters else 0
 
 
 async def completed_while_generation_blocked(task: asyncio.Task) -> bool:
@@ -955,6 +978,13 @@ def make_task(task_id: str, status: str = "done") -> Task:
     )
 
 
+async def seed_sqlite_task(session_factory, task: Task, asset: Asset) -> None:
+    async with session_factory() as db:
+        db.add(Template(id="template", name=f"Template {task.id}"))
+        db.add_all([task, asset])
+        await db.commit()
+
+
 async def test_asset_delete_removes_source_and_thumbnail() -> None:
     asset = make_asset("asset-delete", "task-asset-delete", "source.png", "image/png")
     source_key = asset.file_path
@@ -1069,12 +1099,13 @@ async def test_zero_asset_task_delete_uses_task_lifecycle() -> None:
     async with thumbs.thumbnail_lifecycle([lifecycle_key]):
         deletion = asyncio.create_task(tasks_api.delete_task(task.id, user=ADMIN, db=db))
         await asyncio.sleep(0)
-        serialized = not deletion.done() and db.refreshes == 0 and db.commits == 0
+        serialized = not deletion.done() and db.gets == 0 and db.commits == 0
 
     body = await deletion
     assert serialized, "zero-asset task deletion bypassed task lifecycle ownership"
     assert body["assets_deleted"] == 0
-    assert db.deleted == [task] and db.commits == 1 and db.refreshes == 1
+    assert db.deleted == [task] and db.commits == 1
+    assert db.gets == 1 and db.refreshes == 0
 
 
 async def test_task_delete_rejects_terminal_runner_before_cleanup() -> None:
@@ -1098,7 +1129,8 @@ async def test_task_delete_rejects_terminal_runner_before_cleanup() -> None:
             tasks_api._running_tasks.discard(task.id)
 
         assert "finishing" in str(error.detail).lower()
-        assert db.refreshes == 1 and db.deleted == [] and db.commits == 0
+        assert db.gets == 1 and db.refreshes == 0
+        assert db.deleted == [] and db.commits == 0
         assert store.exists(source_key)
         assert store.exists(derived_key)
 
@@ -1190,7 +1222,8 @@ async def test_retry_removes_sources_and_thumbnails() -> None:
         assert not store.exists(source_key)
         assert not store.exists(derived_key)
         assert store.delete_calls == [source_key, derived_key], store.delete_calls
-        assert db.deleted == [asset] and db.commits == 1 and db.refreshes == 2
+        assert db.deleted == [asset] and db.commits == 1
+        assert db.gets == 1 and db.refreshes == 1
         assert spawned == [task.id]
 
 
@@ -1216,7 +1249,8 @@ async def test_retry_rejects_terminal_runner_before_cleanup() -> None:
 
         assert "finishing" in str(error.detail).lower()
         assert task.status == "error"
-        assert db.refreshes == 1 and db.deleted == [] and db.commits == 0
+        assert db.gets == 1 and db.refreshes == 0
+        assert db.deleted == [] and db.commits == 0
         assert store.exists(source_key)
         assert store.exists(derived_key)
 
@@ -1294,7 +1328,8 @@ async def test_concurrent_zero_asset_retries_spawn_once() -> None:
     assert len(successes) == 1, results
     assert len(failures) == 1 and failures[0].status_code == 409, results
     assert spawned == [task.id], spawned
-    assert db.deleted == [] and db.commits == 1 and db.refreshes == 3
+    assert db.deleted == [] and db.commits == 1
+    assert db.get_calls == 2 and db.gets == 2 and db.refreshes == 1
     assert task.status == "pending"
 
 
@@ -1316,7 +1351,7 @@ async def test_retry_spawn_refusal_persists_recoverable_error() -> None:
     assert "start" in str(error.detail).lower()
     assert spawn_calls == [task.id]
     assert task.status == "error" and task.error_msg
-    assert db.commits == 2 and db.refreshes == 3
+    assert db.commits == 2 and db.gets == 1 and db.refreshes == 2
 
 
 async def test_retry_cannot_race_thumbnail_save() -> None:
@@ -1413,11 +1448,136 @@ async def test_cancelled_retry_finishes_and_spawns_before_propagating() -> None:
         assert spawn_reached, "retry was left pending without spawning"
         assert lock_retained_through_spawn, "retry released lifecycle lock before spawn"
         assert cancellation_propagated
-        assert db.deleted == [asset] and db.commits == 1 and db.refreshes == 2
+        assert db.deleted == [asset] and db.commits == 1
+        assert db.gets == 1 and db.refreshes == 1
         assert task.status == "pending"
         assert spawned == [task.id]
         assert not store.exists(source_key)
         assert not store.exists(derived_key)
+
+
+async def test_delete_then_retry_loads_current_task_inside_lifecycle() -> None:
+    task_id = "task-sqlite-delete-first"
+    task = make_task(task_id, status="error")
+    asset = make_asset(
+        "asset-sqlite-delete-first",
+        task_id,
+        "source.png",
+        "image/png",
+    )
+    source_key = asset.file_path
+    derived_key = f"{task_id}/thumb_source.png.jpg"
+    lifecycle_key = thumbs.task_lifecycle_key(task_id)
+    spawned: list[str] = []
+
+    async def spawn(candidate_id: str) -> bool:
+        spawned.append(candidate_id)
+        return True
+
+    async with temporary_sqlite_sessions() as session_factory:
+        await seed_sqlite_task(session_factory, task, asset)
+        with temporary_local_store() as raw_store, patched(tasks_api, spawn_task=spawn):
+            store = raw_store
+            assert isinstance(store, TrackingLocalFileStore)
+            seed_local(store, source_key, b"source")
+            seed_local(store, derived_key, b"thumbnail")
+
+            async with session_factory() as delete_db, session_factory() as retry_db:
+                async with thumbs.thumbnail_lifecycle([lifecycle_key]):
+                    deletion = asyncio.create_task(
+                        tasks_api.delete_task(task_id, user=ADMIN, db=delete_db)
+                    )
+                    await wait_until(
+                        lambda: lifecycle_waiter_count(lifecycle_key) >= 1
+                    )
+                    retry = asyncio.create_task(
+                        tasks_api.retry_task(task_id, user=ADMIN, db=retry_db)
+                    )
+                    await wait_until(
+                        lambda: lifecycle_waiter_count(lifecycle_key) >= 2
+                    )
+
+                delete_result, retry_result = await asyncio.gather(
+                    deletion,
+                    retry,
+                    return_exceptions=True,
+                )
+
+            assert isinstance(delete_result, dict), type(delete_result)
+            assert delete_result["assets_deleted"] == 1
+            assert isinstance(retry_result, HTTPException), type(retry_result)
+            assert retry_result.status_code == 404, retry_result.status_code
+            assert spawned == [], spawned
+            assert store.delete_calls == [source_key, derived_key], store.delete_calls
+            assert not store.exists(source_key)
+            assert not store.exists(derived_key)
+
+        async with session_factory() as verification_db:
+            assert await verification_db.get(Task, task_id) is None
+            assert await verification_db.get(Asset, asset.id) is None
+
+
+async def test_retry_then_delete_loads_current_task_inside_lifecycle() -> None:
+    task_id = "task-sqlite-retry-first"
+    task = make_task(task_id, status="error")
+    asset = make_asset(
+        "asset-sqlite-retry-first",
+        task_id,
+        "source.png",
+        "image/png",
+    )
+    source_key = asset.file_path
+    derived_key = f"{task_id}/thumb_source.png.jpg"
+    lifecycle_key = thumbs.task_lifecycle_key(task_id)
+    spawned: list[str] = []
+
+    async def spawn(candidate_id: str) -> bool:
+        spawned.append(candidate_id)
+        return True
+
+    async with temporary_sqlite_sessions() as session_factory:
+        await seed_sqlite_task(session_factory, task, asset)
+        with temporary_local_store() as raw_store, patched(tasks_api, spawn_task=spawn):
+            store = raw_store
+            assert isinstance(store, TrackingLocalFileStore)
+            seed_local(store, source_key, b"source")
+            seed_local(store, derived_key, b"thumbnail")
+
+            async with session_factory() as retry_db, session_factory() as delete_db:
+                async with thumbs.thumbnail_lifecycle([lifecycle_key]):
+                    retry = asyncio.create_task(
+                        tasks_api.retry_task(task_id, user=ADMIN, db=retry_db)
+                    )
+                    await wait_until(
+                        lambda: lifecycle_waiter_count(lifecycle_key) >= 1
+                    )
+                    deletion = asyncio.create_task(
+                        tasks_api.delete_task(task_id, user=ADMIN, db=delete_db)
+                    )
+                    await wait_until(
+                        lambda: lifecycle_waiter_count(lifecycle_key) >= 2
+                    )
+
+                retry_result, delete_result = await asyncio.gather(
+                    retry,
+                    deletion,
+                    return_exceptions=True,
+                )
+
+            assert isinstance(retry_result, Task), type(retry_result)
+            assert retry_result.status == "pending", retry_result.status
+            assert isinstance(delete_result, HTTPException), type(delete_result)
+            assert delete_result.status_code == 409, delete_result.status_code
+            assert spawned == [task_id], spawned
+            assert store.delete_calls == [source_key, derived_key], store.delete_calls
+            assert not store.exists(source_key)
+            assert not store.exists(derived_key)
+
+        async with session_factory() as verification_db:
+            persisted_task = await verification_db.get(Task, task_id)
+            assert persisted_task is not None
+            assert persisted_task.status == "pending", persisted_task.status
+            assert await verification_db.get(Asset, asset.id) is None
 
 
 class LogCapture(logging.Handler):
@@ -1514,6 +1674,8 @@ TESTS = [
     ("retry spawn refusal persists recoverable error", test_retry_spawn_refusal_persists_recoverable_error),
     ("task retry cannot race thumbnail persistence", test_retry_cannot_race_thumbnail_save),
     ("cancelled retry finishes and spawns before propagating", test_cancelled_retry_finishes_and_spawns_before_propagating),
+    ("delete then retry reloads the task under lifecycle ownership", test_delete_then_retry_loads_current_task_inside_lifecycle),
+    ("retry then delete reloads the task under lifecycle ownership", test_retry_then_delete_loads_current_task_inside_lifecycle),
     ("cleanup failures are reported without restoring DB records", test_cleanup_failures_do_not_restore_database_records),
 ]
 

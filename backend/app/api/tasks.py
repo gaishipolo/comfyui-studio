@@ -381,22 +381,18 @@ async def retry_task(
     db: AsyncSession = Depends(get_db),
 ):
     """重试失败/已取消的任务。仅本人或管理员可重试。"""
-    task = await db.get(Task, task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
-    # 用户隔离：重试原来漏了归属校验 —— 谁都能拿别人失败的任务重跑，堵上
-    if not can_modify_task(user, task.created_by):
-        raise HTTPException(
-            status_code=403, detail="只能重试自己提交的任务（或联系管理员）"
-        )
-    if task.status not in ("error", "cancelled"):
-        raise HTTPException(status_code=400, detail="Only failed or cancelled tasks can be retried")
+    task_key = task_lifecycle_key(task_id)
 
-    task_key = task_lifecycle_key(task.id)
-
-    async def retry_operation() -> Task:
+    async def retry_operation(owned_task_id: str) -> Task:
         async with thumbnail_lifecycle([task_key]):
-            await db.refresh(task)
+            task = await db.get(Task, owned_task_id)
+            if not task:
+                raise HTTPException(status_code=404, detail="Task not found")
+            if not can_modify_task(user, task.created_by):
+                raise HTTPException(
+                    status_code=403,
+                    detail="只能重试自己提交的任务（或联系管理员）",
+                )
             if task.id in _running_tasks:
                 raise HTTPException(
                     status_code=409,
@@ -451,8 +447,8 @@ async def retry_task(
             return task
 
     operation = asyncio.create_task(
-        retry_operation(),
-        name=f"retry-task:{task.id}",
+        retry_operation(task_id),
+        name=f"retry-task:{task_id}",
     )
     return await wait_for_task_completion(operation)
 
@@ -467,30 +463,22 @@ async def delete_task(
 
     级联顺序：先素材文件 → 素材记录 → 任务记录，不留孤儿。
     """
-    task = await db.get(Task, task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+    task_key = task_lifecycle_key(task_id)
 
-    if not can_modify_task(user, task.created_by):
-        raise HTTPException(
-            status_code=403, detail="只能删除自己提交的任务（或联系管理员）"
-        )
-
-    # 正在跑的任务不能删：后台协程还会往这条记录写进度/素材，删了就是竞态
-    if task.status == "running":
-        raise HTTPException(
-            status_code=400, detail="任务正在执行中，请等它完成或失败后再删除"
-        )
-
-    task_key = task_lifecycle_key(task.id)
-
-    async def delete_operation() -> dict:
+    async def delete_operation(owned_task_id: str) -> dict:
         files_removed = 0
         file_errors: list[str] = []
         thumbnails_removed = 0
         thumbnail_errors: list[str] = []
         async with thumbnail_lifecycle([task_key]):
-            await db.refresh(task)
+            task = await db.get(Task, owned_task_id)
+            if not task:
+                raise HTTPException(status_code=404, detail="Task not found")
+            if not can_modify_task(user, task.created_by):
+                raise HTTPException(
+                    status_code=403,
+                    detail="只能删除自己提交的任务（或联系管理员）",
+                )
             if task.status in ("pending", "running") or task.id in _running_tasks:
                 raise HTTPException(
                     status_code=409,
@@ -537,7 +525,7 @@ async def delete_task(
         }
 
     operation = asyncio.create_task(
-        delete_operation(),
-        name=f"delete-task:{task.id}",
+        delete_operation(task_id),
+        name=f"delete-task:{task_id}",
     )
     return await wait_for_task_completion(operation)
