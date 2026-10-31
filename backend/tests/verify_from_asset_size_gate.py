@@ -18,6 +18,7 @@ from fastapi import HTTPException
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.api import uploads as uploads_api
+from app import filestore
 from app.filestore import ObjectHandle
 from app.models.models import Asset
 from app.schemas.schemas import AssetUploadRequest
@@ -25,6 +26,11 @@ from provider_test_utils import lease_acquirer
 
 
 MB = 1024 * 1024
+FileStoreUnavailableError = getattr(
+    filestore,
+    "FileStoreUnavailableError",
+    RuntimeError,
+)
 OWNER = SimpleNamespace(id="owner", role="member")
 OTHER_USER = SimpleNamespace(id="other", role="member")
 
@@ -147,23 +153,49 @@ async def test_authoritative_size_rejects_stale_metadata_before_read() -> None:
         assert closed == [db_size], closed
 
 
-async def test_oversized_metadata_rejects_before_filestore_or_provider() -> None:
+async def test_stale_oversized_metadata_uses_current_filestore_size() -> None:
+    provider = FakeProvider()
+    opened: list[str] = []
+    read: list[str] = []
+    data = b"now-small"
+
+    def open_small(path: str):
+        opened.append(path)
+        return ObjectHandle(size=len(data))
+
+    def read_small(path: str):
+        read.append(path)
+        return data
+
+    result = await call_route(
+        make_asset(file_size=20 * MB + 1),
+        provider=provider,
+        open_asset=open_small,
+        read_asset_bytes=read_small,
+    )
+    assert result == {"filename": "engine-input.png", "engine": "fake"}
+    assert opened == ["task-id/input.png"]
+    assert read == ["task-id/input.png"]
+    assert provider.calls == [(data, "input.png")]
+
+
+async def test_filestore_operational_failure_is_503_not_missing() -> None:
     provider = FakeProvider()
 
-    def forbidden_file_work(_path: str):
-        raise AssertionError("oversized DB metadata must reject before FileStore access")
+    def unavailable(_path: str):
+        raise FileStoreUnavailableError("raw backend failure")
 
     await expect_http(
         call_route(
-            make_asset(file_size=20 * MB + 1),
+            make_asset(),
             provider=provider,
-            open_asset=forbidden_file_work,
-            read_asset_bytes=forbidden_file_work,
+            open_asset=unavailable,
+            read_asset_bytes=lambda _path: b"must-not-read",
         ),
-        400,
-        "20MB",
+        503,
+        "文件存储服务暂时不可用",
     )
-    assert provider.calls == [], provider.calls
+    assert provider.calls == []
 
 
 async def test_post_read_size_rejects_growth_before_provider() -> None:
@@ -312,7 +344,8 @@ async def test_permissions_mime_and_missing_bytes_keep_existing_contract() -> No
 async def main() -> None:
     tests = [
         test_authoritative_size_rejects_stale_metadata_before_read,
-        test_oversized_metadata_rejects_before_filestore_or_provider,
+        test_stale_oversized_metadata_uses_current_filestore_size,
+        test_filestore_operational_failure_is_503_not_missing,
         test_post_read_size_rejects_growth_before_provider,
         test_missing_handle_is_404_without_read_or_provider,
         test_exact_size_limits_are_accepted_and_forwarded_once,

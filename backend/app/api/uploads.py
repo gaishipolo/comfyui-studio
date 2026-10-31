@@ -15,7 +15,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.engines.factory import acquire_provider
-from app.filestore import open_asset, read_asset_bytes
+from app.filestore import (
+    FILESTORE_UNAVAILABLE_DETAIL,
+    FileStoreUnavailableError,
+    open_asset,
+    read_asset_bytes,
+)
 from app.models.models import Asset, User
 from app.auth import get_current_user
 from app.safe_detail import safe_detail
@@ -179,15 +184,15 @@ async def upload_from_asset(
     # 不为「注定要拒」的大文件把几百 MB 读进内存。
     kind = (asset.mime_type or "").split("/")[0]
     rules = FILE_KINDS.get(kind)
-    if rules and asset.file_size and asset.file_size > rules["max"]:
-        raise HTTPException(
-            status_code=400,
-            detail=f"{rules['label']}超过 {rules['max'] // MB}MB 限制（{asset.file_name}）",
-        )
-
     # 数据库 file_size 可能为 0 或已经过时。先向当前存储后端查询权威大小，
     # 且在整文件读取前关闭这个只用于元数据的句柄。
-    handle = await asyncio.to_thread(open_asset, asset.file_path)
+    try:
+        handle = await asyncio.to_thread(open_asset, asset.file_path)
+    except FileStoreUnavailableError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=FILESTORE_UNAVAILABLE_DETAIL,
+        ) from exc
     if handle is None:
         raise HTTPException(status_code=404, detail="素材文件找不到了")
     try:
@@ -202,7 +207,13 @@ async def upload_from_asset(
 
     # 越界防护复用 filestore 的唯一实现，不复制第二份；
     # to_thread：素材可能是几百 MB 的视频，同步读盘会冻结事件循环
-    data = await asyncio.to_thread(read_asset_bytes, asset.file_path)
+    try:
+        data = await asyncio.to_thread(read_asset_bytes, asset.file_path)
+    except FileStoreUnavailableError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=FILESTORE_UNAVAILABLE_DETAIL,
+        ) from exc
     if data is None:
         raise HTTPException(status_code=404, detail="素材文件找不到了")
     if rules and len(data) > rules["max"]:

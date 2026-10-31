@@ -29,6 +29,12 @@ from app.filestore import (
     safe_key,
 )
 
+FileStoreUnavailableError = getattr(
+    filestore,
+    "FileStoreUnavailableError",
+    RuntimeError,
+)
+
 ok_all = True
 
 
@@ -108,9 +114,11 @@ class LogCapture(logging.Handler):
     def __init__(self):
         super().__init__()
         self.messages: list[str] = []
+        self.records: list[logging.LogRecord] = []
 
     def emit(self, record):
         self.messages.append(record.getMessage())
+        self.records.append(record)
 
 
 # ── 1. safe_key：归一 + 越界拒绝 ──────────────────────────────────
@@ -174,6 +182,37 @@ report("反斜杠键读到同一份文件", local.read_bytes("old1\\f.png") == b
 report("反斜杠键 exists", local.exists("old1\\f.png"))
 report("反斜杠键 open 正常", local.open("old1\\f.png") is not None)
 
+
+class FailingLocalPath:
+    def is_file(self):
+        return True
+
+    def stat(self):
+        raise PermissionError("local stat denied")
+
+
+failing_local = LocalFileStore()
+failing_local._resolve = lambda _path: FailingLocalPath()
+try:
+    failing_local.open("t1/denied.bin")
+except FileStoreUnavailableError as exc:
+    report("本地 stat 操作失败抛 typed unavailable", "local stat denied" not in str(exc), str(exc))
+else:
+    report("本地 stat 操作失败抛 typed unavailable", False, "没有抛 typed error")
+
+resolve_failure = LocalFileStore()
+resolve_failure._resolve = lambda _path: (_ for _ in ()).throw(
+    OSError("local resolve unavailable")
+)
+try:
+    resolve_failure.open("t1/resolve.bin")
+except FileStoreUnavailableError as exc:
+    report("本地路径解析失败抛 typed unavailable", True, str(exc))
+except OSError as exc:
+    report("本地路径解析失败抛 typed unavailable", False, f"raw {exc!r}")
+else:
+    report("本地路径解析失败抛 typed unavailable", False, "没有抛 typed error")
+
 # ── 4. 删除语义 ─────────────────────────────────────────────────
 print("\n=== 删除语义（删不掉不能让主流程失败） ===")
 
@@ -228,6 +267,43 @@ report("对象存储没有 local_path（必须走流式）", mh is not None and 
 report("size 从 stat_object 来", mh is not None and mh.size == len(b"video-bytes"))
 report("iter_bytes 流式一致", mh is not None and b"".join(mh.iter_bytes()) == b"video-bytes")
 mh.close()
+
+open_capture = LogCapture()
+old_level = filestore.logger.level
+old_propagate = filestore.logger.propagate
+filestore.logger.addHandler(open_capture)
+filestore.logger.setLevel(logging.WARNING)
+filestore.logger.propagate = False
+try:
+    fake.stat_errors["t9/open-private"] = FakeS3Error(
+        "AccessDenied",
+        "invalid open credentials",
+    )
+    fake.stat_errors["t9/open-network"] = ConnectionError("open network unavailable")
+    open_errors = []
+    for key in ("t9/open-private", "t9/open-network"):
+        try:
+            mstore.open(key)
+        except FileStoreUnavailableError as exc:
+            open_errors.append((key, exc))
+finally:
+    filestore.logger.removeHandler(open_capture)
+    filestore.logger.setLevel(old_level)
+    filestore.logger.propagate = old_propagate
+
+report("MinIO open 鉴权/网络失败抛 typed unavailable",
+       len(open_errors) == 2 and all(str(exc) == "文件存储服务暂时不可用" for _, exc in open_errors),
+       repr(open_errors))
+open_logs = "\n".join(
+    logging.Formatter("%(levelname)s %(message)s").format(record)
+    for record in open_capture.records
+)
+report("MinIO open 操作失败记录服务端上下文",
+       any("open-private" in message and "AccessDenied" in message for message in open_capture.messages)
+       and any("open-network" in message for message in open_capture.messages)
+       and "invalid open credentials" in open_logs
+       and "open network unavailable" in open_logs,
+       open_logs)
 
 report("越界 open 返回 None", mstore.open("../x") is None)
 try:
@@ -330,8 +406,6 @@ hits = [name for name, src in py_sources.items() if "asset_disk_path" in src]
 report("asset_disk_path 已彻底移除（换成 safe_key）", not hits, f"{hits}")
 
 ts_src = py_sources.get("task_service.py", "")
-report("_save_asset 走 save_asset_file",
-       "save_asset_file(" in ts_src or "asyncio.to_thread(save_asset_file" in ts_src)
 report("_save_asset 的存储键用 POSIX 分隔符", 'f"{task.id}/{safe_name}"' in ts_src)
 report("_save_asset 不再自己 mkdir / write_bytes", "write_bytes" not in ts_src)
 

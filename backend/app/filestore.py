@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import io
 import logging
+import stat as stat_module
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Protocol
@@ -32,6 +33,14 @@ logger = logging.getLogger(__name__)
 _CHUNK = 1024 * 256
 
 _MISSING_OBJECT_CODES = {"NoSuchKey", "NoSuchObject"}
+FILESTORE_UNAVAILABLE_DETAIL = "文件存储服务暂时不可用"
+
+
+class FileStoreUnavailableError(RuntimeError):
+    """The configured storage backend could not complete an operation."""
+
+    def __init__(self, *_diagnostic):
+        super().__init__(FILESTORE_UNAVAILABLE_DETAIL)
 
 
 def _object_error_code(exc: Exception) -> str:
@@ -170,25 +179,56 @@ class LocalFileStore:
         return target is not None and target.is_file()
 
     def read_bytes(self, file_path: str) -> bytes | None:
-        target = self._resolve(file_path)
-        if target is None or not target.is_file():
+        try:
+            target = self._resolve(file_path)
+        except OSError as exc:
+            logger.error(
+                "解析本地素材路径失败 key=%s",
+                file_path,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+            raise FileStoreUnavailableError() from exc
+        if target is None:
             return None
         try:
             return target.read_bytes()
-        except OSError as exc:
-            logger.warning("读取素材文件失败 %s —— %s", target, exc)
+        except FileNotFoundError:
             return None
+        except OSError as exc:
+            logger.error(
+                "读取本地素材文件失败 path=%s",
+                target,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+            raise FileStoreUnavailableError() from exc
 
     def open(self, file_path: str) -> ObjectHandle | None:
-        target = self._resolve(file_path)
-        if target is None or not target.is_file():
+        try:
+            target = self._resolve(file_path)
+        except OSError as exc:
+            logger.error(
+                "解析本地素材路径失败 key=%s",
+                file_path,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+            raise FileStoreUnavailableError() from exc
+        if target is None:
             return None
         try:
-            size = target.stat().st_size
-        except OSError as exc:
-            logger.warning("读取素材文件信息失败 %s —— %s", target, exc)
+            stat_result = target.stat()
+        except FileNotFoundError:
             return None
-        return ObjectHandle(size=size, local_path=target)
+        except OSError as exc:
+            logger.error(
+                "读取本地素材文件信息失败 path=%s",
+                target,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+            raise FileStoreUnavailableError() from exc
+        mode = getattr(stat_result, "st_mode", None)
+        if mode is not None and not stat_module.S_ISREG(mode):
+            return None
+        return ObjectHandle(size=stat_result.st_size, local_path=target)
 
     def delete(self, file_path: str) -> tuple[bool, str]:
         """尽力而为地删掉素材文件，返回 (是否真的删掉, 失败原因)。
@@ -276,6 +316,19 @@ class MinioFileStore:
             return None
         try:
             return b"".join(handle.iter_bytes())
+        except Exception as exc:
+            if (
+                isinstance(exc, FileNotFoundError)
+                or _object_error_code(exc) in _MISSING_OBJECT_CODES
+            ):
+                return None
+            logger.error(
+                "读取对象存储素材失败 bucket=%s key=%s",
+                self.bucket,
+                safe_key(file_path) or "<invalid>",
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+            raise FileStoreUnavailableError() from exc
         finally:
             handle.close()
 
@@ -283,11 +336,23 @@ class MinioFileStore:
         key = safe_key(file_path)
         if key is None:
             return None
-        client = self._c()
         try:
+            client = self._c()
             stat = client.stat_object(self.bucket, key)
-        except Exception:
-            return None
+        except Exception as exc:
+            if (
+                isinstance(exc, FileNotFoundError)
+                or _object_error_code(exc) in _MISSING_OBJECT_CODES
+            ):
+                return None
+            logger.error(
+                "读取对象存储素材信息失败 bucket=%s key=%s code=%s",
+                self.bucket,
+                key,
+                _object_error_code(exc) or type(exc).__name__,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+            raise FileStoreUnavailableError() from exc
 
         resp = None
 

@@ -19,7 +19,13 @@ from app.services.task_service import (
     _running_tasks,
 )
 from app.auth import get_current_user
-from app.filestore import open_asset, read_asset_bytes, save_asset_file
+from app.filestore import (
+    FILESTORE_UNAVAILABLE_DETAIL,
+    FileStoreUnavailableError,
+    open_asset,
+    read_asset_bytes,
+    save_asset_file,
+)
 from app.media import guess_mime
 from app.thumbs import (
     cleanup_asset_files,
@@ -41,6 +47,16 @@ router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 logger = logging.getLogger(__name__)
 
 _thumbnail_generation_tasks: dict[str, asyncio.Task[bool]] = {}
+
+
+async def _open_asset_handle(file_path: str):
+    try:
+        return await asyncio.to_thread(open_asset, file_path)
+    except FileStoreUnavailableError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=FILESTORE_UNAVAILABLE_DETAIL,
+        ) from exc
 
 
 def _generate_image_thumbnail(source_key: str, derived_key: str) -> bool:
@@ -216,7 +232,7 @@ async def download_asset(
     if not can_view_asset(user, owners.get(safe_task_id, ""), asset.is_shared):
         raise HTTPException(status_code=404, detail="Asset file not found")
 
-    handle = open_asset(asset.file_path)
+    handle = await _open_asset_handle(asset.file_path)
     if handle is None:
         raise HTTPException(status_code=404, detail="Asset file not found")
 
@@ -226,7 +242,9 @@ async def download_asset(
 
     # 本地后端有真实路径 → FileResponse：支持 HTTP Range，视频拖进度条才不卡
     if handle.local_path is not None:
-        return FileResponse(handle.local_path, media_type=media_type, filename=safe_name)
+        local_path = handle.local_path
+        handle.close()
+        return FileResponse(local_path, media_type=media_type, filename=safe_name)
 
     # 对象存储后端没有本地路径 → 流式转发（前端取的是整段 blob，不影响现有交互）
     def _stream():
@@ -292,7 +310,7 @@ async def download_asset_thumb(
         if is_image and etag_matches:
             return Response(status_code=304, headers=headers)
 
-        handle = await asyncio.to_thread(open_asset, derived_key)
+        handle = await _open_asset_handle(derived_key)
         if handle is None:
             if is_video:
                 # Never try to decode a missing video thumbnail as an image.
@@ -300,7 +318,7 @@ async def download_asset_thumb(
 
             # Recheck while owning the lifecycle before registering work. This
             # closes stale-miss races with a just-completed generation task.
-            handle = await asyncio.to_thread(open_asset, derived_key)
+            handle = await _open_asset_handle(derived_key)
             if handle is None:
                 generation = _shared_thumbnail_generation(
                     asset.file_path,
@@ -310,11 +328,16 @@ async def download_asset_thumb(
                     generated = await wait_for_task_completion(generation)
                 except asyncio.CancelledError:
                     raise
+                except FileStoreUnavailableError as exc:
+                    raise HTTPException(
+                        status_code=503,
+                        detail=FILESTORE_UNAVAILABLE_DETAIL,
+                    ) from exc
                 except Exception:
                     raise HTTPException(status_code=404, detail="Thumbnail not found")
                 if not generated:
                     raise HTTPException(status_code=404, detail="Thumbnail not found")
-                handle = await asyncio.to_thread(open_asset, derived_key)
+                handle = await _open_asset_handle(derived_key)
                 if handle is None:
                     raise HTTPException(status_code=404, detail="Thumbnail not found")
 

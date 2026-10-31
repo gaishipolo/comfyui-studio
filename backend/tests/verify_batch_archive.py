@@ -23,6 +23,7 @@ from fastapi import HTTPException
 from fastapi.responses import FileResponse
 
 import app.api.assets as assets_api
+import app.filestore as filestore
 from app.filestore import ObjectHandle
 from app.models.models import Asset
 
@@ -30,6 +31,11 @@ from app.models.models import Asset
 PASS = 0
 FAIL = 0
 _MISSING = object()
+FileStoreUnavailableError = getattr(
+    filestore,
+    "FileStoreUnavailableError",
+    RuntimeError,
+)
 
 
 def report(name: str, ok: bool, detail: str = "") -> None:
@@ -376,6 +382,48 @@ async def test_archive_names_are_safe_unique_basenames() -> None:
         assert list(root.iterdir()) == []
 
 
+async def test_missing_selected_member_fails_and_removes_partial_archive() -> None:
+    present = make_asset("asset-present", "present.bin")
+    missing = make_asset("asset-missing", "missing.bin")
+    closed: list[str] = []
+    open_asset = handle_factory({present.file_path: [b"present"]}, closed)
+
+    with temporary_archive_dir() as root, patched(
+        assets_api,
+        open_asset=open_asset,
+    ):
+        try:
+            builder()([present, missing])
+        except HTTPException as exc:
+            assert exc.status_code == 404, exc
+            assert exc.detail == "Selected asset file is missing", exc.detail
+        else:
+            raise AssertionError("missing selected member was silently omitted")
+
+        assert closed == [present.file_path]
+        assert list(root.iterdir()) == [], list(root.iterdir())
+
+
+async def test_filestore_failure_maps_to_503_and_cleans_partial_archive() -> None:
+    present = make_asset("asset-operational", "operational.bin")
+    db = FakeDB([present])
+
+    def unavailable(_path: str):
+        raise FileStoreUnavailableError("raw backend failure")
+
+    with temporary_archive_dir() as root, patched(
+        assets_api,
+        open_asset=unavailable,
+        task_owner_map=owner_map,
+    ):
+        await expect_http(
+            assets_api.batch_download([present.id], user=ADMIN, db=db),
+            503,
+            "文件存储服务暂时不可用",
+        )
+        assert list(root.iterdir()) == [], list(root.iterdir())
+
+
 async def call_response(response: FileResponse, send) -> None:
     scope = {
         "type": "http",
@@ -654,6 +702,14 @@ async def main() -> int:
     await run_case(
         "archive names are safe unique basenames",
         test_archive_names_are_safe_unique_basenames,
+    )
+    await run_case(
+        "a missing selected member fails and removes the partial archive",
+        test_missing_selected_member_fails_and_removes_partial_archive,
+    )
+    await run_case(
+        "FileStore failures map to 503 and remove partial archives",
+        test_filestore_failure_maps_to_503_and_cleans_partial_archive,
     )
     await run_case(
         "FileResponse streams a worker-built archive and cleans it up",

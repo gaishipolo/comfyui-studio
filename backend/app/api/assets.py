@@ -16,7 +16,11 @@ from app.database import get_db
 from app.models.models import Asset, Task, Template, User
 from app.schemas.schemas import AssetResponse, AssetShareRequest
 from app.auth import get_current_user
-from app.filestore import open_asset
+from app.filestore import (
+    FILESTORE_UNAVAILABLE_DETAIL,
+    FileStoreUnavailableError,
+    open_asset,
+)
 from app.thumbs import (
     cleanup_asset_files,
     task_lifecycle_key,
@@ -66,7 +70,10 @@ def _build_batch_archive(assets: Sequence[Asset]) -> Path:
             for asset in assets:
                 handle = open_asset(asset.file_path)
                 if handle is None:
-                    continue
+                    raise HTTPException(
+                        status_code=404,
+                        detail="Selected asset file is missing",
+                    )
                 try:
                     base_name = PurePosixPath(
                         str(asset.file_name or "").replace("\\", "/")
@@ -475,6 +482,11 @@ async def batch_download(
     )
     try:
         archive_path = await asyncio.shield(archive_task)
+    except FileStoreUnavailableError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=FILESTORE_UNAVAILABLE_DETAIL,
+        ) from exc
     except BaseException:
         # Executor threads cannot be cancelled. Keep ownership of a late result.
         _abandoned_archive_tasks.add(archive_task)
