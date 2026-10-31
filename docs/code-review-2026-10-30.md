@@ -7,18 +7,26 @@
 
 > **文档性质**:以下主体是 `e7eaa2b` 的历史审查快照，行号、文件数和“当时已通过”的描述不随代码演进重写。当前状态与新鲜证据只记录在本节，避免把历史结论冒充当前回归结果。
 
-## 2026-10-31 稳定基线状态（Task 6 聚焦证据）
+## 2026-11-01 稳定基线状态（Task 7 完整证据）
 
-Task 1-5 已分别处理 Provider 生命周期、异步 IO 与脱敏、临时 ZIP、持久缩略图/派生文件清理、素材转发与鉴权媒体；详细行为与每轮证据见对应 Task 报告。Task 6 从 `7f974e8` 开始对安装、配置、文档和测试契约做对齐。
+状态：**PASS WITH CONCERN**。本节只记录本次隔离回归实际看到的结果；以下命令均使用端口 8767、一次性 `backend/workbench.db`、外部临时本地存储、工作流副本、固定测试密钥和 `admin123`。
 
-本轮实际运行且退出码为 0 的聚焦证据：
+- 静态/构建门：`git diff --check`、全量 Python compile、`import app.main, app.auth, app.thumbs, app.filestore`、`npm ci`、`npm run build` 全部退出 0；npm 报告 0 vulnerabilities，Vite 转换 51 个模块。
+- 36 个 `verify_*.py` 按 README 四类顺序串行执行：**36 passed / 0 failed / 0 skipped**。初始失败均在本轮按 TDD 修复并聚焦复跑，最终矩阵无跳过。
+- UI 自动化：Node 10/10、永久 Playwright 17/17、隔离服务 Playwright 9/9，合计 **36 passed / 0 failed / 0 skipped**；除故意拦截的 400/401/404/500/502 外无 console/page error。
+- 唯一真实生成：Task `2d30b266275c4fd58179e1fbfaa0f36a`，Comfy prompt `8e678e11-95dd-4cac-8fce-b2d629328789`，提示词 UUID `91fc9da8-0754-4a6f-9d7e-a3e40b9948b8`。状态轨迹到 `done`，进度含 3.0/26.5/54.4/100.0，产生 1 个 768x768 PNG（60,849 字节）及持久 400x400 JPEG 缩略图（1,616 字节）；鉴权下载成功，删除后任务/素材 API、源文件和缩略图均为不存在。
+- 本地视频：imageio-ffmpeg 生成 9,868 字节 MP4；真实 `TaskService` 保存并生成 320x240 JPEG 缩略图（7,138 字节）。事件循环推进 28 次，16 个并发 health/task 请求全部 200、最大 24ms；鉴权读取和删除清理通过。未提交真实视频任务。
+- 本轮发现并修复：全新 DB 插件恢复因 SQLAlchemy 默认值尚未填充而误注销；登录后新增 Hook 导致 React #310；两个标签脚本未自建 schema；多图脚本遗留输入文件；删除脚本仍期待旧 400 而非批准的 409；真实生成 verifier 补齐 done/Asset/下载/缩略图/删除断言。
+- 最终隔离审计：服务停止，8767 无监听，DB 和临时 storage/workflows 已删除；测试用户/模板/任务/素材/临时插件均清空；tracked plugin/workflow blob 哈希与开跑快照一致；Comfy queue running/pending 均为空；原 `main` worktree 状态未改动。
 
-- 全新 venv 只安装修改后的 `backend/requirements.txt`，`import app.main, app.auth, app.thumbs, app.filestore` 成功；修改前同样流程真实失败于缺少 `jose`。
-- `verify_schema_idempotent.py`、`verify_provider_lifecycle.py`（6 项）、`verify_batch_archive.py`（11 项）、`verify_error_boundary.py`、`verify_media_reliability.py`（38 项）、`verify_filestore.py`、`verify_json_ascii.py`。
-- 在端口 8765、全新 `workbench.db`、临时 storage/workflows、固定测试密码 `admin123` 的隔离服务上运行 `verify_plugin_loader.py`、`verify_p0_fixes.py`（33 项）、`verify_schema_normalization.py`；`verify_tag_persist.py` 对同一隔离数据库运行。
-- 服务测试前后插件与工作流状态一致；临时插件、模板、用户、任务、素材、数据库、存储、日志和服务进程均已清理。
+明确排除：
 
-以下仍是 **Task 7 待办**，本轮不得标成已验证：36 个 `verify_*.py` 的完整串行回归、前端构建/UI 浏览器检查、真实 ComfyUI 文生图、真实/外部 MinIO、媒体集成与最终残留审计。破坏性的 `e2e_restart_recovery.py` 仍明确不运行。
+- `e2e_restart_recovery.py`：破坏性重启，按批准设计排除，不计入 36 个 verify 脚本。
+- 真实视频生成：按批准设计排除，以本地 MP4 集成替代媒体保存/ffmpeg/响应性证据。
+
+存储边界：`verify_filestore_live.py` 在强制的进程内 S3 线格式服务上通过，**没有运行或声称验证真实 MinIO**。
+
+关注项：`verify_from_asset_upload.py` 只上传输入、未提交任务；四个远端 Comfy Asset 引用均已删除并查询为空，但 Comfy 的公开 Asset DELETE 按设计保留非 preview 的物理 input 文件，因此 `/view` 仍能读取 `ref_3ff9bd2d.png`、`ref_b5ecf8a4.png`、`ref_955ed0b8.png`、`ref_1f3489e5.png`。没有通过未批准的远程文件系统访问强行删除。
 
 ---
 
