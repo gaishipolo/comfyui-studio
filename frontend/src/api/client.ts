@@ -299,7 +299,16 @@ export const batchDownload = async (assetIds: string[]): Promise<Blob> => {
     },
     body: JSON.stringify(assetIds),
   })
-  if (!resp.ok) throw new Error(`下载失败 (${resp.status})`)
+  if (!resp.ok) {
+    let message = `下载失败 (${resp.status})`
+    try {
+      const body = await resp.json()
+      if (typeof body?.detail === 'string') message = body.detail
+    } catch {
+      // 非 JSON 响应，保留默认信息
+    }
+    throw new Error(message)
+  }
   return resp.blob()
 }
 

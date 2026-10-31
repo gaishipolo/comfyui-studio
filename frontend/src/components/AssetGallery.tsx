@@ -65,6 +65,8 @@ export default function AssetGallery({ templates, user }: Props) {
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [detail, setDetail] = useState<Asset | null>(null)
   const [loading, setLoading] = useState(false)
+  /** 服务端准备批量归档需要时间；忙碌态同时阻止重复提交。 */
+  const [downloading, setDownloading] = useState(false)
 
   // 搜索防抖 300ms
   useEffect(() => {
@@ -143,7 +145,8 @@ export default function AssetGallery({ templates, user }: Props) {
   }
 
   const handleBatchDownload = async () => {
-    if (selected.size === 0) return
+    if (selected.size === 0 || downloading) return
+    setDownloading(true)
     try {
       const blob = await batchDownload([...selected])
       const url = URL.createObjectURL(blob)
@@ -154,6 +157,8 @@ export default function AssetGallery({ templates, user }: Props) {
       URL.revokeObjectURL(url)
     } catch (err) {
       alert(`下载失败: ${err instanceof Error ? err.message : err}`)
+    } finally {
+      setDownloading(false)
     }
   }
 
@@ -329,8 +334,12 @@ export default function AssetGallery({ templates, user }: Props) {
               <button onClick={() => setSelected(new Set())} className="btn-quiet">
                 清除选择
               </button>
-              <button onClick={handleBatchDownload} className="btn btn-primary">
-                下载 ({selected.size})
+              <button
+                onClick={handleBatchDownload}
+                className="btn btn-primary"
+                disabled={downloading}
+              >
+                {downloading ? '打包中…' : `下载 (${selected.size})`}
               </button>
               <button onClick={handleBatchDelete} className="btn btn-danger">
                 删除 ({selected.size})

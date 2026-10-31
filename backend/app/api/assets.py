@@ -1,18 +1,22 @@
 """素材库 API — 搜索、标签、批量下载"""
-import io
+import asyncio
+import tempfile
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from typing import Sequence
+
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse
 from sqlalchemy import String, bindparam, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
+from starlette.background import BackgroundTask
 
 from app.database import get_db
 from app.models.models import Asset, Task, Template, User
 from app.schemas.schemas import AssetResponse, AssetShareRequest
 from app.auth import get_current_user
-from app.filestore import delete_asset_file, read_asset_bytes
+from app.filestore import delete_asset_file, open_asset
 from app.timeutils import parse_day as _parse_day
 from app.access import (
     can_modify_asset,
@@ -23,6 +27,93 @@ from app.access import (
 )
 
 router = APIRouter(prefix="/api/assets", tags=["assets"])
+
+# 批量下载护城河：数量与总字节都封顶；真实字节数在打包循环里再兜一道
+# （防 file_size 元数据失真）。ZIP 落临时文件，避免整包常驻内存。
+BATCH_DOWNLOAD_MAX_FILES = 50
+BATCH_DOWNLOAD_MAX_BYTES = 1024 * 1024 * 1024  # 1GB
+
+
+def _remove_temp_archive(path: Path) -> None:
+    try:
+        Path(path).unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _build_batch_archive(assets: Sequence[Asset]) -> Path:
+    """Write a bounded ZIP to disk without buffering source files in memory."""
+    archive_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix="comfyui-assets-",
+            suffix=".zip",
+            delete=False,
+        ) as temp_file:
+            archive_path = Path(temp_file.name)
+
+        used_names: set[str] = set()
+        read_total = 0
+        with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
+            for asset in assets:
+                handle = open_asset(asset.file_path)
+                if handle is None:
+                    continue
+                try:
+                    base_name = PurePosixPath(
+                        str(asset.file_name or "").replace("\\", "/")
+                    ).name.replace("\x00", "_")
+                    if base_name in {"", ".", ".."}:
+                        base_name = "asset"
+
+                    archive_name = base_name
+                    if archive_name in used_names:
+                        raw_prefix = PurePosixPath(
+                            str(asset.task_id or "").replace("\\", "/")
+                        ).name[:8]
+                        prefix = "".join(
+                            char if char.isalnum() or char in "-_" else "_"
+                            for char in raw_prefix
+                        ).strip("._") or "asset"
+                        archive_name = f"{prefix}_{base_name}"
+                        suffix = PurePosixPath(base_name).suffix
+                        stem = base_name[:-len(suffix)] if suffix else base_name
+                        duplicate = 2
+                        while archive_name in used_names:
+                            archive_name = f"{prefix}_{stem}_{duplicate}{suffix}"
+                            duplicate += 1
+                    used_names.add(archive_name)
+
+                    with archive.open(archive_name, "w") as target:
+                        for chunk in handle.iter_bytes():
+                            read_total += len(chunk)
+                            if read_total > BATCH_DOWNLOAD_MAX_BYTES:
+                                raise HTTPException(
+                                    status_code=400,
+                                    detail=(
+                                        "素材实际总大小超过 "
+                                        f"{BATCH_DOWNLOAD_MAX_BYTES // (1024 * 1024)}MB 上限，"
+                                        "请分批下载"
+                                    ),
+                                )
+                            target.write(chunk)
+                finally:
+                    handle.close()
+
+        return archive_path
+    except BaseException:
+        if archive_path is not None:
+            _remove_temp_archive(archive_path)
+        raise
+
+
+class _TemporaryArchiveResponse(FileResponse):
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            # Starlette does not reach BackgroundTask when ASGI send raises.
+            _remove_temp_archive(Path(self.path))
 
 
 def _escape_like(value: str) -> str:
@@ -302,6 +393,13 @@ async def batch_download(
     if not asset_ids:
         raise HTTPException(status_code=400, detail="No assets selected")
 
+    # 数量与总字节都封顶，超了让用户分批下。
+    if len(asset_ids) > BATCH_DOWNLOAD_MAX_FILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"一次最多打包 {BATCH_DOWNLOAD_MAX_FILES} 个素材，请分批下载",
+        )
+
     result = await db.execute(select(Asset).where(Asset.id.in_(asset_ids)))
     assets = result.scalars().all()
 
@@ -314,26 +412,25 @@ async def batch_download(
     if not assets:
         raise HTTPException(status_code=404, detail="No matching assets")
 
-    # 在内存中构建 ZIP
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        used_names: set[str] = set()
-        for asset in assets:
-            data = read_asset_bytes(asset.file_path)
-            if data is None:
-                continue
-            # 同名文件加任务前缀，避免 ZIP 内互相覆盖
-            # arcname 只取纯文件名：写入端（task_service）已用 Path(...).name 清洗过，
-            # 但读出端不能假设库里数据永远干净 —— 带 ../ 的 arcname 会让解压方中 zip-slip
-            arcname = Path(asset.file_name).name
-            if arcname in used_names:
-                arcname = f"{asset.task_id[:8]}_{asset.file_name}"
-            used_names.add(arcname)
-            zf.writestr(arcname, data)
+    # file_size 是落库时的元数据，作为总量预估；真实字节数在写 ZIP 时再兜一道
+    total = sum(a.file_size or 0 for a in assets)
+    if total > BATCH_DOWNLOAD_MAX_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"选中素材共约 {total // (1024 * 1024)}MB，"
+                f"超过单次 {BATCH_DOWNLOAD_MAX_BYTES // (1024 * 1024)}MB 上限，请分批下载"
+            ),
+        )
 
-    zip_buffer.seek(0)
-    return StreamingResponse(
-        zip_buffer,
-        media_type="application/zip",
-        headers={"Content-Disposition": "attachment; filename=assets.zip"},
-    )
+    archive_path = await asyncio.to_thread(_build_batch_archive, assets)
+    try:
+        return _TemporaryArchiveResponse(
+            archive_path,
+            filename="assets.zip",
+            media_type="application/zip",
+            background=BackgroundTask(_remove_temp_archive, archive_path),
+        )
+    except BaseException:
+        _remove_temp_archive(archive_path)
+        raise
