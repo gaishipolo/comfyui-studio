@@ -230,6 +230,67 @@ async def main():
         report(f"case-insensitive {key} assignment is sanitized", value not in rendered, rendered)
     bearer = safe_detail(RuntimeError("provider rejected Bearer standalone.token.value"))
     report("standalone Bearer token is sanitized", "standalone.token.value" not in bearer, bearer)
+    mutation_cases = [
+        (
+            "Authorization equals with Basic scheme",
+            "AUTHORIZATION=Basic QWxhZGRpbjpPcGVuU2VzYW1l",
+            ["QWxhZGRpbjpPcGVuU2VzYW1l"],
+        ),
+        (
+            "quoted mixed-case Authorization equals",
+            "aUtHoRiZaTiOn = 'Bearer equal.secret.value'",
+            ["equal.secret.value"],
+        ),
+        (
+            "standalone Basic credential",
+            "provider rejected Basic basic-credential-value",
+            ["basic-credential-value"],
+        ),
+        (
+            "standalone Digest credential",
+            "provider rejected Digest digest-credential-value",
+            ["digest-credential-value"],
+        ),
+        (
+            "quoted access_token",
+            'access_token="ACCESS TOKEN VALUE"',
+            ["ACCESS TOKEN VALUE"],
+        ),
+        (
+            "quoted refresh-token",
+            "refresh-token:'REFRESH TOKEN VALUE'",
+            ["REFRESH TOKEN VALUE"],
+        ),
+        (
+            "client_secret assignment",
+            "CLIENT_SECRET=client-secret-value",
+            ["client-secret-value"],
+        ),
+        (
+            "secret_key assignment",
+            "Secret_Key : 'secret key value'",
+            ["secret key value"],
+        ),
+        (
+            "api_token assignment",
+            "api-token=api-token-value",
+            ["api-token-value"],
+        ),
+        (
+            "auth_token assignment",
+            'AUTH_TOKEN: "auth token value"',
+            ["auth token value"],
+        ),
+    ]
+    for label, raw, secrets in mutation_cases:
+        rendered = safe_detail(RuntimeError(raw))
+        report(
+            f"{label} is sanitized",
+            rendered.startswith("RuntimeError:")
+            and len(rendered) <= 200
+            and all(secret not in rendered for secret in secrets),
+            rendered,
+        )
     long_exception = type("X" * 250, (Exception,), {})
     long_type_detail = safe_detail(long_exception())
     report("empty-message exception types are capped at 200 characters",

@@ -8,6 +8,7 @@
 from pathlib import Path
 
 import asyncio
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,6 +23,7 @@ from app.schemas.schemas import AssetUploadRequest
 from app.access import can_view_asset, task_owner_map
 
 router = APIRouter(prefix="/api/upload", tags=["upload"])
+logger = logging.getLogger(__name__)
 
 MB = 1024 * 1024
 
@@ -63,14 +65,32 @@ async def _forward_to_engine(engine: str, data: bytes, name: str) -> str:
     try:
         lease = acquire_provider(engine)
     except ValueError as e:
+        logger.error(
+            "Provider upload acquisition failed engine=%s filename=%s",
+            engine,
+            name,
+            exc_info=(type(e), e, e.__traceback__),
+        )
         raise HTTPException(status_code=400, detail=safe_detail(e))
     try:
         with lease as provider:
             return await provider.upload_input(data, name)
     except NotImplementedError as e:
+        logger.error(
+            "Provider upload unsupported engine=%s filename=%s",
+            engine,
+            name,
+            exc_info=(type(e), e, e.__traceback__),
+        )
         raise HTTPException(status_code=400, detail=safe_detail(e))
     except Exception as e:  # noqa: BLE001 —— 引擎侧报错统一收成 502
         # 异常原文可能带上游完整 URL（含 query 里的 key），过脱敏再回 —— 与 /engines 同一道防线
+        logger.error(
+            "Provider upload failed engine=%s filename=%s",
+            engine,
+            name,
+            exc_info=(type(e), e, e.__traceback__),
+        )
         raise HTTPException(status_code=502, detail=f"上传到生成引擎失败: {safe_detail(e)}")
 
 

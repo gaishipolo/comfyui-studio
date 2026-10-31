@@ -9,13 +9,22 @@ import re
 
 # 形如 scheme://... 的都抹掉（http/https/ws/任意自定义协议）
 _URL_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://\S+")
-_AUTHORIZATION_RE = re.compile(r"\bauthorization\s*:\s*[^\r\n]*", re.IGNORECASE)
-_BEARER_RE = re.compile(
-    r"\bbearer\s+(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;&]+)",
+_AUTHORIZATION_RE = re.compile(
+    r"\bauthorization\b(\s*[:=]\s*)"
+    r"(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\r\n]*)",
+    re.IGNORECASE,
+)
+_AUTH_SCHEME_RE = re.compile(
+    r"\b(basic|bearer|digest|negotiate|oauth|token)\b\s+"
+    r"(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;&]+)",
     re.IGNORECASE,
 )
 _SECRET_ASSIGNMENT_RE = re.compile(
-    r"\b(api[-_]?key|token|secret|password)(\s*[:=]\s*)"
+    r"\b("
+    r"access[-_]?token|refresh[-_]?token|client[-_]?secret|"
+    r"secret[-_]?key|api[-_]?token|auth[-_]?token|"
+    r"api[-_]?key|token|secret|password"
+    r")(\s*[:=]\s*)"
     r"(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;&]+)",
     re.IGNORECASE,
 )
@@ -24,8 +33,8 @@ _SECRET_ASSIGNMENT_RE = re.compile(
 def safe_detail(exc: BaseException) -> str:
     """抹掉 URL 和凭证，截断长度。保留异常类型名方便排查。"""
     msg = _URL_RE.sub("<url>", str(exc))
-    msg = _AUTHORIZATION_RE.sub("Authorization: <redacted>", msg)
-    msg = _BEARER_RE.sub("Bearer <redacted>", msg)
+    msg = _AUTHORIZATION_RE.sub(r"Authorization\1<redacted>", msg)
     msg = _SECRET_ASSIGNMENT_RE.sub(r"\1\2<redacted>", msg).strip()
+    msg = _AUTH_SCHEME_RE.sub(r"\1 <redacted>", msg)
     name = type(exc).__name__
     return (f"{name}: {msg}" if msg else name)[:200]

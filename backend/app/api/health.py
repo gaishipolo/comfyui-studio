@@ -1,5 +1,6 @@
 """健康检查 + 引擎信息"""
 import asyncio
+import logging
 import time
 
 from fastapi import APIRouter, Depends, Query
@@ -12,6 +13,7 @@ from app.models.models import User
 from app.safe_detail import safe_detail as _safe_detail
 
 router = APIRouter(prefix="/api", tags=["health"])
+logger = logging.getLogger(__name__)
 
 # 探活是给监控用的，不能因为下游引擎卡住就一起卡住。
 # 单引擎封顶 2 秒 —— 探活失败要快，慢等于没探。
@@ -26,6 +28,7 @@ _CACHE_TTL = 20.0
 # engine_name -> (过期时刻, 探测结果)；_inflight 让并发请求共享同一次探测
 _cache: dict[str, tuple[float, dict]] = {}
 _inflight: dict[str, asyncio.Future] = {}
+_cache_epoch = 0
 
 
 async def _probe(engine_name: str) -> dict:
@@ -40,18 +43,25 @@ async def _probe(engine_name: str) -> dict:
             ok = await asyncio.wait_for(provider.health_check(), timeout=_PROBE_TIMEOUT)
             return {"name": engine_name, "status": "connected" if ok else "disconnected"}
     except asyncio.TimeoutError:
+        logger.warning("Provider health probe timed out engine=%s", engine_name)
         return {
             "name": engine_name,
             "status": "disconnected",
             "detail": f"探测超时（>{_PROBE_TIMEOUT:g}s）",
         }
     except Exception as e:  # noqa: BLE001
+        logger.error(
+            "Provider health probe failed engine=%s",
+            engine_name,
+            exc_info=(type(e), e, e.__traceback__),
+        )
         return {"name": engine_name, "status": "error", "detail": _safe_detail(e)}
 
 
 async def _probe_cached(engine_name: str, fresh: bool = False) -> dict:
     """带缓存的探测。并发请求共享同一次探测（inflight 去重），
     避免十个用户同时刷新时打出十份上游请求。"""
+    epoch = _cache_epoch
     if not fresh:
         hit = _cache.get(engine_name)
         if hit and hit[0] > time.monotonic():
@@ -64,17 +74,22 @@ async def _probe_cached(engine_name: str, fresh: bool = False) -> dict:
 
     # shield：某个调用方被取消（客户端断开）不该把这次探测一起取消
     result = await asyncio.shield(task)
-    _cache[engine_name] = (time.monotonic() + _CACHE_TTL, result)
+    if epoch == _cache_epoch:
+        _cache[engine_name] = (time.monotonic() + _CACHE_TTL, result)
     return result
 
 
 def invalidate_cache(engine_name: str | None = None):
     """配置变了/插件换了要让缓存立刻失效 ——
     否则管理员改完 API Key，界面上还要「离线」20 秒。"""
+    global _cache_epoch
+    _cache_epoch += 1
     if engine_name is None:
         _cache.clear()
+        _inflight.clear()
     else:
         _cache.pop(engine_name, None)
+        _inflight.pop(engine_name, None)
 
 
 # 引擎注册表一变就清缓存（插件上传/改配置/启停/删除都会触发）
