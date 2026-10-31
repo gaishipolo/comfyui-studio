@@ -32,6 +32,7 @@ router = APIRouter(prefix="/api/assets", tags=["assets"])
 # （防 file_size 元数据失真）。ZIP 落临时文件，避免整包常驻内存。
 BATCH_DOWNLOAD_MAX_FILES = 50
 BATCH_DOWNLOAD_MAX_BYTES = 1024 * 1024 * 1024  # 1GB
+_abandoned_archive_tasks: set[asyncio.Task[Path]] = set()
 
 
 def _remove_temp_archive(path: Path) -> None:
@@ -114,6 +115,18 @@ class _TemporaryArchiveResponse(FileResponse):
         finally:
             # Starlette does not reach BackgroundTask when ASGI send raises.
             _remove_temp_archive(Path(self.path))
+
+
+def _remove_abandoned_archive(task: asyncio.Task[Path]) -> None:
+    try:
+        archive_path = task.result()
+    except BaseException:
+        # Retrieving the result prevents a late worker failure from going unobserved.
+        pass
+    else:
+        _remove_temp_archive(archive_path)
+    finally:
+        _abandoned_archive_tasks.discard(task)
 
 
 def _escape_like(value: str) -> str:
@@ -423,7 +436,17 @@ async def batch_download(
             ),
         )
 
-    archive_path = await asyncio.to_thread(_build_batch_archive, assets)
+    archive_task = asyncio.create_task(
+        asyncio.to_thread(_build_batch_archive, assets)
+    )
+    try:
+        archive_path = await asyncio.shield(archive_task)
+    except BaseException:
+        # Executor threads cannot be cancelled. Keep ownership of a late result.
+        _abandoned_archive_tasks.add(archive_task)
+        archive_task.add_done_callback(_remove_abandoned_archive)
+        raise
+
     try:
         return _TemporaryArchiveResponse(
             archive_path,

@@ -6,6 +6,7 @@ boundaries. No application database or configured storage is touched.
 from __future__ import annotations
 
 import asyncio
+import gc
 import io
 import sys
 import tempfile
@@ -184,6 +185,14 @@ async def expect_http(coro, status: int, detail: str) -> HTTPException:
     raise AssertionError(f"expected HTTP {status}")
 
 
+async def wait_until(predicate, *, timeout: float = 2.0) -> None:
+    async def poll() -> None:
+        while not predicate():
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(poll(), timeout=timeout)
+
+
 async def test_count_limit_precedes_database_and_files() -> None:
     db = FakeDB([], fail_on_execute=True)
 
@@ -205,6 +214,20 @@ async def test_count_limit_precedes_database_and_files() -> None:
             "50",
         )
     assert db.execute_calls == 0
+
+
+async def test_count_limit_allows_exactly_50_ids() -> None:
+    db = FakeDB([])
+    await expect_http(
+        assets_api.batch_download(
+            [f"asset-{index}" for index in range(50)],
+            user=ADMIN,
+            db=db,
+        ),
+        404,
+        "No matching assets",
+    )
+    assert db.execute_calls == 1
 
 
 async def test_metadata_limit_precedes_archive_creation() -> None:
@@ -245,6 +268,23 @@ async def test_metadata_limit_precedes_archive_creation() -> None:
     assert file_calls == 0
 
 
+async def test_metadata_limit_allows_exactly_1_gib() -> None:
+    asset = make_asset(
+        "asset-metadata-boundary",
+        "metadata-boundary.bin",
+        file_size=1_073_741_824,
+    )
+    with temporary_archive_dir() as root:
+        response, closed = await make_response(asset, b"metadata-boundary")
+        path = Path(response.path)
+        assert path.exists() and path.parent == root
+        assert closed == [asset.file_path]
+        assert response.background is not None
+        await response.background()
+        assert not path.exists()
+        assert list(root.iterdir()) == []
+
+
 async def test_actual_size_limit_removes_partial_and_closes_handle() -> None:
     asset = make_asset("asset-stream-limit", "stream.bin")
     closed: list[str] = []
@@ -271,6 +311,27 @@ async def test_actual_size_limit_removes_partial_and_closes_handle() -> None:
 
         assert closed == [asset.file_path]
         assert list(root.iterdir()) == [], list(root.iterdir())
+
+
+async def test_actual_size_limit_allows_exactly_1_gib() -> None:
+    asset = make_asset("asset-stream-boundary", "stream-boundary.bin")
+    closed: list[str] = []
+    payloads = {
+        asset.file_path: [ReportedSizeBytes(b"a", 1_073_741_824)],
+    }
+
+    with temporary_archive_dir() as root, patched(
+        assets_api,
+        open_asset=handle_factory(payloads, closed),
+        read_asset_bytes=lambda _path: (_ for _ in ()).throw(
+            AssertionError("whole-file reads are forbidden")
+        ),
+    ):
+        path = builder()([asset])
+        assert path.exists() and path.parent == root
+        assert closed == [asset.file_path]
+        cleanup(path)
+        assert list(root.iterdir()) == []
 
 
 async def test_archive_names_are_safe_unique_basenames() -> None:
@@ -433,6 +494,137 @@ async def test_send_failure_removes_archive() -> None:
         assert list(root.iterdir()) == []
 
 
+async def test_request_cancellation_removes_late_archive() -> None:
+    asset = make_asset("asset-cancelled", "cancelled.bin")
+    db = FakeDB([asset])
+    loop = asyncio.get_running_loop()
+    worker_started = asyncio.Event()
+    worker_finished = asyncio.Event()
+    release_worker = threading.Event()
+    completed_paths: list[Path] = []
+    closed: list[str] = []
+    original_builder = builder()
+
+    def blocking_open_asset(file_path: str) -> ObjectHandle:
+        loop.call_soon_threadsafe(worker_started.set)
+        if not release_worker.wait(timeout=5):
+            raise RuntimeError("test worker release timed out")
+        return ObjectHandle(
+            size=7,
+            _stream=iter([b"payload"]),
+            _cleanup=lambda: closed.append(file_path),
+        )
+
+    def recording_builder(selected_assets) -> Path:
+        try:
+            path = original_builder(selected_assets)
+            completed_paths.append(path)
+            return path
+        finally:
+            loop.call_soon_threadsafe(worker_finished.set)
+
+    with temporary_archive_dir() as root, patched(
+        assets_api,
+        _build_batch_archive=recording_builder,
+        open_asset=blocking_open_asset,
+        task_owner_map=owner_map,
+    ):
+        request = asyncio.create_task(
+            assets_api.batch_download([asset.id], user=ADMIN, db=db)
+        )
+        await asyncio.wait_for(worker_started.wait(), timeout=2)
+        request.cancel()
+        done, _ = await asyncio.wait({request}, timeout=2)
+        try:
+            assert request in done, "request cancellation did not propagate promptly"
+            try:
+                request.result()
+            except asyncio.CancelledError:
+                pass
+            else:
+                raise AssertionError("batch_download swallowed request cancellation")
+        finally:
+            release_worker.set()
+
+        await asyncio.wait_for(worker_finished.wait(), timeout=2)
+        await wait_until(
+            lambda: bool(completed_paths) and not completed_paths[0].exists()
+        )
+        assert closed == [asset.file_path]
+        assert list(root.iterdir()) == []
+
+
+async def test_cancelled_failing_worker_exception_is_consumed() -> None:
+    asset = make_asset("asset-cancelled-error", "cancelled-error.bin")
+    db = FakeDB([asset])
+    loop = asyncio.get_running_loop()
+    worker_started = asyncio.Event()
+    worker_finished = asyncio.Event()
+    release_worker = threading.Event()
+    closed: list[str] = []
+    leaked_contexts: list[dict[str, Any]] = []
+    original_builder = builder()
+    previous_handler = loop.get_exception_handler()
+
+    def failing_chunks():
+        yield b"partial"
+        raise RuntimeError("late archive worker failure")
+
+    def blocking_open_asset(file_path: str) -> ObjectHandle:
+        loop.call_soon_threadsafe(worker_started.set)
+        if not release_worker.wait(timeout=5):
+            raise RuntimeError("test worker release timed out")
+        return ObjectHandle(
+            size=7,
+            _stream=failing_chunks(),
+            _cleanup=lambda: closed.append(file_path),
+        )
+
+    def recording_builder(selected_assets) -> Path:
+        try:
+            return original_builder(selected_assets)
+        finally:
+            loop.call_soon_threadsafe(worker_finished.set)
+
+    def capture_exception(_loop, context: dict[str, Any]) -> None:
+        leaked_contexts.append(context)
+
+    loop.set_exception_handler(capture_exception)
+    try:
+        with temporary_archive_dir() as root, patched(
+            assets_api,
+            _build_batch_archive=recording_builder,
+            open_asset=blocking_open_asset,
+            task_owner_map=owner_map,
+        ):
+            request = asyncio.create_task(
+                assets_api.batch_download([asset.id], user=ADMIN, db=db)
+            )
+            await asyncio.wait_for(worker_started.wait(), timeout=2)
+            request.cancel()
+            done, _ = await asyncio.wait({request}, timeout=2)
+            try:
+                assert request in done, "request cancellation did not propagate promptly"
+                try:
+                    request.result()
+                except asyncio.CancelledError:
+                    pass
+                else:
+                    raise AssertionError("batch_download swallowed request cancellation")
+            finally:
+                release_worker.set()
+
+            await asyncio.wait_for(worker_finished.wait(), timeout=2)
+            await wait_until(lambda: list(root.iterdir()) == [])
+            await asyncio.sleep(0)
+            gc.collect()
+            await asyncio.sleep(0)
+            assert closed == [asset.file_path]
+            assert not leaked_contexts, leaked_contexts
+    finally:
+        loop.set_exception_handler(previous_handler)
+
+
 async def main() -> int:
     print("=== batch archive limits and lifecycle ===")
     await run_case(
@@ -440,12 +632,24 @@ async def main() -> int:
         test_count_limit_precedes_database_and_files,
     )
     await run_case(
+        "exactly 50 IDs pass the count gate",
+        test_count_limit_allows_exactly_50_ids,
+    )
+    await run_case(
         "metadata above 1 GiB fails before archive creation",
         test_metadata_limit_precedes_archive_creation,
     )
     await run_case(
+        "metadata exactly 1 GiB passes the metadata gate",
+        test_metadata_limit_allows_exactly_1_gib,
+    )
+    await run_case(
         "actual streamed bytes above the limit remove the partial archive",
         test_actual_size_limit_removes_partial_and_closes_handle,
+    )
+    await run_case(
+        "actual streamed bytes exactly 1 GiB are accepted",
+        test_actual_size_limit_allows_exactly_1_gib,
     )
     await run_case(
         "archive names are safe unique basenames",
@@ -458,6 +662,14 @@ async def main() -> int:
     await run_case(
         "ASGI send failure removes the temporary archive",
         test_send_failure_removes_archive,
+    )
+    await run_case(
+        "request cancellation removes a late completed archive",
+        test_request_cancellation_removes_late_archive,
+    )
+    await run_case(
+        "cancelled failing worker exceptions are consumed",
+        test_cancelled_failing_worker_exception_is_consumed,
     )
 
     print(f"\nRESULT: {PASS} passed / {FAIL} failed")
