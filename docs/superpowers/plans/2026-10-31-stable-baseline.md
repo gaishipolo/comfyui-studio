@@ -415,7 +415,7 @@ real DB, storage, or API keys.
 Run `git diff --check`, Python import/compile checks, `npm ci`, and
 `npm run build`. Expected: all commands exit 0 with no errors.
 
-- [ ] **Step 3: Run all 32 verify scripts serially**
+- [ ] **Step 3: Run all 36 verify scripts serially**
 
 Run pure/offline scripts first, then temporary-resource scripts, then scripts
 requiring the isolated FastAPI service. Capture each command, exit code, and

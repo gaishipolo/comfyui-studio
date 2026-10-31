@@ -107,7 +107,7 @@ break on harmless refactors are replaced by behavior checks or tolerant
 structural assertions.
 
 Full regression runs in a disposable linked worktree with its own SQLite DB,
-storage, plugins, workflows, credentials, and frontend build. It runs all 32
+storage, plugins, workflows, credentials, and frontend build. It runs all 36
 `verify_*.py` scripts serially, Playwright UI checks, one real ComfyUI text-to-
 image task, and a local small MP4 fixture for write/ffmpeg/responsiveness paths.
 The restart-recovery E2E that terminates port 8000 and real video generation are
