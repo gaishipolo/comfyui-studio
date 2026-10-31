@@ -32,8 +32,15 @@
 
 - 未再次提交真实生成；上面的真实任务、prompt、素材和缩略图证据保持原样。
 - 新增本地假服务契约，最终 **6 passed / 0 failed**：B5/B6 任一创建响应返回额外 ID 时全部非终态任务会被取消且全部 ID 会被删除；模板 ID/引擎/工作流/三项映射/输出节点不符时在任何任务提交前失败；非 loopback 或当前可连接的 generic origin 在 B5 前拒绝。
-- `verify_b5_b6.py` 现在要求显式 `COMFYUI_STUDIO_B5_B6_TEMPLATE_ID` 和 `COMFYUI_STUDIO_TEST_GENERIC_BASE_URL`，并要求后者与脚本环境中的 `GENERIC_API_BASE_URL` 一致；随后通过鉴权 `/api/engines` 确认 `generic_api=disconnected`。不再按名称子串选择真实模板。
+- `verify_b5_b6.py` 的 Fix Round 1 generic endpoint 安全门已由 Fix Round 2 的完全进程内 B5 取代；精确 B6 模板 ID 与结构校验继续保留。不再按名称子串选择真实模板。
 - Comfy 生成 temp Asset 引用删除与五个远端文件的 `/view` 状态均使用公开、受支持 API 复核；队列仍为 running/pending 0/0。
+
+### Task 7 Fix Round 2
+
+- 未再次提交真实生成，未运行真实视频或重启。
+- B5 现在自建临时 SQLite Template/Task，以假 `generic_api` Provider 执行真实 `TaskService.execute_task`；仅替换 `task_service.async_session` 和 `task_service.get_provider`，在 `finally` 恢复两者、dispose engine 并删除 DB/WAL/SHM。验证 submit 收到空 workflow/param mapping，终态错误来自假 Provider result 且与 workflow/IsADirectory 无关。
+- B5 不再调用登录、模板、任务、engine、generic HTTP 或 cloud；运行中服务只承担 B6 的精确 fixture 查询、一次 task create 和清理。B6 创建响应仍先收拢全部 ID，再要求恰好一个，额外非终态 ID 全部取消且全部删除。
+- 更新后的假服务/进程内契约最终 **6 passed / 0 failed**。RED 在 `eecd82a` 上为 5 failed / 1 passed：缺少进程内 B5，且旧 generic env 门阻断了 B6 合约路径。
 
 ---
 

@@ -20,7 +20,7 @@
 
 存储说明：`verify_filestore_live.py` 使用进程内 S3 线格式服务并通过；未连接或声称验证真实 MinIO。
 
-关注项：Fix Round 1 未再次提交真实生成。四个 Comfy input 与真实生成 temp 的 Asset 引用均已通过受支持 API 删除并查询为空，但物理内容仍可由 `/view` 读取；准确残留为 `ref_3ff9bd2d.png`、`ref_b5ecf8a4.png`、`ref_955ed0b8.png`、`ref_1f3489e5.png` 和 `ComfyUI_temp_fstqj_00003_.png`。Comfy 公共 Asset DELETE 不物理删除这些非 preview 文件。
+关注项：Fix Round 1/2 未再次提交真实生成。受支持的 Comfy Asset DELETE 已移除四个 input 文件和一个生成 temp 文件的引用，但保留了物理内容，五个 `/view` 请求仍为 200；准确残留为 `ref_3ff9bd2d.png`、`ref_b5ecf8a4.png`、`ref_955ed0b8.png`、`ref_1f3489e5.png` 和 `ComfyUI_temp_fstqj_00003_.png`。
 
 ---
 
