@@ -6,6 +6,9 @@
 不要再像以前那样写死「只收图片」，逼得插件用 audio/audio2/audio3 这种槽位硬凑。
 """
 from pathlib import Path
+
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,6 +17,7 @@ from app.engines.factory import get_provider
 from app.filestore import read_asset_bytes
 from app.models.models import Asset, User
 from app.auth import get_current_user
+from app.safe_detail import safe_detail
 from app.schemas.schemas import AssetUploadRequest
 from app.access import can_view_asset, task_owner_map
 
@@ -65,7 +69,8 @@ async def _forward_to_engine(engine: str, data: bytes, name: str) -> str:
     except NotImplementedError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:  # noqa: BLE001 —— 引擎侧报错统一收成 502
-        raise HTTPException(status_code=502, detail=f"上传到生成引擎失败: {e}")
+        # 异常原文可能带上游完整 URL（含 query 里的 key），过脱敏再回 —— 与 /engines 同一道防线
+        raise HTTPException(status_code=502, detail=f"上传到生成引擎失败: {safe_detail(e)}")
 
 
 @router.post("/file")
@@ -84,14 +89,24 @@ async def upload_file(
             detail=f"不支持的{rules['label']}格式：{name}（允许 {', '.join(sorted(rules['ext']))}）",
         )
 
-    data = await file.read()
+    # 分块读、即时封顶：若先 read() 再查大小，恶意客户端传多大服务器就先吃多少进内存，
+    # 200MB 上限对内存 DoS 形同虚设。超限在读到第 (max+1) 个字节时就断掉。
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > rules["max"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{rules['label']}超过 {rules['max'] // MB}MB 限制",
+            )
+        chunks.append(chunk)
+    data = b"".join(chunks)
     if not data:
         raise HTTPException(status_code=400, detail="空文件")
-    if len(data) > rules["max"]:
-        raise HTTPException(
-            status_code=400,
-            detail=f"{rules['label']}超过 {rules['max'] // MB}MB 限制",
-        )
 
     server_name = await _forward_to_engine(engine, data, name)
     return {"filename": server_name, "engine": engine, "kind": kind}
@@ -137,8 +152,9 @@ async def upload_from_asset(
             detail=f"该素材类型暂不支持作为参考输入：{asset.mime_type or asset.file_name}",
         )
 
-    # 越界防护复用 filestore 的唯一实现，不复制第二份
-    data = read_asset_bytes(asset.file_path)
+    # 越界防护复用 filestore 的唯一实现，不复制第二份；
+    # to_thread：素材可能是几百 MB 的视频，同步读盘会冻结事件循环
+    data = await asyncio.to_thread(read_asset_bytes, asset.file_path)
     if data is None:
         raise HTTPException(status_code=404, detail="素材文件找不到了")
 

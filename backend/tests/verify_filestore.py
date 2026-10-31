@@ -268,7 +268,8 @@ hits = [name for name, src in py_sources.items() if "asset_disk_path" in src]
 report("asset_disk_path 已彻底移除（换成 safe_key）", not hits, f"{hits}")
 
 ts_src = py_sources.get("task_service.py", "")
-report("_save_asset 走 save_asset_file", "save_asset_file(" in ts_src)
+report("_save_asset 走 save_asset_file",
+       "save_asset_file(" in ts_src or "asyncio.to_thread(save_asset_file" in ts_src)
 report("_save_asset 的存储键用 POSIX 分隔符", 'f"{task.id}/{safe_name}"' in ts_src)
 report("_save_asset 不再自己 mkdir / write_bytes", "write_bytes" not in ts_src)
 

@@ -132,7 +132,8 @@ report("upload_from_asset 不得引用未定义的 target", "target.name" not in
 report("upload_from_asset 传给引擎的是 asset.file_name（不是磁盘路径）",
        "_forward_to_engine(body.engine, data, asset.file_name)" in src)
 report("upload_from_asset 读字节用 asset.file_path",
-       "read_asset_bytes(asset.file_path)" in src)
+       "read_asset_bytes(asset.file_path)" in src
+       or "asyncio.to_thread(read_asset_bytes, asset.file_path)" in src)
 
 # ── 清理 ─────────────────────────────────────────────────
 print("\n=== 清理 ===")

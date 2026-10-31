@@ -31,6 +31,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine, AsyncSession
 
 import app.services.task_service as ts
+import app.api.health as health_api
 from app.engines.base import GenerationResult, GenerationProvider, TaskStatus
 from app.models.models import Base, Task, Template, User
 from app.services.task_service import TaskService
@@ -449,7 +450,22 @@ async def main():
     report("配置变更要能立刻打掉缓存（改完 key 不该还显示离线）",
            "on_change(invalidate_cache)" in hsrc)
     report("admin 诊断可以跳过缓存", '"fresh"' in hsrc or "fresh: bool" in hsrc)
-    report("引擎异常详情脱敏（抹掉 URL）", "_URL_RE.sub" in hsrc)
+    original_health_provider = health_api.get_provider
+
+    def failing_health_provider(engine_name):
+        raise RuntimeError(
+            "probe http://10.0.0.5/private?api_key=TOPSECRET token=TOPSECRET"
+        )
+
+    health_api.get_provider = failing_health_provider
+    try:
+        probe_result = await health_api._probe("secret-test")
+    finally:
+        health_api.get_provider = original_health_provider
+    probe_detail = probe_result.get("detail", "")
+    report("引擎异常详情脱敏（抹掉 URL 和凭证）",
+           "10.0.0.5" not in probe_detail and "TOPSECRET" not in probe_detail,
+           probe_detail)
     report("/health 保持匿名可访问（探活不该要 token）", "async def health():" in hsrc)
 
     await engine.dispose()

@@ -1,6 +1,5 @@
 """健康检查 + 引擎信息"""
 import asyncio
-import re
 import time
 
 from fastapi import APIRouter, Depends, Query
@@ -10,6 +9,7 @@ from app.engines import factory
 from app.engines.base import GenerationProvider
 from app.engines.factory import get_provider, list_engines
 from app.models.models import User
+from app.safe_detail import safe_detail as _safe_detail
 
 router = APIRouter(prefix="/api", tags=["health"])
 
@@ -23,19 +23,9 @@ _PROBE_TIMEOUT = 2.0
 # 20 秒 < 客户端 30 秒轮询间隔，用户感知不到延迟。
 _CACHE_TTL = 20.0
 
-# 异常原文里常带内网地址，有些供应商还会把 token 放在 query 里
-_URL_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://\S+")
-
 # engine_name -> (过期时刻, 探测结果)；_inflight 让并发请求共享同一次探测
 _cache: dict[str, tuple[float, dict]] = {}
 _inflight: dict[str, asyncio.Future] = {}
-
-
-def _safe_detail(exc: Exception) -> str:
-    """异常信息脱敏：抹掉 URL，截断长度。别把内网拓扑和密钥片段送到前端"""
-    msg = _URL_RE.sub("<url>", str(exc)).strip()
-    name = type(exc).__name__
-    return f"{name}: {msg}"[:200] if msg else name
 
 
 async def _probe(engine_name: str) -> dict:
@@ -118,6 +108,10 @@ async def engines(
     并发探测 + 20 秒缓存：6 个引擎串行最坏要 6×2 秒，而前端每 30 秒就会问一次，
     不缓存等于让每个在线用户都在替所有用户重复探测上游。
     """
+    # fresh=true 会立刻打真实上游请求 —— 只给 admin 用。否则任何登录用户
+    # 都能反复带这个参数替全站烧供应商配额（缓存正是为防这个才存在的）
+    if fresh and user.role != "admin":
+        fresh = False
     results = await asyncio.gather(
         *(_probe_cached(name, fresh) for name in list_engines())
     )

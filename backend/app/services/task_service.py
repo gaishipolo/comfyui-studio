@@ -16,6 +16,7 @@ from app.engines.base import GenerationResult, TaskStatus
 from app.config import settings
 from app.filestore import save_asset_file
 from app.media import guess_mime
+from app.safe_detail import safe_detail
 from app.thumbs import make_video_thumb, thumb_key
 
 logger = logging.getLogger(__name__)
@@ -57,6 +58,13 @@ async def _run_and_cleanup(task_id: str, resume: bool = False):
             await TaskService.resume_task(task_id)
         else:
             await TaskService.execute_task(task_id)
+    except Exception as e:  # noqa: BLE001 - background tasks must consume and log failures
+        logger.error(
+            "Background task failed task_id=%s resume=%s",
+            task_id,
+            resume,
+            exc_info=(type(e), e, e.__traceback__),
+        )
     finally:
         _running_tasks.discard(task_id)
 
@@ -200,7 +208,9 @@ class TaskService:
                         workflow_path = settings.WORKFLOW_DIR / Path(template.workflow_file).name
                         if not workflow_path.exists():
                             raise FileNotFoundError(f"Workflow file not found: {template.workflow_file}")
-                        workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+                        # to_thread：同步磁盘读不能占着事件循环（整个服务会一起停摆）
+                        raw = await asyncio.to_thread(workflow_path.read_text, encoding="utf-8")
+                        workflow = json.loads(raw)
 
                     # 提交上下文统一组装，Provider 各取所需：
                     # ComfyUI 用 _workflow/_param_mapping（在 submit 内做节点注入），
@@ -236,10 +246,16 @@ class TaskService:
                     await TaskService._finish_task(db, task, template, provider, prompt_id)
 
                 except Exception as e:
+                    logger.error(
+                        "Task execution failed task_id=%s provider=%s",
+                        task.id,
+                        template.engine,
+                        exc_info=(type(e), e, e.__traceback__),
+                    )
                     # 已经取消的任务别再改写成 error，否则「已取消」会变成「失败」
                     if not _cancel_requested_for(task.id):
                         task.status = "error"
-                        task.error_msg = str(e)
+                        task.error_msg = safe_detail(e)
                         task.finished_at = datetime.utcnow()
 
                 await db.commit()
@@ -275,9 +291,15 @@ class TaskService:
                 try:
                     await TaskService._finish_task(db, task, template, provider, task.provider_task_id)
                 except Exception as e:  # noqa: BLE001
+                    logger.error(
+                        "Task resume failed task_id=%s provider=%s",
+                        task.id,
+                        template.engine,
+                        exc_info=(type(e), e, e.__traceback__),
+                    )
                     if not _cancel_requested_for(task.id):
                         task.status = "error"
-                        task.error_msg = f"重启后接回任务失败: {e}"
+                        task.error_msg = safe_detail(e)
                         task.finished_at = datetime.utcnow()
                         await db.commit()
 
@@ -389,15 +411,20 @@ class TaskService:
         # 存储键固定用 POSIX 分隔符：Windows 下 str(Path) 是反斜杠，直接当对象键会跟
         # S3 / mc mirror 的 / 对不上号。老记录里存的是反斜杠，filestore 读入端两种都吃。
         rel_path = f"{task.id}/{safe_name}"
-        save_asset_file(rel_path, file_bytes, content_type=mime)
+        # to_thread：几百 MB 的视频同步写盘会冻结整个事件循环（所有 API/轮询一起停摆）
+        await asyncio.to_thread(save_asset_file, rel_path, file_bytes, content_type=mime)
 
         # 视频顺手抽一帧当缩略图：素材库卡片不然要拉整个 mp4 当封面。
         # 抽帧失败（没 ffmpeg / 视频损坏）就当没这回事，不影响素材本身
         if mime.startswith("video/"):
             try:
-                thumb = make_video_thumb(file_bytes, Path(safe_name).suffix)
+                # to_thread：make_video_thumb 内部是 subprocess.run（最长 30s）+ 整段视频写临时文件，
+                # 直接调会把事件循环冻住最坏半分钟 —— 这曾是「界面偶发卡死」的直接来源
+                thumb = await asyncio.to_thread(make_video_thumb, file_bytes, Path(safe_name).suffix)
                 if thumb:
-                    save_asset_file(thumb_key(task.id, safe_name), thumb, content_type="image/jpeg")
+                    await asyncio.to_thread(
+                        save_asset_file, thumb_key(task.id, safe_name), thumb, content_type="image/jpeg"
+                    )
             except Exception:  # noqa: BLE001 —— 缩略图是锦上添花，不能拖垮存素材
                 logger.warning("视频缩略图生成失败，跳过：%s", safe_name, exc_info=True)
 
