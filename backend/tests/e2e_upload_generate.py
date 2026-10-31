@@ -6,7 +6,9 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
-BASE = "http://127.0.0.1:8000"
+from test_env import SERVICE_BASE_URL
+
+BASE = SERVICE_BASE_URL
 
 
 def req(method, path, token=None, json_body=None):

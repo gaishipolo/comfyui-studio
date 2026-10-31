@@ -7,7 +7,7 @@
 - 读接口越权报 404（不泄露「存在但无权」），写接口越权报 403
 
 测试数据全部自建（deltest- 前缀 + uuid），跑完自清理，不碰库里真实数据。
-需要后端在 127.0.0.1:8000 运行。
+需要 COMFYUI_STUDIO_TEST_BASE_URL 指向正在运行的隔离后端。
 """
 import asyncio
 import inspect
@@ -21,7 +21,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-BASE = "http://127.0.0.1:8000/api"
+from test_env import API_BASE_URL  # noqa: E402
+
+BASE = API_BASE_URL
 DB_PATH = Path(__file__).resolve().parents[1] / "workbench.db"
 ok_all = True
 

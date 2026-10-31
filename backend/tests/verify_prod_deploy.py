@@ -7,7 +7,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-BASE = "http://127.0.0.1:8000"
+from test_env import SERVICE_BASE_URL  # noqa: E402
+
+BASE = SERVICE_BASE_URL
 ok_all = True
 
 

@@ -20,7 +20,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-BASE = "http://127.0.0.1:8000/api"
+from test_env import API_BASE_URL  # noqa: E402
+
+BASE = API_BASE_URL
 ok_all = True
 
 

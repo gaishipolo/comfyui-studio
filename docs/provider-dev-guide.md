@@ -28,6 +28,8 @@ class MyProvider(GenerationProvider):
     async def get_status(self, task_id) -> GenerationResult: ...
     async def download_output(self, filename, subfolder="", output_type="output") -> bytes: ...
     async def health_check(self) -> bool: ...
+    # 仅在实例持有长连接、后台任务等资源时重写：
+    # async def close(self) -> None: ...
 ```
 
 完整可跑样例：`backend/examples/provider_template.py`（假想的「示例云」REST API，带全部注释）。
@@ -41,7 +43,7 @@ class MyProvider(GenerationProvider):
 | `capabilities` | `{kind: CapabilitySpec}`。kind 用 `text_to_image` / `image_to_image` / `text_to_video` 这类蛇形命名 |
 | `config_schema` | `list[FieldSpec]`。运行配置项声明，**机密放这里，不要写死在代码里** |
 
-`FieldSpec` 字段：`name`（=API 参数名）、`label`、`type`、`required`、`default`、`options`（enum 选项，**值直接用 API 原生值**）、`description`、`multiple`、`advanced`。
+`FieldSpec` 字段：`name`（=API 参数名）、`label`、`type`、`required`、`default`、`options`（enum 选项，**值直接用 API 原生值**）、`description`、`multiple`。
 
 ### 两个正交的维度：元素类型 vs 基数
 
@@ -130,16 +132,19 @@ def _to_bool(value) -> bool:
 | 方法 | 说明 |
 |---|---|
 | `submit(ctx, params) -> str` | 提交任务，返回引擎侧任务 ID。`ctx` 由平台组装：`_type`（场景分类）、`_capability`（能力 kind）、`_template_name`、`_workflow`（工作流 JSON，非 ComfyUI 忽略）、`_param_mapping` |
-| `get_status(task_id) -> GenerationResult` | 轮询状态。完成时把产物放进 `outputs`：`[{"url": 产物URL, "filename": 纯文件名, "subfolder": "", "type": "output"}]` |
-| `download_output(filename, subfolder, output_type) -> bytes` | 下载产物。**支持 filename 是完整 URL**（平台优先传 outputs 里的 url 字段） |
+| `get_status(task_id) -> GenerationResult` | 轮询状态。完成时把产物放进 `outputs`；每项必须有纯文件名 `filename`，云端临时地址可放可选 `url`。建议同时给出 `subfolder: ""` 与 `type: "output"`；ComfyUI 类产物还可带 `node_id` |
+| `download_output(filename, subfolder, output_type) -> bytes` | 下载产物。平台传入 `output.url`（存在时）或 `output.filename`，所以第一个参数必须同时接受插件声明的这两种来源 |
 | `health_check() -> bool` | 连通性检查（管理页「测试」按钮） |
 | `upload_input(data, filename) -> str` | （可选）上传参考文件（图片/音频/视频共用）：返回 API 要的形态。建议返回 `wbinput:<key>` 短标记，见上文 |
 | `cancel(provider_task_id) -> bool` | （可选）取消引擎侧任务 |
 | `build_payload(capability, params) -> dict` | （钩子）表单值 → 请求体，默认透传 |
+| `close() -> None` | （可选）释放实例资源。基类是无操作；持有长期 `httpx.AsyncClient`、WebSocket、后台协程或其他句柄时必须重写 |
+
+平台会在插件同名升级、停用、删除、运行配置变化以及应用关闭时调用 `close()`。实现应停止后台任务并关闭自有资源，且不要无限等待；平台会对清理设置有限超时。清理失败会记录日志，但不会撤销已经完成的注册表变更。
 
 ## 产物约定（重要）
 
-`get_status` 返回的产物放 `url` + `filename`（纯文件名）两个字段。平台拿 `url` 调 `download_output` **立即下载落自己的存储**再进素材库——供应商返回的多是 24 小时过期的临时签名 URL，直接存进素材库第二天全是死链。
+`filename` 是每个产物的必填字段，且必须是纯文件名。若供应商返回临时签名地址，再加 `url`；平台会优先拿它调用 `download_output`，**立即下载到自己的存储**再进素材库，避免临时链接过期。若插件已经把 base64/二进制暂存在自身实例里，也可以只返回 `filename`，再由 `download_output` 按该名字取回。`subfolder`、`type` 和 `node_id` 用于 ComfyUI 式结果；普通云插件通常使用空 `subfolder`、`type="output"`，不需要 `node_id`。
 
 ## 请求体快照
 
@@ -147,7 +152,7 @@ def _to_bool(value) -> bool:
 
 ## 上传与加载规则
 
-- 管理页「引擎插件」上传 `.py`（≤512KB），**同名重传 = 升级覆盖**
+- 管理页「引擎插件」上传 `.py`（≤512KB）。替换键是代码里声明的 `Provider.name`，不是客户端文件名：相同 `name` 会覆盖为 `<name>.py`、保留并重新注入已有运行配置、退役旧实例；改成新 `name` 会新增一个插件，原插件不会自动删除
 - 一个文件只允许一个 Provider 子类，类必须在本文件定义（不能只 import）
 - 依赖白名单：**标准库 + httpx + app.engines.base**（及 `app.*`），白名单外直接拒
 - 语法错误 / 加载失败会把报错详情显示在界面上，不影响其他插件和主服务

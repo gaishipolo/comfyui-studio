@@ -6,7 +6,9 @@
 """
 import json, sys, urllib.error, urllib.request, uuid
 
-BASE = "http://127.0.0.1:8000/api"
+from test_env import API_BASE_URL
+
+BASE = API_BASE_URL
 ok_all = True
 
 

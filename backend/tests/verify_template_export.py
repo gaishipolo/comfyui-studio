@@ -4,7 +4,7 @@
 内嵌工作流有没有真的带走、input_schema 归一化后有没有变样、
 重名会不会悄悄覆盖别人的配置、重复导入会不会堆一堆副本。
 
-需要后端在 127.0.0.1:8000 运行。测试模板与临时工作流文件自建自删。
+需要 COMFYUI_STUDIO_TEST_BASE_URL 指向隔离后端。测试模板与工作流文件自建自删。
 """
 import json
 import sys
@@ -16,7 +16,9 @@ from pathlib import Path
 # 脚本可能从任意目录启动，先把 backend/ 放进 sys.path 才能 import app.*
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-BASE = "http://127.0.0.1:8000/api"
+from test_env import API_BASE_URL  # noqa: E402
+
+BASE = API_BASE_URL
 ok = True
 # 本次测试创建出来的模板 id（收尾统一删）
 CREATED: list[str] = []

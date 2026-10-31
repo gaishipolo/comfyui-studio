@@ -43,15 +43,29 @@
 
 ### 1. 后端
 
-```bash
+后端必须从 `backend/` 工作目录启动；SQLite、存储、工作流和前端构建目录的相对路径都以这里为基准。
+
+PowerShell：
+
+```powershell
 cd backend
 python -m venv .venv
-# Windows: .venv\Scripts\activate    Linux/macOS: source .venv/bin/activate
-pip install -r requirements.txt
-
-cp .env.example .env        # 按需修改
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+Copy-Item .env.example .env
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
+
+Linux / macOS：
+
+```bash
+cd backend
+python3 -m venv .venv
+cp .env.example .env
+./.venv/bin/python -m pip install -r requirements.txt
+./.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+启动前按需修改 `backend/.env`。不要从仓库根目录直接运行 uvicorn。
 
 首次启动自动创建默认管理员 `admin`：
 - 配置了 `ADMIN_INITIAL_PASSWORD` 则用该密码；
@@ -63,14 +77,16 @@ API 文档：http://127.0.0.1:8000/docs
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm run dev        # http://localhost:5173，/api 自动代理到 :8000
 ```
 
 ### 3. 生产部署
 
 ```bash
-cd frontend && npm run build   # 产物在 frontend/dist
+cd frontend
+npm ci
+npm run build                  # 产物在 frontend/dist
 # 然后正常启动后端即可 —— dist 存在时由后端直接托管
 ```
 
@@ -81,6 +97,8 @@ cd frontend && npm run build   # 产物在 frontend/dist
 ## 配置
 
 配置在 `backend/.env`（模板见 `backend/.env.example`），关键项：
+
+所有相对路径均按后端启动时的工作目录解析，因此应从 `backend/` 启动。当前数据库实现为 SQLite + aiosqlite；配置模板不承诺 PostgreSQL 支持。
 
 | 变量 | 说明 | 默认 |
 |---|---|---|
@@ -93,6 +111,7 @@ cd frontend && npm run build   # 产物在 frontend/dist
 | `MAX_CONCURRENT_TASKS` | 全局生成并发上限 | `2` |
 | `TASK_TIMEOUT_SECONDS` | 单任务最长等待（超时取消） | `1800` |
 | `CORS_ORIGINS` | 允许的跨域来源，生产收紧为前端域名 | `*` |
+| `FFMPEG_PATH` | 非 `Settings` 运行时覆盖；指定 ffmpeg 可执行文件 | 空（自动查找） |
 
 ## 开发 Provider 插件
 
@@ -115,20 +134,30 @@ cd frontend && npm run build   # 产物在 frontend/dist
 
 ## 测试
 
-后端测试是独立脚本（不依赖 pytest），直接运行：
+后端当前有 **36 个** `backend/tests/verify_*.py` 独立脚本，不依赖 pytest。以下是运行条件清单，不代表整套脚本已经在当前提交上全量通过；完整回归、UI 和真实生成证据由 Task 7 记录。
 
-```bash
-cd backend
-python tests/verify_plugin_loader.py    # 插件加载与注册（42 项断言）
-python tests/verify_multi_image.py      # 单字段多图：字段声明 / 列表保序 / 多图进请求体（离线，不用起服务）
-python tests/verify_grsai_plugins.py    # Grsai 三插件线格式联调：异步轮询 / 状态映射 / 产物下载（假服务端）
-python tests/verify_queue_and_auth.py   # 队列闸门与鉴权
-python tests/verify_filestore.py        # 存储抽象
-python tests/verify_template_export.py  # 模板导出/导入：自包含工作流、去重、重名、缺引擎告警
-# ...其余 verify_*.py 同理，全部通过输出 PASS
+| 类别 | 数量 | 脚本 |
+|---|---:|---|
+| 离线 / 进程内 | 8 | `verify_cancel.py`、`verify_from_asset_size_gate.py`、`verify_media_mime.py`、`verify_param_coercion.py`、`verify_progress.py`、`verify_provider_lifecycle.py`、`verify_schema_idempotent.py`、`verify_video_outputs.py` |
+| 临时或隔离资源，不起 FastAPI | 13 | `verify_batch_archive.py`、`verify_error_boundary.py`、`verify_filestore.py`、`verify_filestore_live.py`、`verify_grsai_plugins.py`、`verify_json_ascii.py`、`verify_json_migration.py`、`verify_json_migration_edge.py`、`verify_media_reliability.py`、`verify_multi_image.py`、`verify_queue_and_auth.py`、`verify_tag_json_each.py`、`verify_tag_persist.py` |
+| 隔离 FastAPI 服务 | 13 | `verify_asset_filters.py`、`verify_delete_assets_tasks.py`、`verify_delete_semantics.py`、`verify_frontend_contract.py`、`verify_multi_image_api.py`、`verify_p0_fixes.py`、`verify_plugin_loader.py`、`verify_prod_deploy.py`、`verify_schema_normalization.py`、`verify_template_export.py`、`verify_upload_kinds.py`、`verify_usage_stats.py`、`verify_user_isolation.py` |
+| 隔离服务 + 真实 ComfyUI | 2 | `verify_b5_b6.py`、`verify_from_asset_upload.py` |
+| 破坏性重启（不计入 36 个 verify 脚本） | - | `e2e_restart_recovery.py` |
+
+所有命令从 `backend/` 运行。服务脚本读取 `COMFYUI_STUDIO_TEST_BASE_URL`（值是服务 origin，不含 `/api`）；未设置时为兼容手工运行而默认使用 `http://127.0.0.1:8000`。例如：
+
+```powershell
+$env:COMFYUI_STUDIO_TEST_BASE_URL = "http://127.0.0.1:8765"
+.\.venv\Scripts\python.exe tests\verify_p0_fixes.py
 ```
 
-`backend/tests/e2e_*.py` 为端到端脚本（起服务真实跑任务），按需执行。
+服务脚本固定用 `admin` / `admin123`。只可对全新、可丢弃的数据库设置 `ADMIN_INITIAL_PASSWORD=admin123`；已有管理员时该变量不会重置密码。服务回归会创建、修改和删除数据库行、插件文件、工作流及素材，禁止指向用户正在使用的服务。
+
+`verify_plugin_loader.py`、`verify_from_asset_upload.py`、`verify_usage_stats.py`、`verify_user_isolation.py`、`verify_tag_json_each.py` 和 `verify_tag_persist.py` 仍直接打开 `backend/workbench.db`；`e2e_restart_recovery.py` 和维护脚本 `backfill_video_thumbs.py` 也有同样约束。因此完整服务回归要在一次性 worktree 中使用该默认 SQLite 文件名。worktree 独占且数据库不受 Git 跟踪，测试后可删除，不会接触原工作区数据库。
+
+`verify_filestore_live.py` 会先探测配置的 MinIO，再退回进程内 S3 线格式服务；不允许外连时不要运行它。`verify_multi_image.py` 会写配置的存储目录，也必须使用隔离 `STORAGE_DIR`。
+
+真实 ComfyUI 分类会提交任务；`e2e_upload_generate.py` 也属于这一类。`e2e_restart_recovery.py` 是单独的破坏性重启脚本，会终止并重启目标端口上的后端，不计入上述 36 个脚本，不能混入普通回归。UI、真实文生图和破坏性重启结果均不能由离线或服务契约脚本代替。
 
 ## 目录结构
 

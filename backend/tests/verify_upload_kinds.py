@@ -10,7 +10,7 @@
 - kind=pdf → 400（未知种类）
 - 老入口 /upload/image 仍可用（兼容）
 
-需要后端在 127.0.0.1:8000 运行。
+需要 COMFYUI_STUDIO_TEST_BASE_URL 指向正在运行的隔离后端。
 """
 import base64
 import json
@@ -19,7 +19,9 @@ import urllib.error
 import urllib.request
 import uuid
 
-BASE = "http://127.0.0.1:8000/api"
+from test_env import API_BASE_URL
+
+BASE = API_BASE_URL
 ok_all = True
 
 TINY_PNG = base64.b64decode(

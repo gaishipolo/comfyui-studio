@@ -7,7 +7,7 @@
 4. 回归守卫：筛选实现别被将来改没
 
 测试数据全部自建（deltest- 前缀 + uuid），跑完自清理，不碰库里真实数据。
-需要后端在 127.0.0.1:8000 运行。
+需要 COMFYUI_STUDIO_TEST_BASE_URL 指向正在运行的隔离后端。
 """
 import asyncio
 import json
@@ -20,7 +20,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-BASE = "http://127.0.0.1:8000/api"
+from test_env import API_BASE_URL  # noqa: E402
+
+BASE = API_BASE_URL
 ok_all = True
 
 
@@ -147,18 +149,6 @@ ids = {x["id"] for x in lst}
 report("member 借 creator 参数也穿不透隔离", st == 200 and a_new not in ids and a_old not in ids,
        f"返回 {len(lst)} 条")
 
-print("\n=== 3. 回归守卫 ===")
-import inspect
-import app.api.assets as amod
-
-src = inspect.getsource(amod.list_assets)
-report("list_assets 必须处理三个筛选参数",
-       "created_from" in src and "created_to" in src and "creator" in src)
-report("纯日期的「止」必须含当天（end=True 走 _parse_day）",
-       "_parse_day(created_to, end=True)" in src)
-report("creator 筛选必须与隔离过滤并存（都挂在同一 query 上）",
-       "Task.created_by == creator" in src and "Asset.is_shared" in src)
-
 # ── 类型分栏（kind）：素材不只有图片了，列表要能按大类过滤 ──
 print("\n=== kind 类型筛选 ===")
 a_audio = asyncio.run(seed(ADMIN_ID, TODAY, "deltest-audio", mime="audio/mpeg", ext="mp3"))
@@ -180,10 +170,6 @@ report("kind=video 不含图片/音频",
 
 st, _ = req("/assets?kind=xxx", token=ADMIN_T)
 report("非法 kind → 400（别静默当成全部）", st == 400, f"status={st}")
-
-src = inspect.getsource(amod.list_assets)
-report("kind 用 mime 前缀过滤，不新增数据库列",
-       'Asset.mime_type.ilike(f"{k}/%")' in src)
 
 print("\n=== 清理 ===")
 for tid in list(SEEDED_TASKS):

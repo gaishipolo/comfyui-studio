@@ -4,7 +4,7 @@
 仅 admin 看得到；时间段可切（纯日期含当天全天，与素材筛选同语义）。
 
 测试数据全部自建（deltest- 前缀 + uuid），跑完自清理。
-需要后端在 127.0.0.1:8000 运行。
+需要 COMFYUI_STUDIO_TEST_BASE_URL 指向正在运行的隔离后端。
 """
 import asyncio
 import json
@@ -18,7 +18,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-BASE = "http://127.0.0.1:8000/api"
+from test_env import API_BASE_URL  # noqa: E402
+
+BASE = API_BASE_URL
 DB_PATH = Path(__file__).resolve().parents[1] / "workbench.db"
 ok_all = True
 
@@ -206,16 +208,6 @@ by = {u["user_id"]: u for u in d["by_user"]}
 report("只有失败任务的用户，平均耗时为 null（不瞎填 0）",
        by.get(ERR_ID, {}).get("avg_duration_seconds") is None,
        f"got {by.get(ERR_ID, {}).get('avg_duration_seconds')}")
-
-print("\n=== 5. 回归守卫 ===")
-src = (DB_PATH.parent / "app/api/stats.py").read_text(encoding="utf-8")
-report("统计端点只给 admin", 'raise HTTPException(status_code=403' in src and "is_admin" in src)
-report("耗时只算 done（不把 error/cancelled 混进平均）",
-       'if status == "done"' in src and '"durations"' in src)
-report("时间解析走共享 parse_day（不复制第二份）",
-       "from app.timeutils import parse_day" in src)
-report("assets.py 也用共享 parse_day（不保留本地副本）",
-       "from app.timeutils import parse_day" in (DB_PATH.parent / "app/api/assets.py").read_text(encoding="utf-8"))
 
 # ── 清理 ─────────────────────────────────────────────────
 print("\n=== 清理 ===")

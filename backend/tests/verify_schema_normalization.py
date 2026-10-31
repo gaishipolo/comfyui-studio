@@ -1,7 +1,9 @@
 """验证 input_schema 归一化：写入时补齐缺键，读出时也归一化（兼容存量脏数据）"""
 import json, sys, urllib.error, urllib.request, uuid
 
-BASE = "http://127.0.0.1:8000/api"
+from test_env import API_BASE_URL
+
+BASE = API_BASE_URL
 FIELD_KEYS = {"name", "label", "type", "required"}
 # 模板名称有唯一约束，必须用唯一值 —— 否则上次残留会导致本次 400
 UNIQUE = f"归一化验证-{uuid.uuid4().hex[:8]}"

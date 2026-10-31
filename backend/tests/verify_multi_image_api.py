@@ -4,7 +4,7 @@
 插件能力 → /api/plugins 响应 → 建模板 → input_schema 归一化白名单 → 读回。
 归一化是白名单实现，新属性漏加就会在这一步被静默丢掉，必须实测。
 
-需要后端在 127.0.0.1:8000 运行（跑新代码）。测试模板自建自删。
+需要 COMFYUI_STUDIO_TEST_BASE_URL 指向正在运行的隔离后端。测试模板自建自删。
 """
 import json
 import sys
@@ -12,7 +12,9 @@ import urllib.error
 import urllib.request
 import uuid
 
-BASE = "http://127.0.0.1:8000/api"
+from test_env import API_BASE_URL
+
+BASE = API_BASE_URL
 ok = True
 
 

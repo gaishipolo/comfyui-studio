@@ -5,7 +5,9 @@ tsc 只能保证前端内部类型一致，无法发现「后端返回的字段�
 """
 import json, sys, urllib.parse, urllib.request
 
-BASE = "http://127.0.0.1:8000/api"
+from test_env import API_BASE_URL
+
+BASE = API_BASE_URL
 
 # 逐字摘自 frontend/src/types/index.ts（optional 用 * 标注）
 TS = {

@@ -24,7 +24,9 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-BASE = "http://127.0.0.1:8000"
+from test_env import SERVICE_BASE_URL, SERVICE_HOST, SERVICE_PORT
+
+BASE = SERVICE_BASE_URL
 PYTHON = sys.executable
 BACKEND_DIR = str(Path(__file__).resolve().parents[1])  # .../backend
 
@@ -62,9 +64,9 @@ def run_cmd(cmd: str) -> str:
 
 
 def listen_pid() -> int | None:
-    """找出正在 8000 端口监听的进程号。"""
+    """找出测试服务端口的监听进程号。"""
     for line in run_cmd("netstat -ano").splitlines():
-        if ":8000" in line and "LISTENING" in line:
+        if f":{SERVICE_PORT}" in line and "LISTENING" in line:
             return int(line.split()[-1])
     return None
 
@@ -95,7 +97,10 @@ def start_backend(log_path: str) -> subprocess.Popen:
            if not k.startswith("CODEBUDDY_SAFE_DELETE") and k != "CODEBUDDY_TOOL_CALL_ID"}
     log = open(log_path, "w", encoding="utf-8")
     return subprocess.Popen(
-        [PYTHON, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000"],
+        [
+            PYTHON, "-m", "uvicorn", "app.main:app",
+            "--host", SERVICE_HOST, "--port", str(SERVICE_PORT),
+        ],
         cwd=BACKEND_DIR, env=env, stdout=log, stderr=subprocess.STDOUT,
     )
 

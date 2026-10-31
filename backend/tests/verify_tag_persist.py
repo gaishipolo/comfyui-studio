@@ -33,8 +33,9 @@ async def main():
         # 2. 读回
         r = await db.execute(select(Asset).where(Asset.id == aid))
         got = r.scalar_one()
+        ok_persist = got.tags == ["image", "smoke_标签"]
         print(f"2. 读回 tags = {got.tags!r}  类型={type(got.tags).__name__}")
-        print(f"   {clean('✅' if got.tags == ['image', 'smoke_标签'] else '❌')} 标签落库")
+        print(f"   {clean('✅' if ok_persist else '❌')} 标签落库")
 
         # 3. 原始 SQL 字符串
         r = await db.execute(select(cast(Asset.tags, String)).where(Asset.id == aid))
@@ -48,8 +49,9 @@ async def main():
             Asset.tags.cast(type_=Asset.file_name.type).ilike(pat, escape="\\")
         ))
         matched = r.scalars().all()
+        ok_match = bool(matched)
         print(f"4. 转义过滤 pattern={pat!r} -> {len(matched)} 条")
-        print(f"   {clean('✅' if matched else '❌')} 转义后中文+下划线标签命中")
+        print(f"   {clean('✅' if ok_match else '❌')} 转义后中文+下划线标签命中")
 
         # 5. 下划线转义是否真的生效（% 是单字符通配）
         pat2 = f'%"{_escape_like("smoke")}%"'   # 不带下划线的前缀
@@ -57,8 +59,9 @@ async def main():
             Asset.tags.cast(type_=Asset.file_name.type).ilike(pat2, escape="\\")
         ))
         n2 = len(r.scalars().all())
+        ok_escape = n2 == 0
         print(f"5. 反向检查 pattern={pat2!r} -> {n2} 条（应为 0，否则转义未生效）")
-        print(f"   {clean('✅' if n2 == 0 else '❌')} 转义生效")
+        print(f"   {clean('✅' if ok_escape else '❌')} 转义生效")
 
         # 6. 清理
         await db.delete(got)
@@ -70,8 +73,10 @@ async def main():
     # 7. 同时确认 async_session 用的 DB 文件
     from app.database import async_session, engine as app_engine
     url = str(app_engine.url)
+    ok_database = "workbench.db" in url
     print(f"\n7. app.database 引擎 URL = {url}")
-    print(f"   {clean('✅' if 'workbench.db' in url else '❌')} 指向同一 DB")
+    print(f"   {clean('✅' if ok_database else '❌')} 指向同一 DB")
+    return 0 if all((ok_persist, ok_match, ok_escape, ok_database)) else 1
 
 
-asyncio.run(main())
+sys.exit(asyncio.run(main()))

@@ -69,7 +69,8 @@ async def main():
             "LIKE lower(:p) ESCAPE '\\'"
         ), {"p": f"%{U}%酷女孩%"})
         n = r.scalar_one()
-        print(f"2. 中文 LIKE 命中 meta -> {n}  期望 1  {clean('✅' if n == 1 else '❌')}")
+        ok_meta = n == 1
+        print(f"2. 中文 LIKE 命中 meta -> {n}  期望 1  {clean('✅' if ok_meta else '❌')}")
 
         # 3. 中文 LIKE 命中 tags（对照：旧写法）
         r = await db.execute(text(
@@ -77,15 +78,17 @@ async def main():
             "LIKE lower(:p) ESCAPE '\\'"
         ), {"p": f'%"{U}_smoke_标签"%'})
         n = r.scalar_one()
-        print(f"3. 中文 LIKE 命中 tags -> {n}  期望 1  {clean('✅' if n == 1 else '❌')}")
+        ok_tags = n == 1
+        print(f"3. 中文 LIKE 命中 tags -> {n}  期望 1  {clean('✅' if ok_tags else '❌')}")
 
         # 4. ORM 读回为原生 Python 类型
         r = await db.execute(select(Row).where(Row.id == U))
         row = r.scalar_one()
         ok_type = isinstance(row.meta, dict) and isinstance(row.tags, list)
         ok_val = row.meta.get("prompt") == f"{U}酷女孩提示词"
+        ok_roundtrip = ok_type and ok_val
         print(f"4. ORM 读回 meta={row.meta!r} tags={row.tags!r}")
-        print(f"   {clean('✅' if (ok_type and ok_val) else '❌')} 类型与取值正确")
+        print(f"   {clean('✅' if ok_roundtrip else '❌')} 类型与取值正确")
 
         # 5. json_each 仍然可用
         r = await db.execute(text(
@@ -93,11 +96,13 @@ async def main():
             "SELECT 1 FROM json_each(a.tags) je WHERE je.value = :t)"
         ), {"t": f"{U}_smoke_标签"})
         n = r.scalar_one()
-        print(f"5. json_each 精确匹配 -> {n}  期望 1  {clean('✅' if n == 1 else '❌')}")
+        ok_json_each = n == 1
+        print(f"5. json_each 精确匹配 -> {n}  期望 1  {clean('✅' if ok_json_each else '❌')}")
 
     await engine.dispose()
     DB.unlink()
     print("\n结论: ensure_ascii=False + json_each 双管齐下")
+    return 0 if all((ok_ascii, ok_meta, ok_tags, ok_roundtrip, ok_json_each)) else 1
 
 
-asyncio.run(main())
+sys.exit(asyncio.run(main()))

@@ -1,13 +1,16 @@
 # -*- coding: utf-8 -*-
 """B5/B6/B11 验证 — generic_api 无 workflow、进度回写、created_by"""
 import json
+import sys
 import time
 import urllib.parse
 import urllib.request
 import urllib.error
 import uuid
 
-BASE = "http://127.0.0.1:8000"
+from test_env import SERVICE_BASE_URL
+
+BASE = SERVICE_BASE_URL
 
 
 def req(method, path, token=None, json_body=None):
@@ -98,3 +101,5 @@ else:
     print(f"      B6 任务仍在 {task.get('status')}，跳过清理")
 
 print(f"      测试模板 {B5_NAME!r} 留作残留，用 cleanup_test_rows.py 清理")
+
+sys.exit(0 if b5_ok and b11_ok and b6_ok else 1)

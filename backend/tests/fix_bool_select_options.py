@@ -18,7 +18,9 @@ import sys
 import urllib.error
 import urllib.request
 
-BASE = "http://127.0.0.1:8000/api"
+from test_env import API_BASE_URL
+
+BASE = API_BASE_URL
 APPLY = "--apply" in sys.argv
 
 BOOL_WORDS = {"true": True, "false": False}

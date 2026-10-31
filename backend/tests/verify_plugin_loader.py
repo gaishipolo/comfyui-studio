@@ -9,7 +9,7 @@
 - 越权：member 一律 403
 - examples/provider_template.py 进程内全链路：submit → get_status → download_output
 
-需要后端在 127.0.0.1:8000 运行（跑新代码）。
+需要 COMFYUI_STUDIO_TEST_BASE_URL 指向正在运行的隔离后端。
 测试数据全部自建（deltest- 前缀），跑完自清理。
 """
 import asyncio
@@ -27,7 +27,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-BASE = "http://127.0.0.1:8000/api"
+from test_env import API_BASE_URL  # noqa: E402
+
+BASE = API_BASE_URL
 BACKEND = Path(__file__).resolve().parents[1]
 DB_PATH = BACKEND / "workbench.db"
 ok_all = True

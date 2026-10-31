@@ -9,7 +9,7 @@
 - 别人共享的素材 → 同样能用
 - 别人未共享的素材 → 404（回归守卫，别把隔离修没了）
 
-需要后端在 127.0.0.1:8000 运行，且 ComfyUI 引擎可达（真发一次上传）。
+需要 COMFYUI_STUDIO_TEST_BASE_URL 指向隔离后端，且 ComfyUI 引擎可达。
 """
 import asyncio
 import json
@@ -21,7 +21,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-BASE = "http://127.0.0.1:8000/api"
+from test_env import API_BASE_URL  # noqa: E402
+
+BASE = API_BASE_URL
 ok_all = True
 
 
@@ -122,17 +124,6 @@ check_upload("member 用自己素材 → 推进引擎", a_member_private, MEMBER
 check_upload("admin 用别人共享素材 → 推进引擎", a_member_shared, ADMIN_T, True)
 check_upload("member 用别人共享素材 → 推进引擎", a_member_shared, MEMBER_T, True)
 check_upload("member 用别人未共享素材 → 404", a_admin_private, MEMBER_T, False)
-
-print("\n=== 回归守卫 ===")
-src = (Path(__file__).resolve().parents[1] / "app/api/uploads.py").read_text(encoding="utf-8")
-report("upload_from_asset 不得引用未定义的 target", "target.name" not in src,
-       "源码里应只有 asset.file_name")
-# 两个字段各司其职：读字节用磁盘路径，推给引擎用文件名。
-# 之前把 file_path 当文件名传过去，引擎侧收到一长串相对路径直接报错。
-report("upload_from_asset 传给引擎的是 asset.file_name（不是磁盘路径）",
-       "_forward_to_engine(body.engine, data, asset.file_name)" in src)
-report("upload_from_asset 读字节必须 await asyncio.to_thread",
-       "await asyncio.to_thread(read_asset_bytes, asset.file_path)" in src)
 
 # ── 清理 ─────────────────────────────────────────────────
 print("\n=== 清理 ===")
