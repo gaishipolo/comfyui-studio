@@ -27,9 +27,10 @@
 ### Task 1: Make Provider Retirement And Shutdown Reliable
 
 **Files:**
+- Modify: `backend/app/engines/base.py`
 - Modify: `backend/app/engines/factory.py`
 - Modify: `backend/app/main.py`
-- Modify: `backend/tests/verify_p0_fixes.py`
+- Create: `backend/tests/verify_provider_lifecycle.py`
 
 **Interfaces:**
 - Produces: `_close_provider(provider: GenerationProvider) -> Awaitable[None]`
@@ -49,7 +50,7 @@ returns and assert shutdown completes within the module's finite timeout.
 Run from `backend`:
 
 ```powershell
-& "C:\Users\PC\.workbuddy-ai\binaries\python\envs\default\Scripts\python.exe" tests\verify_p0_fixes.py
+& "C:\Users\PC\.workbuddy-ai\binaries\python\envs\default\Scripts\python.exe" tests\verify_provider_lifecycle.py
 ```
 
 Expected: the new strong-reference or timeout assertion fails against the
@@ -74,7 +75,7 @@ all H1 assertions pass and no un-retrieved task exception is printed.
 - [ ] **Step 5: Commit Task 1**
 
 ```powershell
-git add backend/app/engines/factory.py backend/app/main.py backend/tests/verify_p0_fixes.py
+git add backend/app/engines/base.py backend/app/engines/factory.py backend/app/main.py backend/tests/verify_provider_lifecycle.py
 git commit -m "fix: close retired providers reliably"
 ```
 
@@ -87,7 +88,7 @@ git commit -m "fix: close retired providers reliably"
 - Modify: `backend/app/api/health.py`
 - Modify: `backend/app/api/uploads.py`
 - Modify: `backend/app/services/task_service.py`
-- Modify: `backend/tests/verify_p0_fixes.py`
+- Create: `backend/tests/verify_error_boundary.py`
 - Modify: `backend/tests/verify_queue_and_auth.py`
 - Modify: `backend/tests/verify_filestore.py`
 - Modify: `backend/tests/verify_from_asset_upload.py`
@@ -144,7 +145,7 @@ Expected: both scripts exit 0 without an un-retrieved task warning.
 - [ ] **Step 5: Commit Task 2**
 
 ```powershell
-git add backend/app/safe_detail.py backend/app/api/health.py backend/app/api/uploads.py backend/app/services/task_service.py backend/tests/verify_p0_fixes.py backend/tests/verify_queue_and_auth.py backend/tests/verify_filestore.py backend/tests/verify_from_asset_upload.py
+git add backend/app/safe_detail.py backend/app/api/health.py backend/app/api/uploads.py backend/app/services/task_service.py backend/tests/verify_error_boundary.py backend/tests/verify_queue_and_auth.py backend/tests/verify_filestore.py backend/tests/verify_from_asset_upload.py
 git commit -m "fix: sanitize provider failures consistently"
 ```
 
@@ -156,7 +157,7 @@ git commit -m "fix: sanitize provider failures consistently"
 - Modify: `backend/app/api/assets.py`
 - Modify: `frontend/src/api/client.ts`
 - Modify: `frontend/src/components/AssetGallery.tsx`
-- Modify: `backend/tests/verify_p0_fixes.py`
+- Create: `backend/tests/verify_batch_archive.py`
 
 **Interfaces:**
 - Produces: `_build_batch_archive(assets: Sequence[Asset]) -> Path`
@@ -200,7 +201,7 @@ Expected: archive tests pass and TypeScript/Vite exits 0.
 - [ ] **Step 5: Commit Task 3**
 
 ```powershell
-git add backend/app/api/assets.py frontend/src/api/client.ts frontend/src/components/AssetGallery.tsx backend/tests/verify_p0_fixes.py
+git add backend/app/api/assets.py frontend/src/api/client.ts frontend/src/components/AssetGallery.tsx backend/tests/verify_batch_archive.py
 git commit -m "fix: stream batch downloads through temporary zip files"
 ```
 
@@ -333,6 +334,7 @@ git commit -m "fix: keep asset forwarding state consistent"
 - Modify: `backend/.env.example`
 - Modify: `README.md`
 - Modify: `docs/provider-dev-guide.md`
+- Modify: `backend/tests/verify_p0_fixes.py`
 - Modify: affected `backend/tests/verify_*.py` scripts
 - Modify: `docs/code-review-2026-10-30.md`
 
