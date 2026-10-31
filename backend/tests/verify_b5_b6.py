@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
 """B5/B6/B11 verification with real ComfyUI and deterministic cleanup."""
 
-import json
 import io
+import ipaddress
+import json
+import os
+import socket
 import sys
 import time
 import urllib.error
@@ -22,6 +25,15 @@ from test_env import SERVICE_BASE_URL
 
 BASE = SERVICE_BASE_URL
 TERMINAL_STATUSES = {"done", "error", "cancelled"}
+TEMPLATE_ID_ENV = "COMFYUI_STUDIO_B5_B6_TEMPLATE_ID"
+GENERIC_URL_ENV = "COMFYUI_STUDIO_TEST_GENERIC_BASE_URL"
+EXPECTED_WORKFLOW_FILE = "image_flux2_klein_text_to_image.json"
+EXPECTED_PARAM_MAPPING = {
+    "prompt": "76.inputs.value",
+    "width": "103.inputs.value",
+    "height": "106.inputs.value",
+}
+EXPECTED_OUTPUT_NODES = ["108"]
 
 
 def req(method, path, token=None, json_body=None):
@@ -68,6 +80,84 @@ def req_bytes(method, path, token=None):
         )
 
 
+def required_environment() -> tuple[str, str]:
+    template_id = os.environ.get(TEMPLATE_ID_ENV, "").strip()
+    generic_url = os.environ.get(GENERIC_URL_ENV, "").strip().rstrip("/")
+    backend_generic_url = os.environ.get("GENERIC_API_BASE_URL", "").strip().rstrip("/")
+    if not template_id:
+        raise ValueError(f"必须显式设置 {TEMPLATE_ID_ENV}")
+    if not generic_url:
+        raise ValueError(f"必须显式设置 {GENERIC_URL_ENV}")
+    if backend_generic_url != generic_url:
+        raise ValueError(
+            f"GENERIC_API_BASE_URL 必须与 {GENERIC_URL_ENV} 完全一致，"
+            "并传给同一个隔离后端进程"
+        )
+    return template_id, generic_url
+
+
+def require_unreachable_loopback_origin(value: str) -> None:
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError(f"测试 generic endpoint 非法: {value!r}") from exc
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+    ):
+        raise ValueError(f"测试 generic endpoint 必须是纯 HTTP(S) origin: {value!r}")
+
+    hostname = parsed.hostname.lower()
+    try:
+        addresses = [ipaddress.ip_address(hostname)]
+    except ValueError:
+        if hostname != "localhost":
+            raise ValueError(
+                f"拒绝非 loopback generic endpoint，避免误提交到真实服务: {value!r}"
+            )
+        try:
+            addresses = [
+                ipaddress.ip_address(sockaddr[0])
+                for _family, _type, _proto, _canonname, sockaddr in socket.getaddrinfo(
+                    hostname,
+                    port or (443 if parsed.scheme == "https" else 80),
+                    type=socket.SOCK_STREAM,
+                )
+            ]
+        except OSError as exc:
+            raise ValueError(f"无法解析 loopback generic endpoint: {value!r}") from exc
+    if not addresses or not all(address.is_loopback for address in addresses):
+        raise ValueError(
+            f"拒绝非 loopback generic endpoint，避免误提交到真实服务: {value!r}"
+        )
+
+    target_port = port or (443 if parsed.scheme == "https" else 80)
+    try:
+        with socket.create_connection((hostname, target_port), timeout=0.5):
+            pass
+    except OSError:
+        return
+    raise ValueError(
+        f"测试 generic endpoint 当前可连接，无法证明 B5 不会触达服务: {value!r}"
+    )
+
+
+def returned_task_ids(payload) -> list[str]:
+    if not isinstance(payload, list):
+        return []
+    return [
+        item["id"]
+        for item in payload
+        if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"]
+    ]
+
+
 def main() -> int:
     ok = True
 
@@ -75,6 +165,13 @@ def main() -> int:
         nonlocal ok
         ok &= bool(condition)
         print(f"{'OK  ' if condition else 'FAIL'} {label}" + (f" {detail}" if detail else ""))
+
+    try:
+        expected_template_id, generic_url = required_environment()
+        require_unreachable_loopback_origin(generic_url)
+    except ValueError as exc:
+        print(f"安全检查失败: {exc}")
+        return 1
 
     code, login = req(
         "POST",
@@ -90,6 +187,52 @@ def main() -> int:
     created_task_ids: list[str] = []
     generated_assets: dict[str, list[dict]] = {}
     try:
+        code, engines = req("GET", "/api/engines", token=token)
+        generic = next(
+            (
+                item
+                for item in engines
+                if isinstance(item, dict) and item.get("name") == "generic_api"
+            ),
+            None,
+        ) if code == 200 and isinstance(engines, list) else None
+        generic_disconnected = (
+            generic is not None and generic.get("status") == "disconnected"
+        )
+        check(
+            "B5 generic_api 已认证确认 disconnected",
+            generic_disconnected,
+            f"HTTP {code} {generic}",
+        )
+
+        code, templates = req(
+            "GET", "/api/templates?include_inactive=true", token=token
+        )
+        exact_matches = [
+            item
+            for item in templates
+            if isinstance(item, dict) and item.get("id") == expected_template_id
+        ] if code == 200 and isinstance(templates, list) else []
+        check(
+            "B6 按显式 ID 找到唯一模板",
+            len(exact_matches) == 1,
+            f"HTTP {code} id={expected_template_id!r} matches={len(exact_matches)}",
+        )
+        flux = exact_matches[0] if len(exact_matches) == 1 else None
+        fixture_checks = {
+            "engine=comfyui": bool(flux) and flux.get("engine") == "comfyui",
+            f"workflow={EXPECTED_WORKFLOW_FILE}": bool(flux)
+            and flux.get("workflow_file") == EXPECTED_WORKFLOW_FILE,
+            "exact parameter mappings": bool(flux)
+            and flux.get("param_mapping") == EXPECTED_PARAM_MAPPING,
+            "output node 108": bool(flux)
+            and (flux.get("output_config") or {}).get("nodes") == EXPECTED_OUTPUT_NODES,
+        }
+        for label, condition in fixture_checks.items():
+            check(f"B6 fixture {label}", condition)
+        if not generic_disconnected or flux is None or not all(fixture_checks.values()):
+            return 1
+
         b5_name = f"验证用-B5-generic-{uuid.uuid4().hex[:8]}"
         code, template = req(
             "POST",
@@ -116,6 +259,12 @@ def main() -> int:
             return 1
         b5_template_id = template["id"]
 
+        try:
+            require_unreachable_loopback_origin(generic_url)
+        except ValueError as exc:
+            check("B5 提交前 generic endpoint 仍不可达", False, str(exc))
+            return 1
+
         code, tasks = req(
             "POST",
             "/api/tasks",
@@ -126,11 +275,23 @@ def main() -> int:
                 "batch_count": 1,
             },
         )
-        check("B5 提交任务", code in {200, 201} and isinstance(tasks, list), f"HTTP {code}")
-        if code not in {200, 201} or not isinstance(tasks, list):
+        b5_task_ids = returned_task_ids(tasks)
+        created_task_ids.extend(b5_task_ids)
+        b5_response_ok = (
+            code in {200, 201}
+            and isinstance(tasks, list)
+            and len(tasks) == 1
+            and len(b5_task_ids) == 1
+        )
+        check(
+            "B5 提交任务且只返回 1 个任务",
+            b5_response_ok,
+            f"HTTP {code} returned={len(tasks) if isinstance(tasks, list) else 'non-list'} "
+            f"owned_ids={b5_task_ids}",
+        )
+        if not b5_response_ok:
             return 1
-        b5_task_id = tasks[0]["id"]
-        created_task_ids.append(b5_task_id)
+        b5_task_id = b5_task_ids[0]
         time.sleep(4)
         code, task = req("GET", f"/api/tasks/{b5_task_id}", token=token)
         error = task.get("error_msg", "") if isinstance(task, dict) else ""
@@ -145,15 +306,6 @@ def main() -> int:
             b5_ok,
             f"status={task.get('status')} err={error[:80]!r}",
         )
-
-        code, templates = req("GET", "/api/templates", token=token)
-        flux = next(
-            (item for item in templates if "Flux2" in item.get("name", "")),
-            None,
-        ) if code == 200 and isinstance(templates, list) else None
-        check("存在 Flux2 模板", flux is not None)
-        if flux is None:
-            return 1
 
         prompt_uuid = str(uuid.uuid4())
         code, tasks = req(
@@ -170,11 +322,23 @@ def main() -> int:
                 "batch_count": 1,
             },
         )
-        check("B6 提交真实 ComfyUI 任务", code in {200, 201} and isinstance(tasks, list))
-        if code not in {200, 201} or not isinstance(tasks, list):
+        b6_task_ids = returned_task_ids(tasks)
+        created_task_ids.extend(b6_task_ids)
+        b6_response_ok = (
+            code in {200, 201}
+            and isinstance(tasks, list)
+            and len(tasks) == 1
+            and len(b6_task_ids) == 1
+        )
+        check(
+            "B6 提交真实 ComfyUI 任务且只返回 1 个任务",
+            b6_response_ok,
+            f"HTTP {code} returned={len(tasks) if isinstance(tasks, list) else 'non-list'} "
+            f"owned_ids={b6_task_ids}",
+        )
+        if not b6_response_ok:
             return 1
-        b6_task_id = tasks[0]["id"]
-        created_task_ids.append(b6_task_id)
+        b6_task_id = b6_task_ids[0]
         created_by = tasks[0].get("created_by", "")
         check("B11 提交任务写入 created_by", bool(created_by), repr(created_by))
 
