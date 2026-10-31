@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse
 from app.config import settings
 from app.database import init_db, async_session
 from app.api import templates, tasks, health, assets, auth_api, uploads, stats, plugins
+from app.request_limits import ProtectedBodyLimitMiddleware
 
 
 async def create_default_admin():
@@ -79,6 +80,11 @@ app = FastAPI(
     version=settings.APP_VERSION,
     lifespan=lifespan,
 )
+
+# Keep this inside CORS so admission errors receive the same CORS headers as
+# ordinary API responses. Targeted requests are bounded before FastAPI parses
+# multipart or JSON bodies.
+app.add_middleware(ProtectedBodyLimitMiddleware)
 
 # CORS — 允许前端开发服务器访问（生产环境通过 CORS_ORIGINS 收紧）
 app.add_middleware(
