@@ -14,6 +14,7 @@
 
 用法：python tests/verify_multi_image.py
 """
+import atexit
 import asyncio
 import base64
 import importlib.util
@@ -25,10 +26,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.engines.base import FieldSpec  # noqa: E402
-from app.filestore import save_asset_file  # noqa: E402
+from app.filestore import delete_asset_file, save_asset_file  # noqa: E402
 
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
 ok_all = True
+created_keys: list[str] = []
 
 # 1x1 红色 PNG
 TINY_PNG = base64.b64decode(
@@ -40,6 +42,18 @@ def report(label, cond, detail=""):
     global ok_all
     ok_all &= bool(cond)
     print(f"  [{'OK' if cond else 'FAIL'}] {label}" + (f"  {detail}" if detail else ""))
+
+
+def cleanup_created_keys() -> bool:
+    cleaned = True
+    while created_keys:
+        key = created_keys.pop()
+        removed, reason = delete_asset_file(key)
+        cleaned &= removed or reason == "文件本就不存在"
+    return cleaned
+
+
+atexit.register(cleanup_created_keys)
 
 
 def load_provider(filename: str):
@@ -100,7 +114,9 @@ h3 = providers["grsai_minimax_h3"]
 key_a = f"verify-multi/{uuid.uuid4().hex}.png"
 key_b = f"verify-multi/{uuid.uuid4().hex}.png"
 save_asset_file(key_a, TINY_PNG, "image/png")
+created_keys.append(key_a)
 save_asset_file(key_b, TINY_PNG, "image/png")
+created_keys.append(key_b)
 mark_a, mark_b = f"wbinput:{key_a}", f"wbinput:{key_b}"
 
 report("单值 → 1 项", len(h3._resolve_images(mark_a)) == 1)
@@ -171,10 +187,14 @@ print("\n[6] upload_input → _resolve_images 闭环")
 for name in ("agnes", "grsai", "grsai_gpt_image", "grsai_minimax_h3"):
     p = providers[name]
     marker = asyncio.run(p.upload_input(TINY_PNG, "tiny.png"))
+    if marker.startswith("wbinput:"):
+        created_keys.append(marker.removeprefix("wbinput:"))
     report(f"{name} 返回 wbinput: 标记", marker.startswith("wbinput:"), marker[:28])
     resolved = p._resolve_images([marker])
     report(f"{name} 标记可还原成 1 张图", len(resolved) == 1 and len(resolved[0]) > 20)
 
+report("本地输入夹具已清理", cleanup_created_keys())
+atexit.unregister(cleanup_created_keys)
 print()
 print("全部通过" if ok_all else "存在失败项")
 sys.exit(0 if ok_all else 1)

@@ -2,12 +2,21 @@
 """B5/B6/B11 verification with real ComfyUI and deterministic cleanup."""
 
 import json
+import io
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
+from pathlib import Path
 
+from PIL import Image
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from app.filestore import asset_exists
+from app.thumbs import thumb_key
 from test_env import SERVICE_BASE_URL
 
 
@@ -39,6 +48,26 @@ def req(method, path, token=None, json_body=None):
             return exc.code, {}
 
 
+def req_bytes(method, path, token=None):
+    headers = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(BASE + path, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return (
+                response.status,
+                response.read(),
+                {key.lower(): value for key, value in response.headers.items()},
+            )
+    except urllib.error.HTTPError as exc:
+        return (
+            exc.code,
+            exc.read(),
+            {key.lower(): value for key, value in exc.headers.items()},
+        )
+
+
 def main() -> int:
     ok = True
 
@@ -59,6 +88,7 @@ def main() -> int:
 
     b5_template_id = None
     created_task_ids: list[str] = []
+    generated_assets: dict[str, list[dict]] = {}
     try:
         b5_name = f"验证用-B5-generic-{uuid.uuid4().hex[:8]}"
         code, template = req(
@@ -125,6 +155,7 @@ def main() -> int:
         if flux is None:
             return 1
 
+        prompt_uuid = str(uuid.uuid4())
         code, tasks = req(
             "POST",
             "/api/tasks",
@@ -132,7 +163,7 @@ def main() -> int:
             json_body={
                 "template_id": flux["id"],
                 "params": {
-                    "prompt": "a cool girl, test progress",
+                    "prompt": f"Task 7 isolated regression image {prompt_uuid}",
                     "width": 768,
                     "height": 768,
                 },
@@ -150,7 +181,7 @@ def main() -> int:
         progress_seen = set()
         status_seen = set()
         task = {}
-        for _ in range(45):
+        for _ in range(90):
             code, task = req("GET", f"/api/tasks/{b6_task_id}", token=token)
             if code != 200 or not isinstance(task, dict):
                 break
@@ -163,11 +194,17 @@ def main() -> int:
         final_status = task.get("status")
         reached_terminal = final_status in TERMINAL_STATUSES
         middle_progress = {value for value in progress_seen if value is not None and 0 < value < 100}
-        progress_ok = reached_terminal and (bool(middle_progress) or final_status == "done")
+        progress_ok = final_status == "done" and (bool(middle_progress) or 100 in progress_seen)
         printable_statuses = sorted(value for value in status_seen if value is not None)
         printable_progress = sorted(value for value in progress_seen if value is not None)
         print(f"      状态轨迹: {printable_statuses}  进度轨迹: {printable_progress}")
         check("B6 轮询在时限内到达终态", reached_terminal, f"status={final_status}")
+        check("B6 真实任务必须完成为 done", final_status == "done", f"status={final_status}")
+        check(
+            "B6 UUID 提示词持久化",
+            prompt_uuid in str((task.get("params") or {}).get("prompt", "")),
+            prompt_uuid,
+        )
         check("B6 进度回写", progress_ok, f"中途进度={sorted(middle_progress) or '无'}")
 
         code, assets = (
@@ -179,6 +216,68 @@ def main() -> int:
             f"      任务最终状态: {final_status} "
             f"素材数: {len(assets) if code == 200 and isinstance(assets, list) else 0}"
         )
+        check(
+            "B6 done 任务至少产生 1 个素材",
+            code == 200 and isinstance(assets, list) and len(assets) >= 1,
+            f"HTTP {code}",
+        )
+        if code == 200 and isinstance(assets, list) and assets:
+            generated_assets[b6_task_id] = assets
+            asset = assets[0]
+            encoded_name = urllib.parse.quote(asset["file_name"])
+            media_path = f"/api/tasks/{b6_task_id}/assets/{encoded_name}"
+            source_code, source_bytes, source_headers = req_bytes(
+                "GET", media_path, token=token
+            )
+            source_size = (0, 0)
+            source_format = ""
+            try:
+                with Image.open(io.BytesIO(source_bytes)) as source_image:
+                    source_size = source_image.size
+                    source_format = source_image.format or ""
+            except Exception:
+                pass
+            check(
+                "B6 原图鉴权下载成功",
+                source_code == 200
+                and bool(source_bytes)
+                and source_headers.get("content-type", "").startswith("image/")
+                and bool(source_format),
+                f"HTTP {source_code} format={source_format} size={source_size} bytes={len(source_bytes)}",
+            )
+
+            thumb_code, thumb_bytes, thumb_headers = req_bytes(
+                "GET", media_path + "/thumb", token=token
+            )
+            thumb_size = (0, 0)
+            thumb_format = ""
+            try:
+                with Image.open(io.BytesIO(thumb_bytes)) as thumb_image:
+                    thumb_size = thumb_image.size
+                    thumb_format = thumb_image.format or ""
+            except Exception:
+                pass
+            persistent_key = thumb_key(b6_task_id, asset["file_name"])
+            smaller_when_meaningful = (
+                max(source_size or (0, 0)) <= 400 or len(thumb_bytes) < len(source_bytes)
+            )
+            check(
+                "B6 持久 JPEG 缩略图不超过 400 边长且合理变小",
+                thumb_code == 200
+                and thumb_format == "JPEG"
+                and thumb_headers.get("content-type", "").startswith("image/jpeg")
+                and max(thumb_size or (0, 0)) <= 400
+                and smaller_when_meaningful
+                and asset_exists(persistent_key),
+                (
+                    f"HTTP {thumb_code} size={thumb_size} bytes={len(thumb_bytes)} "
+                    f"source_bytes={len(source_bytes)} key={persistent_key}"
+                ),
+            )
+            print(
+                f"      真实生成 ID: task={b6_task_id} "
+                f"provider={task.get('provider_task_id', '')} prompt_uuid={prompt_uuid}"
+            )
     finally:
         for task_id in reversed(created_task_ids):
             code, task = req("GET", f"/api/tasks/{task_id}", token=token)
@@ -186,12 +285,35 @@ def main() -> int:
             if status not in TERMINAL_STATUSES:
                 cancel_code, _ = req("POST", f"/api/tasks/{task_id}/cancel", token=token)
                 check(f"取消未终态任务 {task_id[:8]}", cancel_code == 200, f"HTTP {cancel_code}")
-            delete_code, body = req("DELETE", f"/api/tasks/{task_id}", token=token)
+            delete_code, body = 409, {}
+            for _ in range(20):
+                delete_code, body = req("DELETE", f"/api/tasks/{task_id}", token=token)
+                if delete_code != 409:
+                    break
+                time.sleep(0.25)
             check(
                 f"清理任务 {task_id[:8]}",
                 delete_code in {200, 404},
                 f"HTTP {delete_code} {body}",
             )
+            after_code, _ = req("GET", f"/api/tasks/{task_id}", token=token)
+            check(f"任务 API 已清理 {task_id[:8]}", after_code == 404, f"HTTP {after_code}")
+            for asset in generated_assets.get(task_id, []):
+                encoded_name = urllib.parse.quote(asset["file_name"])
+                media_path = f"/api/tasks/{task_id}/assets/{encoded_name}"
+                source_code, _source_body, _ = req_bytes("GET", media_path, token=token)
+                thumb_code, _thumb_body, _ = req_bytes("GET", media_path + "/thumb", token=token)
+                check(
+                    f"素材 API 已清理 {asset['file_name']}",
+                    source_code == 404 and thumb_code == 404,
+                    f"source={source_code} thumb={thumb_code}",
+                )
+                check(
+                    f"素材文件已清理 {asset['file_name']}",
+                    not asset_exists(asset["file_path"])
+                    and not asset_exists(thumb_key(task_id, asset["file_name"])),
+                    asset["file_path"],
+                )
         if b5_template_id:
             code, body = req("DELETE", f"/api/templates/{b5_template_id}", token=token)
             check("清理 B5 模板", code in {200, 404}, f"HTTP {code} {body}")

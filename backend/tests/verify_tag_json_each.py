@@ -6,6 +6,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+from app.database import Base
 from app.models.models import Asset
 
 
@@ -17,6 +18,8 @@ async def main():
     print("=== json_each 标签过滤验证 ===")
     DB = Path(__file__).resolve().parents[1] / "workbench.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{DB}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
     Session = async_sessionmaker(engine, expire_on_commit=False)
 
     # 用唯一前缀避免与库里历史数据撞车

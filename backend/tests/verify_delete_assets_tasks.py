@@ -172,7 +172,12 @@ report("删不存在的任务 404", st == 404, f"status={st}")
 
 t5, a5 = asyncio.run(seed(ADMIN_ID, 1, status="running"))
 st, body = req(f"/tasks/{t5}", "DELETE", token=ADMIN_T)
-report("运行中任务拒删 400", st == 400, f"status={st} {body.get('detail')}")
+report(
+    "运行中任务拒删 409",
+    st == 409
+    and body.get("detail") == "Task runner is still finishing; delete again shortly",
+    f"status={st} {body.get('detail')}",
+)
 report("运行中任务记录仍在", asyncio.run(asset_count(t5)) == 1)
 report("运行中任务文件仍在", a5[0][1].exists())
 

@@ -254,7 +254,13 @@ async def restore_plugins(db: AsyncSession) -> list[dict]:
             continue
         row = by_name.get(name)
         if row is None:
-            row = EnginePlugin(name=name, label=item["label"], filename=item["file"], uploaded_by="")
+            row = EnginePlugin(
+                name=name,
+                label=item["label"],
+                filename=item["file"],
+                enabled=True,
+                uploaded_by="",
+            )
             db.add(row)
         if not row.enabled:
             unregister_provider(name)  # 账上是停用状态 → 摘掉

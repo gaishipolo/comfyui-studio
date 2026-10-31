@@ -1289,7 +1289,43 @@ async function testAbortOnSourceChange(browser) {
   }
 }
 
+async function testLoginTransitionDoesNotCrash(browser) {
+  const context = await browser.newContext()
+  const page = await context.newPage()
+  const errors = []
+  page.on('console', (message) => {
+    if (message.type() === 'error') errors.push(message.text())
+  })
+  page.on('pageerror', (error) => errors.push(error.message))
+
+  await page.route('**/api/**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    if (path === '/api/auth/login') {
+      return json(route, { access_token: 'login-transition-token', token_type: 'bearer', user: USER })
+    }
+    if (path === '/api/templates') return json(route, [])
+    if (path === '/api/health') return json(route, { status: 'ok', comfyui: 'connected' })
+    if (path === '/api/engines') return json(route, [])
+    if (path === '/api/tasks' && request.method() === 'GET') return json(route, [])
+    return json(route, { detail: `Unhandled intercepted API: ${path}` }, 500)
+  })
+
+  try {
+    await page.goto(BASE_URL)
+    await page.getByLabel('请输入用户名').fill('owner')
+    await page.getByLabel('请输入密码').fill('pw123456')
+    await page.getByRole('button', { name: '登 录' }).click()
+    await page.getByRole('button', { name: '素材库', exact: true }).waitFor()
+    assert.equal(await page.evaluate(() => localStorage.getItem('token')), 'login-transition-token')
+    assert.deepEqual(errors, [], `login transition errors: ${errors.join('\n')}`)
+  } finally {
+    await context.close()
+  }
+}
+
 const tests = [
+  ['login transition keeps hook order stable', testLoginTransitionDoesNotCrash],
   ['single replacement is atomic', testSingleReplacementIsAtomic],
   ['multiple uploads stay aligned', testMultipleUploadsStayAligned],
   ['pending uploads block submission', testPendingUploadsBlockSubmission],

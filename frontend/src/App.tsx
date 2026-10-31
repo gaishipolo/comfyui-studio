@@ -3,7 +3,7 @@
  *
  * 所有功能 Tab 由 modules/ 注册表驱动，新增模块无需改本文件。
  */
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import type { EngineInfo, GenerateDraft, Task, Template, User } from './types'
 import {
   getTemplates, getHealth, getEngines, listTasks,
@@ -133,7 +133,7 @@ export default function App() {
   // 只看「有启用模板在用」的引擎：
   //  · generic_api 没配 base_url 时本来就是 disconnected，拿它报警等于天天误报
   //  · unknown（插件没实现 health_check）不算离线，那是「不知道」
-  const engineIssues = useMemo(() => {
+  const engineIssues = (() => {
     if (!engines) return null
     const status = new Map(engines.map((e) => [e.name, e.status]))
     const used = new Set(templates.filter((t) => t.is_active).map((t) => t.engine))
@@ -145,7 +145,7 @@ export default function App() {
       else if (s === 'disconnected' || s === 'error') offline.push(name)
     }
     return { missing, offline }
-  }, [engines, templates])
+  })()
 
   return (
     <div className="flex min-h-screen flex-col bg-paper text-ink">
