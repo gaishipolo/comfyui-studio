@@ -1,20 +1,17 @@
-"""视频缩略图：抽一帧存 JPEG
-
-为什么：素材库卡片和任务列表里，视频原来是把**整个 mp4** 拉下来当封面（`<video>` 首帧），
-一个 2MB 视频就是 2MB 流量，一屏十几个卡片直接卡住。缩略图几十 KB，够用。
-
-ffmpeg 从哪来（按顺序找，找到就用，找不到整个功能静默跳过，绝不影响生成主流程）：
-  1. 环境变量 FFMPEG_PATH（自己指定）
-  2. PATH 里的 ffmpeg
-  3. imageio-ffmpeg 自带的二进制（requirements.txt 里已列，pip 装完就有）
-
-失败一律返回 None —— 缩略图是锦上添花，不能让「存素材」这一步挂掉。
-"""
+"""Image/video thumbnail conversion and derived-file helpers."""
+import io
+import logging
 import os
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+
+from PIL import Image, ImageOps
+
+from app.filestore import delete_asset_file
+
+logger = logging.getLogger(__name__)
 
 # None = 还没找过；False = 找过了没有
 _FFMPEG: str | bool | None = None
@@ -84,3 +81,77 @@ def thumb_key(task_id: str, file_name: str) -> str:
     请求 404 → 前端退回原逻辑，不需要迁移，也不会多出素材记录。
     """
     return f"{task_id}/thumb_{file_name}.jpg"
+
+
+def make_image_thumb(data: bytes, max_edge: int = 400) -> bytes | None:
+    """Convert image bytes to an EXIF-aware, white-backed optimized JPEG."""
+    if not data or max_edge <= 0:
+        return None
+
+    try:
+        with io.BytesIO(data) as source_stream:
+            with Image.open(source_stream) as source:
+                source.load()
+                oriented = ImageOps.exif_transpose(source)
+                try:
+                    has_alpha = (
+                        "A" in oriented.getbands()
+                        or "transparency" in oriented.info
+                    )
+                    if has_alpha:
+                        with oriented.convert("RGBA") as rgba:
+                            rgb = Image.new("RGB", rgba.size, (255, 255, 255))
+                            with rgba.getchannel("A") as alpha:
+                                rgb.paste(rgba, mask=alpha)
+                    else:
+                        rgb = oriented.convert("RGB")
+
+                    try:
+                        rgb.thumbnail(
+                            (max_edge, max_edge),
+                            Image.Resampling.LANCZOS,
+                        )
+                        with io.BytesIO() as output:
+                            rgb.save(
+                                output,
+                                format="JPEG",
+                                quality=85,
+                                optimize=True,
+                            )
+                            return output.getvalue()
+                    finally:
+                        rgb.close()
+                finally:
+                    if oriented is not source:
+                        oriented.close()
+    except Exception:  # noqa: BLE001 - thumbnail failure must not fail media requests
+        return None
+
+
+def cleanup_asset_files(
+    file_path: str,
+    task_id: str,
+    file_name: str,
+) -> tuple[tuple[bool, str], tuple[bool, str]]:
+    """Best-effort cleanup for an asset source and its derived thumbnail."""
+
+    def remove(key: str, kind: str) -> tuple[bool, str]:
+        try:
+            return delete_asset_file(key)
+        except (Exception, SystemExit) as exc:  # noqa: BLE001 - DB deletion stays primary
+            reason = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+            logger.warning("%s cleanup failed key=%s reason=%s", kind, key, reason)
+            return False, reason
+
+    source_result = remove(file_path, "Source file")
+    derived_key = thumb_key(task_id, file_name)
+    derived_result = remove(derived_key, "Thumbnail")
+    if not derived_result[0] and derived_result[1] == "文件本就不存在":
+        derived_result = False, ""
+    elif derived_result[1]:
+        logger.warning(
+            "Thumbnail cleanup failed key=%s reason=%s",
+            derived_key,
+            derived_result[1],
+        )
+    return source_result, derived_result
