@@ -1,4 +1,3 @@
-// One-time runner dependency: npm install --no-save --package-lock=false playwright@1.64.1
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -898,6 +897,47 @@ async function testRemoteAudioAndVideoPreviewAfterForward(browser) {
   }
 }
 
+async function testDirectLocalVideoRendersPreview(browser) {
+  const state = await openForm(browser, {
+    fields: [
+      {
+        name: 'video',
+        label: 'Local video',
+        type: 'file_upload',
+        accept: 'video',
+        required: false,
+      },
+    ],
+    apiHandler: async ({ route, url }) => {
+      if (url.pathname !== '/api/upload/file') return false
+      await json(route, { filename: 'engine-local.mp4' })
+      return true
+    },
+  })
+
+  try {
+    await state.page.locator('#upload-video').setInputFiles(
+      mediaFile('local-preview.mp4', 'video/mp4'),
+    )
+    await waitUntil(
+      state.page,
+      () =>
+        state.page.evaluate(() =>
+          window.__renderedMedia.some(
+            (entry) =>
+              entry.tag === 'video' &&
+              entry.label === 'local-preview.mp4' &&
+              entry.controls,
+          ),
+        ),
+      'direct local video preview was not rendered',
+    )
+    await state.page.getByText('local-preview.mp4', { exact: true }).waitFor()
+  } finally {
+    await closeChecked(state)
+  }
+}
+
 async function testFailedAssetReplacementKeepsOldState(browser) {
   const forwardStarted = deferred()
   const releaseForward = deferred()
@@ -1336,6 +1376,7 @@ const tests = [
   ['prefilled image list stays aligned', testPrefilledImageListAlignment],
   ['prefilled audio list stays aligned', testPrefilledAudioListAlignment],
   ['remote audio and video preview after forwarding', testRemoteAudioAndVideoPreviewAfterForward],
+  ['direct local video renders a controlled preview', testDirectLocalVideoRendersPreview],
   ['failed asset replacement keeps old state', testFailedAssetReplacementKeepsOldState],
   ['accepted asset keeps value when preview fails', testAcceptedAssetUsesThumbWithoutRollingBackValue],
   ['authenticated media status matrix', testMediaStatuses],

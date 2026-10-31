@@ -480,6 +480,13 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
                         className="h-8 max-w-64"
                         aria-label={item.name}
                       />
+                    ) : kind === 'video' && item.objectUrl ? (
+                      <video
+                        src={item.objectUrl}
+                        controls
+                        className="max-h-40 max-w-full"
+                        aria-label={item.name}
+                      />
                     ) : null}
                     <span className="min-w-0 flex-1 truncate text-sm text-ink">
                       {item.name || `${unit} ${i + 1}`}

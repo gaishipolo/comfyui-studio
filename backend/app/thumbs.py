@@ -2,7 +2,6 @@
 import asyncio
 import io
 import logging
-import os
 import shutil
 import subprocess
 import tempfile
@@ -14,6 +13,7 @@ from typing import TypeVar
 
 from PIL import Image, ImageOps
 
+from app.config import settings
 from app.filestore import delete_asset_file
 
 logger = logging.getLogger(__name__)
@@ -37,7 +37,7 @@ def ffmpeg_exe() -> str | None:
     if _FFMPEG is not None:
         return _FFMPEG or None
 
-    exe = (os.environ.get("FFMPEG_PATH") or "").strip() or None
+    exe = settings.FFMPEG_PATH.strip() or None
     if not exe:
         exe = shutil.which("ffmpeg")
     if not exe:

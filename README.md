@@ -111,7 +111,7 @@ npm run build                  # 产物在 frontend/dist
 | `MAX_CONCURRENT_TASKS` | 全局生成并发上限 | `2` |
 | `TASK_TIMEOUT_SECONDS` | 单任务最长等待（超时取消） | `1800` |
 | `CORS_ORIGINS` | 允许的跨域来源，生产收紧为前端域名 | `*` |
-| `FFMPEG_PATH` | 非 `Settings` 运行时覆盖；指定 ffmpeg 可执行文件 | 空（自动查找） |
+| `FFMPEG_PATH` | `Settings` 字段；指定 ffmpeg 可执行文件 | 空（自动查找） |
 
 ## 开发 Provider 插件
 
@@ -149,6 +149,16 @@ npm run build                  # 产物在 frontend/dist
 ```powershell
 $env:COMFYUI_STUDIO_TEST_BASE_URL = "http://127.0.0.1:8765"
 .\.venv\Scripts\python.exe tests\verify_p0_fixes.py
+```
+
+前端从 `frontend/` 运行永久测试脚本；`test:state` 通过 `tsx` 在 Node 20+
+执行 TypeScript 状态测试，不依赖实验性的类型剥离参数，`test:ui` 会先构建再用
+项目声明的 Playwright 和系统 Edge 运行拦截式浏览器套件：
+
+```powershell
+npm ci
+npm run test:state
+npm run test:ui
 ```
 
 服务脚本固定用 `admin` / `admin123`。只可对全新、可丢弃的数据库设置 `ADMIN_INITIAL_PASSWORD=admin123`；已有管理员时该变量不会重置密码。服务回归会创建、修改和删除数据库行、插件文件、工作流及素材，禁止指向用户正在使用的服务。

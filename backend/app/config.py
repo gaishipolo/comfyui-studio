@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     STORAGE_BACKEND: str = "local"
     STORAGE_DIR: Path = Path("./storage").resolve()
     WORKFLOW_DIR: Path = Path("./workflows").resolve()
+    FFMPEG_PATH: str = ""
     # 前端构建产物目录；存在则由后端直接托管，实现单进程部署（免 nginx）
     FRONTEND_DIST: Path = Path("../frontend/dist").resolve()
 
