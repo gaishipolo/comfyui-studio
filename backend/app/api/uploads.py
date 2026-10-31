@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.engines.factory import get_provider
-from app.filestore import read_asset_bytes
+from app.filestore import open_asset, read_asset_bytes
 from app.models.models import Asset, User
 from app.auth import get_current_user
 from app.safe_detail import safe_detail
@@ -134,8 +134,8 @@ async def upload_from_asset(
     所以「从素材库选择」选完仍要把字节送进引擎输入目录。返回值与 /file 同构，
     表单拿到文件名后走完全相同的参数注入链路，无需区分来源。
 
-    不再按上传大小限制卡一遍 —— 库里的文件本就是生成产物/历史上传，
-    当初入库时已经过一次校验。
+    数据库大小只作为快速拦截提示；转发前还会以 FileStore 当前大小和实际
+    读取字节数为准，避免陈旧元数据绕过上传限制。
     """
     asset = await db.get(Asset, body.asset_id)
     if asset is None:
@@ -152,11 +152,43 @@ async def upload_from_asset(
             detail=f"该素材类型暂不支持作为参考输入：{asset.mime_type or asset.file_name}",
         )
 
+    # 按文件种类套和上传一致的大小上限：素材可能是历史上传/批量导入进来的，
+    # 当初入库的限额未必和现在一致（比如老库里混进了超 20M 的图片），
+    # 转发到引擎前再卡一道，避免把引擎撑爆 —— 且在读盘之前判，
+    # 不为「注定要拒」的大文件把几百 MB 读进内存。
+    kind = (asset.mime_type or "").split("/")[0]
+    rules = FILE_KINDS.get(kind)
+    if rules and asset.file_size and asset.file_size > rules["max"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{rules['label']}超过 {rules['max'] // MB}MB 限制（{asset.file_name}）",
+        )
+
+    # 数据库 file_size 可能为 0 或已经过时。先向当前存储后端查询权威大小，
+    # 且在整文件读取前关闭这个只用于元数据的句柄。
+    handle = await asyncio.to_thread(open_asset, asset.file_path)
+    if handle is None:
+        raise HTTPException(status_code=404, detail="素材文件找不到了")
+    try:
+        stored_size = handle.size
+    finally:
+        handle.close()
+    if rules and stored_size > rules["max"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{rules['label']}超过 {rules['max'] // MB}MB 限制（{asset.file_name}）",
+        )
+
     # 越界防护复用 filestore 的唯一实现，不复制第二份；
     # to_thread：素材可能是几百 MB 的视频，同步读盘会冻结事件循环
     data = await asyncio.to_thread(read_asset_bytes, asset.file_path)
     if data is None:
         raise HTTPException(status_code=404, detail="素材文件找不到了")
+    if rules and len(data) > rules["max"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{rules['label']}超过 {rules['max'] // MB}MB 限制（{asset.file_name}）",
+        )
 
     server_name = await _forward_to_engine(body.engine, data, asset.file_name)
     return {"filename": server_name, "engine": body.engine}

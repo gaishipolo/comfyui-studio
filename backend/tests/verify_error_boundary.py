@@ -21,6 +21,7 @@ import app.api.uploads as uploads_api
 import app.services.task_service as ts
 from app.config import settings
 from app.engines.base import GenerationProvider, GenerationResult, TaskStatus
+from app.filestore import ObjectHandle
 from app.models.models import Base, Task, Template
 from app.safe_detail import safe_detail
 from app.schemas.schemas import AssetUploadRequest
@@ -526,7 +527,8 @@ async def main():
         async def fake_forward(engine_name, data, filename):
             return "engine-input.png"
 
-        with patch.object(uploads_api, "read_asset_bytes", blocking_asset_read), \
+        with patch.object(uploads_api, "open_asset", lambda _path: ObjectHandle(size=16)), \
+                patch.object(uploads_api, "read_asset_bytes", blocking_asset_read), \
                 patch.object(uploads_api, "task_owner_map", fake_owner_map), \
                 patch.object(uploads_api, "_forward_to_engine", fake_forward):
             await run_blocking_gate(

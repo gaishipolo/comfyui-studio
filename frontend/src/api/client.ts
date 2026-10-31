@@ -157,7 +157,7 @@ export const getWorkflowInventory = (filename: string) =>
 /** 下载模板导出文件（配置 + 内嵌工作流）。
  *  走 fetch 而不是 <a href>：导出接口要 JWT，直链发不出 Authorization 头 */
 export async function exportTemplate(templateId: string, templateName: string): Promise<void> {
-  const blob = await fetchAssetBlob(`${BASE}/templates/${templateId}/export`)
+  const blob = await fetchAssetBlob(`${BASE}/templates/${templateId}/export`, { silent: false })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
@@ -327,23 +327,73 @@ export const getAssetThumbUrl = (taskId: string, fileName: string) =>
 //
 // 入参约定：必须是 getAssetUrl() 的返回值（已含 BASE，形如 /api/tasks/{id}/assets/{f}）。
 // 这里**只做 fetch，不再拼 BASE** —— 否则会拼出 /api/api/tasks/... 直接 404。
-export async function fetchAssetBlob(path: string): Promise<Blob> {
+export class AssetFetchError extends Error {
+  readonly status: number
+
+  constructor(status: number, message: string) {
+    super(message)
+    this.name = 'AssetFetchError'
+    this.status = status
+  }
+}
+
+export interface AssetFetchOptions {
+  silent?: boolean
+  signal?: AbortSignal
+}
+
+export function fetchAssetBlob(path: string): Promise<Blob>
+export function fetchAssetBlob(
+  path: string,
+  options: { silent?: false; signal?: AbortSignal },
+): Promise<Blob>
+export function fetchAssetBlob(
+  path: string,
+  options: { silent: true; signal?: AbortSignal },
+): Promise<Blob | null>
+export function fetchAssetBlob(path: string, options: AssetFetchOptions): Promise<Blob | null>
+/** silent=true preserves the legacy nullable call shape; 401 and abort still propagate. */
+export async function fetchAssetBlob(
+  path: string,
+  options?: AssetFetchOptions,
+): Promise<Blob | null> {
   const token = getToken()
-  const resp = await fetch(path, {
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-  })
+  let resp: Response
+  try {
+    resp = await fetch(path, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      signal: options?.signal,
+    })
+  } catch (error) {
+    if (options?.signal?.aborted || (error instanceof DOMException && error.name === 'AbortError')) {
+      throw error
+    }
+    const fetchError = new AssetFetchError(0, '资源加载失败（网络错误）')
+    if (options?.silent) return null
+    throw fetchError
+  }
   if (resp.status === 401) {
     clearToken()
     window.location.reload()
-    throw new Error('登录已过期，请重新登录')
+    throw new AssetFetchError(401, '登录已过期，请重新登录')
   }
-  if (!resp.ok) throw new Error(`资源加载失败 (${resp.status})`)
+  if (!resp.ok) {
+    let message = `资源加载失败 (${resp.status})`
+    try {
+      const body = await resp.json()
+      if (typeof body?.detail === 'string') message = body.detail
+    } catch {
+      // 非 JSON 响应，保留默认信息
+    }
+    if (options?.silent) return null
+    throw new AssetFetchError(resp.status, message)
+  }
   return resp.blob()
 }
 
 /** 带鉴权打开素材（新标签），用于替代 <a href> 直链 */
 export async function openAssetInNewTab(path: string): Promise<void> {
-  const blob = await fetchAssetBlob(path)
+  const blob = await fetchAssetBlob(path, { silent: false })
   const url = URL.createObjectURL(blob)
   window.open(url, '_blank', 'noopener')
   // 稍后回收，给新标签页留出加载时间
@@ -352,7 +402,7 @@ export async function openAssetInNewTab(path: string): Promise<void> {
 
 /** 带鉴权下载素材（替代 <a href download> 直链，直链拿不到 Authorization 头） */
 export async function downloadAsset(path: string, fileName: string): Promise<void> {
-  const blob = await fetchAssetBlob(path)
+  const blob = await fetchAssetBlob(path, { silent: false })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
