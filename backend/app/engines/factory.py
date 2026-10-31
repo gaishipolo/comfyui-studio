@@ -18,22 +18,24 @@ _providers: dict[str, GenerationProvider] = {}
 _engine_configs: dict[str, dict] = {}
 _CLOSE_TIMEOUT_SECONDS = 10.0
 _retire_tasks: set[asyncio.Task[None]] = set()
+_pending_retirements: dict[int, GenerationProvider] = {}
 
 log = logging.getLogger(__name__)
 
 
 async def _close_provider(provider: GenerationProvider) -> None:
     """Close one Provider without allowing cleanup failure to escape."""
+    provider_name = provider.name or type(provider).__name__
     try:
         await asyncio.wait_for(provider.close(), timeout=_CLOSE_TIMEOUT_SECONDS)
     except TimeoutError:
         log.warning(
             "Provider %s close timed out after %.1f seconds",
-            type(provider).__name__,
+            provider_name,
             _CLOSE_TIMEOUT_SECONDS,
         )
     except Exception:  # noqa: BLE001 -- cleanup failure must not undo registry changes
-        log.exception("Provider %s close failed", type(provider).__name__)
+        log.exception("Provider %s close failed", provider_name)
 
 
 def _retire(provider: GenerationProvider) -> None:
@@ -41,8 +43,8 @@ def _retire(provider: GenerationProvider) -> None:
 
     工厂刻意保持同步（见模块注释），而 close() 是 async —— 用 create_task
     挂到当前事件循环里异步关。调用点全在 async 端点/启动流程里，必有
-    运行中的循环；万一在同步上下文调（离线测试），退化为直接丢弃，
-    进程退出时自然回收。关闭失败不影响注册/注销主流程。
+    运行中的循环；在同步上下文调用时先保留实例，统一由 shutdown 清理。
+    关闭失败不影响注册/注销主流程。
 
     不关的后果：ComfyUI 的 ProgressTracker 是无限重连循环，每次插件
     升级/停用/删除/改配置都会泄漏一条 WS 协程 + 一个连接池，累积无上限。
@@ -50,7 +52,9 @@ def _retire(provider: GenerationProvider) -> None:
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
+        _pending_retirements[id(provider)] = provider
         return
+    _pending_retirements.pop(id(provider), None)
     task = loop.create_task(_close_provider(provider))
     _retire_tasks.add(task)
     task.add_done_callback(_retire_tasks.discard)
@@ -128,9 +132,12 @@ async def close_all_providers() -> None:
     """进程退出前的统一清理（lifespan 关闭段调用）。
 
     活着的实例和已经退役但还没关完的实例并发清理。"""
-    providers = list(_providers.values())
+    providers_by_id = {id(provider): provider for provider in _providers.values()}
+    providers_by_id.update(_pending_retirements)
+    providers = list(providers_by_id.values())
     retire_tasks = list(_retire_tasks)
     _providers.clear()
+    _pending_retirements.clear()
     await asyncio.gather(
         *(_close_provider(provider) for provider in providers),
         *retire_tasks,

@@ -2,9 +2,12 @@
 """Focused in-process checks for Provider retirement and shutdown."""
 
 import asyncio
+import gc
 import sys
 import unittest
+import weakref
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -62,6 +65,53 @@ class _RecordingProvider(_ProviderStub):
         self.closed.set()
 
 
+class _SyncRetirementProvider(_ProviderStub):
+    name = "lifecycle_sync_retirement"
+    close_calls = 0
+
+    async def close(self) -> None:
+        type(self).close_calls += 1
+
+
+class _RaisingProvider(_ProviderStub):
+    name = "lifecycle_close_raises"
+
+    async def close(self) -> None:
+        raise RuntimeError("close exploded")
+
+
+class _AsyncSessionStub:
+    async def __aenter__(self):
+        return object()
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+
+class ProviderLifecycleSyncTests(unittest.TestCase):
+    def test_sync_retirement_is_retained_until_later_shutdown(self):
+        engine_name = _SyncRetirementProvider.name
+        _SyncRetirementProvider.close_calls = 0
+        factory.register_provider(engine_name, _SyncRetirementProvider)
+        provider = factory.get_provider(engine_name)
+        provider_ref = weakref.ref(provider)
+
+        try:
+            factory.set_engine_config(engine_name, {"version": 2})
+            del provider
+            gc.collect()
+            retained = provider_ref() is not None
+
+            asyncio.run(factory.close_all_providers())
+
+            self.assertTrue(retained)
+            self.assertEqual(1, _SyncRetirementProvider.close_calls)
+            self.assertFalse(factory._pending_retirements)
+        finally:
+            factory.unregister_provider(engine_name)
+            asyncio.run(factory.close_all_providers())
+
+
 class ProviderLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_close_all_times_out_a_provider_that_never_closes(self):
         engine_name = "lifecycle_never_closes"
@@ -108,6 +158,63 @@ class ProviderLifecycleTests(unittest.IsolatedAsyncioTestCase):
             if not provider.closed.is_set():
                 await factory.close_all_providers()
             factory.unregister_provider(engine_name)
+
+    async def test_lifespan_closes_providers_when_runtime_fails(self):
+        from app import main as app_main
+        from app.api import plugins
+        from app.services.task_service import TaskService
+
+        engine_name = "lifecycle_runtime_failure"
+        factory.register_provider(engine_name, _RecordingProvider)
+        provider = factory.get_provider(engine_name)
+
+        class RuntimeFailure(RuntimeError):
+            pass
+
+        async def no_startup_work() -> None:
+            return None
+
+        async def no_plugins(_db) -> list[dict]:
+            return []
+
+        async def no_stale_tasks() -> dict:
+            return {"resumed": [], "failed": []}
+
+        try:
+            with (
+                patch.object(app_main, "init_db", no_startup_work),
+                patch.object(app_main, "create_default_admin", no_startup_work),
+                patch.object(app_main, "async_session", lambda: _AsyncSessionStub()),
+                patch.object(plugins, "restore_plugins", no_plugins),
+                patch.object(TaskService, "reap_stale_tasks", staticmethod(no_stale_tasks)),
+            ):
+                with self.assertRaises(RuntimeFailure):
+                    async with app_main.lifespan(app_main.app):
+                        raise RuntimeFailure("expected runtime failure")
+            self.assertTrue(provider.closed.is_set())
+        finally:
+            if not provider.closed.is_set():
+                await factory.close_all_providers()
+            factory.unregister_provider(engine_name)
+
+    async def test_close_failure_keeps_registry_change_and_logs_engine_name(self):
+        engine_name = _RaisingProvider.name
+        factory.register_provider(engine_name, _RaisingProvider)
+        factory.get_provider(engine_name)
+
+        try:
+            with self.assertLogs(factory.__name__, level="ERROR") as captured:
+                factory.unregister_provider(engine_name)
+                await factory.close_all_providers()
+
+            self.assertNotIn(engine_name, factory.list_engines())
+            self.assertNotIn(engine_name, factory._providers)
+            log_output = "\n".join(captured.output)
+            self.assertIn(engine_name, log_output)
+            self.assertIn("close exploded", log_output)
+        finally:
+            factory.unregister_provider(engine_name)
+            await factory.close_all_providers()
 
     async def test_retirement_is_tracked_until_close_finishes_and_joined_on_shutdown(self):
         engine_name = "lifecycle_retirement"
