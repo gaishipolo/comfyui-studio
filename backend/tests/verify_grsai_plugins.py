@@ -14,6 +14,7 @@ Grsai 服务端（同一套 /v1/api/generate + /v1/api/result?id=），把三个
 
 用法：python tests/verify_grsai_plugins.py
 """
+import atexit
 import asyncio
 import base64
 import importlib.util
@@ -27,9 +28,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.engines.base import TaskStatus  # noqa: E402
+from app.filestore import asset_exists, delete_asset_file  # noqa: E402
 
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
 ok_all = True
+created_keys: list[str] = []
 
 TINY_PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
@@ -40,6 +43,18 @@ def report(label, cond, detail=""):
     global ok_all
     ok_all &= bool(cond)
     print(f"  [{'OK' if cond else 'FAIL'}] {label}" + (f"  {detail}" if detail else ""))
+
+
+def cleanup_created_keys() -> bool:
+    cleaned = True
+    while created_keys:
+        key = created_keys.pop()
+        removed, reason = delete_asset_file(key)
+        cleaned &= removed or reason == "文件本就不存在"
+    return cleaned
+
+
+atexit.register(cleanup_created_keys)
 
 
 # ── 假 Grsai 服务端 ────────────────────────────────────
@@ -228,10 +243,17 @@ report("字符串 \"false\" 不能变成开启", pl.get("promptSkill") is False,
 
 print("\n[4] 参考图短标记 → data URI")
 marker = run(h3.upload_input(TINY_PNG, "tiny.png"))
+marker_key = marker.removeprefix("wbinput:")
+created_keys.append(marker_key)
 pl = h3.build_payload("image_to_video", {"prompt": "x", "image": [marker], "duration": 5})
 img = (pl.get("images") or [""])[0]
 report("wbinput 标记还原成 data URI", img.startswith("data:image/png;base64,"), img[:32])
 report("data URI 能解回原图", base64.b64decode(img.split(",", 1)[1]) == TINY_PNG)
+report(
+    "短标记输入夹具已清理",
+    cleanup_created_keys() and not asset_exists(marker_key),
+)
+atexit.unregister(cleanup_created_keys)
 
 srv.shutdown()
 print()
