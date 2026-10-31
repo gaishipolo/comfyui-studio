@@ -10,12 +10,14 @@ import weakref
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import TypeVar
 
 from PIL import Image, ImageOps
 
 from app.filestore import delete_asset_file
 
 logger = logging.getLogger(__name__)
+_T = TypeVar("_T")
 
 _thumbnail_lifecycle_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
     weakref.WeakValueDictionary()
@@ -111,6 +113,28 @@ async def thumbnail_lifecycle(keys: Iterable[str]) -> AsyncIterator[None]:
     finally:
         for lock in reversed(acquired):
             lock.release()
+
+
+async def wait_for_task_completion(task: asyncio.Task[_T]) -> _T:
+    """Delay caller cancellation until a shielded lifecycle task settles."""
+    cancellation: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+        except Exception:
+            break
+
+    try:
+        result = task.result()
+    except BaseException:
+        if cancellation is not None:
+            raise cancellation
+        raise
+    if cancellation is not None:
+        raise cancellation
+    return result
 
 
 def make_image_thumb(data: bytes, max_edge: int = 400) -> bytes | None:

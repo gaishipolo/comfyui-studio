@@ -169,6 +169,27 @@ class BlockingThumbnailSaveStore(TrackingLocalFileStore):
         super().save(file_path, data, content_type)
 
 
+class BlockingCleanupStore(TrackingLocalFileStore):
+    def __init__(self, source_key: str, derived_key: str) -> None:
+        super().__init__()
+        self.source_key = source_key
+        self.derived_key = derived_key
+        self.cleanup_started = threading.Event()
+        self.cleanup_finished = threading.Event()
+        self.release_cleanup = threading.Event()
+
+    def delete(self, file_path: str) -> tuple[bool, str]:
+        key = self._key(file_path)
+        if key == self.source_key:
+            self.cleanup_started.set()
+            if not self.release_cleanup.wait(timeout=5):
+                raise AssertionError("asset cleanup was never released")
+        result = super().delete(file_path)
+        if key == self.derived_key:
+            self.cleanup_finished.set()
+        return result
+
+
 class StaleMissLocalFileStore(TrackingLocalFileStore):
     def __init__(self, derived_key: str) -> None:
         super().__init__()
@@ -466,6 +487,11 @@ async def completed_while_generation_blocked(task: asyncio.Task) -> bool:
     return True
 
 
+async def contend_for_lifecycle(key: str, acquired: asyncio.Event) -> None:
+    async with thumbs.thumbnail_lifecycle([key]):
+        acquired.set()
+
+
 def thumbnail_task_registries() -> list[dict]:
     return [
         value
@@ -750,6 +776,59 @@ async def test_etag_cache_headers_and_revalidation() -> None:
         assert revalidated.headers["cache-control"] == "private, no-cache"
 
 
+async def test_missing_image_matching_etag_skips_filestore() -> None:
+    source_key = "task-etag-missing/source.png"
+    derived_key = "task-etag-missing/thumb_source.png.jpg"
+    asset = make_asset(
+        "asset-etag-missing",
+        "task-etag-missing",
+        "source.png",
+        "image/png",
+    )
+    with temporary_local_store() as raw_store:
+        store = raw_store
+        assert isinstance(store, TrackingLocalFileStore)
+        seed_local(store, source_key, patterned_png((500, 250)))
+
+        response = await call_thumb(
+            asset,
+            headers={"If-None-Match": '"asset-etag-missing"'},
+        )
+
+        assert response.status_code == 304, response.status_code
+        assert await response_bytes(response) == b""
+        assert store.open_calls == [], store.open_calls
+        assert store.read_calls == [], store.read_calls
+        assert store.save_calls == [], store.save_calls
+        assert not store.exists(derived_key)
+
+
+async def test_existing_video_matching_etag_returns_304() -> None:
+    source_key = "task-video-etag/source.mp4"
+    derived_key = "task-video-etag/thumb_source.mp4.jpg"
+    asset = make_asset(
+        "asset-video-etag",
+        "task-video-etag",
+        "source.mp4",
+        "video/mp4",
+    )
+    with temporary_local_store() as raw_store:
+        store = raw_store
+        assert isinstance(store, TrackingLocalFileStore)
+        seed_local(store, source_key, b"video source must not be read")
+        seed_local(store, derived_key, b"existing thumbnail")
+
+        response = await call_thumb(
+            asset,
+            headers={"If-None-Match": '"asset-video-etag"'},
+        )
+
+        assert response.status_code == 304, response.status_code
+        assert await response_bytes(response) == b""
+        assert source_key not in store.read_calls, store.read_calls
+        assert derived_key in store.closed, store.closed
+
+
 class FakeObjectResponse:
     def __init__(self, payload: bytes, closed: list[str]) -> None:
         self.stream = io.BytesIO(payload)
@@ -859,6 +938,48 @@ async def test_asset_delete_cannot_race_thumbnail_save() -> None:
         assert not store.exists(derived_key), "thumbnail reappeared after asset deletion"
 
 
+async def test_cancelled_asset_delete_finishes_mutation_before_propagating() -> None:
+    asset = make_asset("asset-delete-cancel", "task-delete-cancel", "source.png", "image/png")
+    source_key = asset.file_path
+    derived_key = "task-delete-cancel/thumb_source.png.jpg"
+    db = AssetDeleteDB(asset)
+    store = BlockingCleanupStore(source_key, derived_key)
+    with temporary_local_store(store):
+        seed_local(store, source_key, b"source")
+        seed_local(store, derived_key, b"thumbnail")
+        deletion = asyncio.create_task(
+            assets_api.delete_asset(asset.id, user=ADMIN, db=db)
+        )
+        await wait_for_thread_event(store.cleanup_started)
+
+        deletion.cancel()
+        await asyncio.sleep(0)
+        cancellation_waited = not deletion.done()
+        lifecycle_acquired = asyncio.Event()
+        contender = asyncio.create_task(
+            contend_for_lifecycle(derived_key, lifecycle_acquired)
+        )
+        await asyncio.sleep(0)
+        lock_retained = not lifecycle_acquired.is_set()
+
+        store.release_cleanup.set()
+        await wait_for_thread_event(store.cleanup_finished)
+        try:
+            await deletion
+        except asyncio.CancelledError:
+            cancellation_propagated = True
+        else:
+            cancellation_propagated = False
+        await contender
+
+        assert cancellation_waited, "asset delete propagated cancellation before cleanup"
+        assert lock_retained, "asset delete released lifecycle ownership during cleanup"
+        assert cancellation_propagated
+        assert db.deleted == [asset] and db.commits == 1
+        assert not store.exists(source_key)
+        assert not store.exists(derived_key)
+
+
 async def test_task_delete_removes_sources_and_thumbnails() -> None:
     task = make_task("task-delete")
     asset = make_asset("asset-task-delete", task.id, "source.png", "image/png")
@@ -901,6 +1022,47 @@ async def test_task_delete_cannot_race_thumbnail_save() -> None:
         assert not completed_early, "task deletion committed before generation settled"
         assert not store.exists(source_key)
         assert not store.exists(derived_key), "thumbnail reappeared after task deletion"
+
+
+async def test_cancelled_task_delete_finishes_mutation_before_propagating() -> None:
+    task = make_task("task-delete-cancel")
+    asset = make_asset("asset-task-delete-cancel", task.id, "source.png", "image/png")
+    source_key = asset.file_path
+    derived_key = "task-delete-cancel/thumb_source.png.jpg"
+    db = TaskMutationDB(task, [asset])
+    store = BlockingCleanupStore(source_key, derived_key)
+    with temporary_local_store(store):
+        seed_local(store, source_key, b"source")
+        seed_local(store, derived_key, b"thumbnail")
+        deletion = asyncio.create_task(tasks_api.delete_task(task.id, user=ADMIN, db=db))
+        await wait_for_thread_event(store.cleanup_started)
+
+        deletion.cancel()
+        await asyncio.sleep(0)
+        cancellation_waited = not deletion.done()
+        lifecycle_acquired = asyncio.Event()
+        contender = asyncio.create_task(
+            contend_for_lifecycle(derived_key, lifecycle_acquired)
+        )
+        await asyncio.sleep(0)
+        lock_retained = not lifecycle_acquired.is_set()
+
+        store.release_cleanup.set()
+        await wait_for_thread_event(store.cleanup_finished)
+        try:
+            await deletion
+        except asyncio.CancelledError:
+            cancellation_propagated = True
+        else:
+            cancellation_propagated = False
+        await contender
+
+        assert cancellation_waited, "task delete propagated cancellation before cleanup"
+        assert lock_retained, "task delete released lifecycle ownership during cleanup"
+        assert cancellation_propagated
+        assert db.deleted == [asset, task] and db.commits == 1
+        assert not store.exists(source_key)
+        assert not store.exists(derived_key)
 
 
 async def test_retry_removes_sources_and_thumbnails() -> None:
@@ -958,6 +1120,76 @@ async def test_retry_cannot_race_thumbnail_save() -> None:
         assert not store.exists(source_key)
         assert not store.exists(derived_key), "thumbnail reappeared after retry cleanup"
         assert spawned == [task.id]
+
+
+async def test_cancelled_retry_finishes_and_spawns_before_propagating() -> None:
+    task = make_task("task-retry-cancel", status="error")
+    asset = make_asset("asset-retry-cancel", task.id, "source.png", "image/png")
+    source_key = asset.file_path
+    derived_key = "task-retry-cancel/thumb_source.png.jpg"
+    db = TaskMutationDB(task, [asset])
+    store = BlockingCleanupStore(source_key, derived_key)
+    spawned: list[str] = []
+    spawn_started = asyncio.Event()
+    release_spawn = asyncio.Event()
+
+    async def spawn(task_id: str) -> bool:
+        spawned.append(task_id)
+        spawn_started.set()
+        await release_spawn.wait()
+        return True
+
+    with temporary_local_store(store), patched(tasks_api, spawn_task=spawn):
+        seed_local(store, source_key, b"source")
+        seed_local(store, derived_key, b"thumbnail")
+        retry = asyncio.create_task(tasks_api.retry_task(task.id, user=ADMIN, db=db))
+        await wait_for_thread_event(store.cleanup_started)
+
+        retry.cancel()
+        await asyncio.sleep(0)
+        cancellation_waited = not retry.done()
+        lifecycle_acquired = asyncio.Event()
+        contender = asyncio.create_task(
+            contend_for_lifecycle(derived_key, lifecycle_acquired)
+        )
+        await asyncio.sleep(0)
+        lock_retained_during_cleanup = not lifecycle_acquired.is_set()
+
+        store.release_cleanup.set()
+        await wait_for_thread_event(store.cleanup_finished)
+        spawn_waiter = asyncio.create_task(spawn_started.wait())
+        done, _pending = await asyncio.wait(
+            {spawn_waiter, retry},
+            timeout=2,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        spawn_reached = spawn_started.is_set()
+        lock_retained_through_spawn = not lifecycle_acquired.is_set()
+        release_spawn.set()
+        if spawn_waiter not in done:
+            spawn_waiter.cancel()
+            try:
+                await spawn_waiter
+            except asyncio.CancelledError:
+                pass
+        try:
+            await retry
+        except asyncio.CancelledError:
+            cancellation_propagated = True
+        else:
+            cancellation_propagated = False
+        await contender
+
+        assert cancellation_waited, "retry propagated cancellation before cleanup"
+        assert lock_retained_during_cleanup, "retry released lifecycle lock during cleanup"
+        assert spawn_reached, "retry was left pending without spawning"
+        assert lock_retained_through_spawn, "retry released lifecycle lock before spawn"
+        assert cancellation_propagated
+        assert db.deleted == [asset] and db.commits == 1 and db.refreshes == 1
+        assert task.status == "pending"
+        assert spawned == [task.id]
+        assert not store.exists(source_key)
+        assert not store.exists(derived_key)
 
 
 class LogCapture(logging.Handler):
@@ -1035,13 +1267,18 @@ TESTS = [
     ("missing video thumbnail does not read source", test_video_without_thumbnail_never_reads_source),
     ("audio never generates a thumbnail", test_audio_never_generates_thumbnail),
     ("ETag, no-cache, and 304 revalidation work", test_etag_cache_headers_and_revalidation),
+    ("missing image revalidation skips all FileStore work", test_missing_image_matching_etag_skips_filestore),
+    ("existing video revalidation returns 304", test_existing_video_matching_etag_returns_304),
     ("object-backed thumbnail streams and closes its handle", test_object_thumbnail_streams_and_closes_handle),
     ("asset deletion removes source and thumbnail", test_asset_delete_removes_source_and_thumbnail),
     ("asset deletion cannot race thumbnail persistence", test_asset_delete_cannot_race_thumbnail_save),
+    ("cancelled asset deletion finishes before propagating", test_cancelled_asset_delete_finishes_mutation_before_propagating),
     ("task deletion removes sources and thumbnails", test_task_delete_removes_sources_and_thumbnails),
     ("task deletion cannot race thumbnail persistence", test_task_delete_cannot_race_thumbnail_save),
+    ("cancelled task deletion finishes before propagating", test_cancelled_task_delete_finishes_mutation_before_propagating),
     ("task retry removes sources and thumbnails", test_retry_removes_sources_and_thumbnails),
     ("task retry cannot race thumbnail persistence", test_retry_cannot_race_thumbnail_save),
+    ("cancelled retry finishes and spawns before propagating", test_cancelled_retry_finishes_and_spawns_before_propagating),
     ("cleanup failures are reported without restoring DB records", test_cleanup_failures_do_not_restore_database_records),
 ]
 

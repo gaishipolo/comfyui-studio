@@ -17,7 +17,12 @@ from app.models.models import Asset, Task, Template, User
 from app.schemas.schemas import AssetResponse, AssetShareRequest
 from app.auth import get_current_user
 from app.filestore import open_asset
-from app.thumbs import cleanup_asset_files, thumb_key, thumbnail_lifecycle
+from app.thumbs import (
+    cleanup_asset_files,
+    thumb_key,
+    thumbnail_lifecycle,
+    wait_for_task_completion,
+)
 from app.timeutils import parse_day as _parse_day
 from app.access import (
     can_modify_asset,
@@ -385,18 +390,26 @@ async def delete_asset(
         )
 
     derived_key = thumb_key(asset.task_id, asset.file_name)
-    async with thumbnail_lifecycle([derived_key]):
-        # 记录是主体，文件清理是附带 —— 文件删不掉也要把记录删掉，如实上报原因
-        (file_removed, file_error), (thumbnail_removed, thumbnail_error) = (
-            await asyncio.to_thread(
+
+    async def delete_operation() -> tuple[tuple[bool, str], tuple[bool, str]]:
+        async with thumbnail_lifecycle([derived_key]):
+            # 记录是主体，文件清理是附带 —— 文件删不掉也要把记录删掉，如实上报原因
+            cleanup_result = await asyncio.to_thread(
                 cleanup_asset_files,
                 asset.file_path,
                 asset.task_id,
                 asset.file_name,
             )
-        )
-        await db.delete(asset)
-        await db.commit()
+            await db.delete(asset)
+            await db.commit()
+            return cleanup_result
+
+    operation = asyncio.create_task(
+        delete_operation(),
+        name=f"delete-asset:{asset.id}",
+    )
+    cleanup_result = await wait_for_task_completion(operation)
+    (file_removed, file_error), (thumbnail_removed, thumbnail_error) = cleanup_result
 
     return {
         "message": "Asset deleted",
