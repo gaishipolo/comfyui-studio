@@ -4,6 +4,7 @@ import uuid
 import asyncio
 import json
 import time
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 from sqlalchemy import select
@@ -17,7 +18,13 @@ from app.config import settings
 from app.filestore import save_asset_file
 from app.media import guess_mime
 from app.safe_detail import safe_detail
-from app.thumbs import make_video_thumb, thumb_key
+from app.thumbs import (
+    cleanup_asset_files,
+    make_video_thumb,
+    task_lifecycle_key,
+    thumb_key,
+    thumbnail_lifecycle,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +57,7 @@ _running_tasks: set[str] = set()
 # 结果一次批量提交 N 个就同时打引擎 N 个 prompt、开 N 个轮询协程。
 # ComfyUI 本来就串行执行，闸门放在我们这边能让排队可预测。
 _run_slots = asyncio.Semaphore(max(1, int(settings.MAX_CONCURRENT_TASKS)))
+_TERMINAL_STATUSES = {"done", "error", "cancelled"}
 
 
 async def _run_and_cleanup(task_id: str, resume: bool = False):
@@ -84,6 +92,49 @@ async def spawn_task(task_id: str, resume: bool = False) -> bool:
 class TaskService:
 
     @staticmethod
+    async def _reload_task(db: AsyncSession, task_id: str) -> Task | None:
+        """Reload task state without flushing staged output records."""
+        no_autoflush = getattr(db, "no_autoflush", nullcontext())
+        with no_autoflush:
+            task = await db.get(Task, task_id)
+            if task is not None:
+                await db.refresh(task)
+        return task
+
+    @staticmethod
+    async def _discard_staged_assets(
+        db: AsyncSession,
+        staged_assets: list[Asset],
+    ) -> None:
+        """Roll back uncommitted Asset rows and best-effort staged files."""
+        try:
+            await db.rollback()
+        finally:
+            for asset in staged_assets:
+                await asyncio.to_thread(
+                    cleanup_asset_files,
+                    asset.file_path,
+                    asset.task_id,
+                    asset.file_name,
+                )
+
+    @staticmethod
+    async def _commit_error(
+        db: AsyncSession,
+        task_id: str,
+        detail: str,
+    ) -> None:
+        """Persist an error only if no serialized terminal transition won."""
+        async with thumbnail_lifecycle([task_lifecycle_key(task_id)]):
+            task = await TaskService._reload_task(db, task_id)
+            if task is None or task.status in _TERMINAL_STATUSES:
+                return
+            task.status = "error"
+            task.error_msg = detail
+            task.finished_at = datetime.utcnow()
+            await db.commit()
+
+    @staticmethod
     async def create_task(
         db: AsyncSession,
         template_id: str,
@@ -113,18 +164,24 @@ class TaskService:
         顺序要紧：先登记 _cancel_requested 让执行协程尽快看到，再落库，
         最后通知引擎撤掉/中断 prompt。
         """
-        task = await db.get(Task, task_id)
-        if not task:
-            raise LookupError(f"Task not found: {task_id}")
-        if task.status in ("done", "error", "cancelled"):
-            raise ValueError(f"任务已处于终态（{task.status}），无法取消")
+        async with thumbnail_lifecycle([task_lifecycle_key(task_id)]):
+            task = await TaskService._reload_task(db, task_id)
+            if not task:
+                raise LookupError(f"Task not found: {task_id}")
+            if task.status in _TERMINAL_STATUSES:
+                raise ValueError(f"任务已处于终态（{task.status}），无法取消")
 
-        _cancel_requested.add(task_id)
-        task.status = "cancelled"
-        task.finished_at = datetime.utcnow()
-        task.error_msg = ""
-        await db.commit()
-        await db.refresh(task)
+            _cancel_requested.add(task_id)
+            task.status = "cancelled"
+            task.finished_at = datetime.utcnow()
+            task.error_msg = ""
+            try:
+                await db.commit()
+                await db.refresh(task)
+            except BaseException:
+                _cancel_requested.discard(task_id)
+                await db.rollback()
+                raise
 
         # 通知引擎停手。还没有 provider_task_id 说明还卡在 submit 之前/之中，
         # 那一段由 execute_task 在 submit 之后补刀，这里不用管。
@@ -154,28 +211,53 @@ class TaskService:
             return  # 终态已由 cancel_task 写好，别覆盖
 
         if result.status.value == "done":
-            task.status = "done"
-            task.progress = 100.0
             # 只留勾选出图节点的产出 —— 一个工作流常有多个出图节点
             # （预览图、裁剪参考脸…），用户往往只要其中一部分
             outputs = TaskService._select_outputs(template, result.outputs)
-            # 合并写入而不是整体覆盖 —— result 里可能已有请求快照（_request）
-            task.result = {**(task.result or {}), "outputs": outputs}
-            task.finished_at = datetime.utcnow()
+            staged_assets: list[Asset] = []
+            try:
+                # Files and Asset objects are staged first, but no DB write occurs
+                # until terminal ownership is held.
+                for output in outputs:
+                    staged_assets.append(
+                        await TaskService._save_asset(
+                            db,
+                            task,
+                            template,
+                            provider,
+                            output,
+                        )
+                    )
 
-            # 下载并保存素材
-            for output in outputs:
-                await TaskService._save_asset(db, task, template, provider, output)
-        else:
-            task.status = "error"
-            task.error_msg = (
-                safe_detail(RuntimeError(result.error))
-                if result.error
-                else "Generation failed"
-            )
-            task.finished_at = datetime.utcnow()
+                async with thumbnail_lifecycle([task_lifecycle_key(task.id)]):
+                    current = await TaskService._reload_task(db, task.id)
+                    if (
+                        current is None
+                        or current.status in _TERMINAL_STATUSES
+                        or _cancel_requested_for(task.id)
+                    ):
+                        await TaskService._discard_staged_assets(db, staged_assets)
+                        return
+                    current.status = "done"
+                    current.progress = 100.0
+                    # Merge instead of replacing the Provider request snapshot.
+                    current.result = {
+                        **(current.result or {}),
+                        "outputs": outputs,
+                    }
+                    current.finished_at = datetime.utcnow()
+                    await db.commit()
+            except BaseException:
+                await TaskService._discard_staged_assets(db, staged_assets)
+                raise
+            return
 
-        await db.commit()
+        detail = (
+            safe_detail(RuntimeError(result.error))
+            if result.error
+            else "Generation failed"
+        )
+        await TaskService._commit_error(db, task.id, detail)
 
     @staticmethod
     async def execute_task(task_id: str):
@@ -256,13 +338,8 @@ class TaskService:
                         template.engine,
                         exc_info=(type(e), e, e.__traceback__),
                     )
-                    # 已经取消的任务别再改写成 error，否则「已取消」会变成「失败」
-                    if not _cancel_requested_for(task.id):
-                        task.status = "error"
-                        task.error_msg = safe_detail(e)
-                        task.finished_at = datetime.utcnow()
-
-                await db.commit()
+                    await db.rollback()
+                    await TaskService._commit_error(db, task.id, safe_detail(e))
 
     @staticmethod
     async def resume_task(task_id: str):
@@ -306,14 +383,11 @@ class TaskService:
                         exc_info=(type(e), e, e.__traceback__),
                     )
                     await db.rollback()
-                    if not _cancel_requested_for(persisted_task_id):
-                        failed_task = await db.get(Task, persisted_task_id)
-                        if failed_task is None:
-                            return
-                        failed_task.status = "error"
-                        failed_task.error_msg = safe_detail(e)
-                        failed_task.finished_at = datetime.utcnow()
-                        await db.commit()
+                    await TaskService._commit_error(
+                        db,
+                        persisted_task_id,
+                        safe_detail(e),
+                    )
 
     @staticmethod
     async def reap_stale_tasks() -> dict:
@@ -406,8 +480,14 @@ class TaskService:
         return [o for o in outputs if str(o.get("node_id", "")) in keep]
 
     @staticmethod
-    async def _save_asset(db: AsyncSession, task: Task, template: Template, provider, output: dict):
-        """下载引擎输出文件并保存到本地存储"""
+    async def _save_asset(
+        db: AsyncSession,
+        task: Task,
+        template: Template,
+        provider,
+        output: dict,
+    ) -> Asset:
+        """Stage one output file and unflushed Asset for terminal commit."""
         # 产物是远程 URL 时把 URL 传下去 —— download_output 认 URL 直接下载。
         # generic_api 提取产物时 filename 已截成纯文件名（URL 在 url 字段），
         # 传纯文件名会拼出 /files//xxx.png 的错误路径，素材根本落不了盘
@@ -424,31 +504,55 @@ class TaskService:
         # S3 / mc mirror 的 / 对不上号。老记录里存的是反斜杠，filestore 读入端两种都吃。
         rel_path = f"{task.id}/{safe_name}"
         # to_thread：几百 MB 的视频同步写盘会冻结整个事件循环（所有 API/轮询一起停摆）
-        await asyncio.to_thread(save_asset_file, rel_path, file_bytes, content_type=mime)
+        source_saved = False
+        try:
+            await asyncio.to_thread(
+                save_asset_file,
+                rel_path,
+                file_bytes,
+                content_type=mime,
+            )
+            source_saved = True
 
-        # 视频顺手抽一帧当缩略图：素材库卡片不然要拉整个 mp4 当封面。
-        # 抽帧失败（没 ffmpeg / 视频损坏）就当没这回事，不影响素材本身
-        if mime.startswith("video/"):
-            try:
-                # to_thread：make_video_thumb 内部是 subprocess.run（最长 30s）+ 整段视频写临时文件，
-                # 直接调会把事件循环冻住最坏半分钟 —— 这曾是「界面偶发卡死」的直接来源
-                thumb = await asyncio.to_thread(make_video_thumb, file_bytes, Path(safe_name).suffix)
-                if thumb:
-                    await asyncio.to_thread(
-                        save_asset_file, thumb_key(task.id, safe_name), thumb, content_type="image/jpeg"
+            # 视频顺手抽一帧当缩略图：素材库卡片不然要拉整个 mp4 当封面。
+            # 抽帧失败（没 ffmpeg / 视频损坏）就当没这回事，不影响素材本身
+            if mime.startswith("video/"):
+                try:
+                    # to_thread：make_video_thumb 内部是 subprocess.run（最长 30s）+ 整段视频写临时文件，
+                    # 直接调会把事件循环冻住最坏半分钟 —— 这曾是「界面偶发卡死」的直接来源
+                    thumb = await asyncio.to_thread(
+                        make_video_thumb,
+                        file_bytes,
+                        Path(safe_name).suffix,
                     )
-            except Exception:  # noqa: BLE001 —— 缩略图是锦上添花，不能拖垮存素材
-                logger.warning("视频缩略图生成失败，跳过：%s", safe_name, exc_info=True)
+                    if thumb:
+                        await asyncio.to_thread(
+                            save_asset_file,
+                            thumb_key(task.id, safe_name),
+                            thumb,
+                            content_type="image/jpeg",
+                        )
+                except Exception:  # noqa: BLE001 —— 缩略图是锦上添花，不能拖垮存素材
+                    logger.warning("视频缩略图生成失败，跳过：%s", safe_name, exc_info=True)
 
-        asset = Asset(
-            task_id=task.id,
-            file_path=rel_path,
-            file_name=safe_name,
-            file_size=len(file_bytes),
-            mime_type=mime,
-            tags=[template.category],
-            meta=task.params,
-        )
-        db.add(asset)
-        await db.flush()
+            asset = Asset(
+                task_id=task.id,
+                file_path=rel_path,
+                file_name=safe_name,
+                file_size=len(file_bytes),
+                mime_type=mime,
+                tags=[template.category],
+                meta=task.params,
+            )
+            db.add(asset)
+            return asset
+        except BaseException:
+            if source_saved:
+                await asyncio.to_thread(
+                    cleanup_asset_files,
+                    rel_path,
+                    task.id,
+                    safe_name,
+                )
+            raise
 

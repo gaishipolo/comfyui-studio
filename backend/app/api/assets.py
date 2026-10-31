@@ -19,6 +19,7 @@ from app.auth import get_current_user
 from app.filestore import open_asset
 from app.thumbs import (
     cleanup_asset_files,
+    task_lifecycle_key,
     thumb_key,
     thumbnail_lifecycle,
     wait_for_task_completion,
@@ -375,38 +376,46 @@ async def delete_asset(
     素材本身没有归属字段，归属走 task.created_by —— 显式查一次，
     不能用 asset.task 懒加载（async 会话里抛 MissingGreenlet）。
     """
-    asset = await db.get(Asset, asset_id)
-    if not asset:
-        raise HTTPException(status_code=404, detail="Asset not found")
-
-    owner_result = await db.execute(
-        select(Task.created_by).where(Task.id == asset.task_id)
-    )
-    owner_id = owner_result.scalar_one_or_none() or ""
-
-    if not can_modify_asset(user, owner_id):
-        raise HTTPException(
-            status_code=403, detail="只能删除自己提交的素材（或联系管理员）"
-        )
-
-    derived_key = thumb_key(asset.task_id, asset.file_name)
-
     async def delete_operation() -> tuple[tuple[bool, str], tuple[bool, str]]:
-        async with thumbnail_lifecycle([derived_key]):
-            # 记录是主体，文件清理是附带 —— 文件删不掉也要把记录删掉，如实上报原因
-            cleanup_result = await asyncio.to_thread(
-                cleanup_asset_files,
-                asset.file_path,
-                asset.task_id,
-                asset.file_name,
-            )
-            await db.delete(asset)
-            await db.commit()
-            return cleanup_result
+        # The route only carries asset_id, so first read the immutable task-id
+        # hint, end that transaction, then reload all authoritative state while
+        # owning the same task lock used by retry and task deletion.
+        task_result = await db.execute(
+            select(Asset.task_id).where(Asset.id == asset_id)
+        )
+        owned_task_id = task_result.scalar_one_or_none()
+        await db.rollback()
+        if not owned_task_id:
+            raise HTTPException(status_code=404, detail="Asset not found")
+
+        async with thumbnail_lifecycle([task_lifecycle_key(owned_task_id)]):
+            asset = await db.get(Asset, asset_id)
+            if asset is None or asset.task_id != owned_task_id:
+                raise HTTPException(status_code=404, detail="Asset not found")
+            task = await db.get(Task, owned_task_id)
+            owner_id = task.created_by if task is not None else ""
+            if not can_modify_asset(user, owner_id):
+                raise HTTPException(
+                    status_code=403,
+                    detail="只能删除自己提交的素材（或联系管理员）",
+                )
+
+            derived_key = thumb_key(asset.task_id, asset.file_name)
+            async with thumbnail_lifecycle([derived_key]):
+                # 记录是主体，文件清理是附带 —— 文件删不掉也要把记录删掉，如实上报原因
+                cleanup_result = await asyncio.to_thread(
+                    cleanup_asset_files,
+                    asset.file_path,
+                    asset.task_id,
+                    asset.file_name,
+                )
+                await db.delete(asset)
+                await db.commit()
+                return cleanup_result
 
     operation = asyncio.create_task(
         delete_operation(),
-        name=f"delete-asset:{asset.id}",
+        name=f"delete-asset:{asset_id}",
     )
     cleanup_result = await wait_for_task_completion(operation)
     (file_removed, file_error), (thumbnail_removed, thumbnail_error) = cleanup_result

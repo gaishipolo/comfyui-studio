@@ -392,11 +392,18 @@ class AssetDeleteDB:
         self.deleted: list[object] = []
         self.commits = 0
 
-    async def get(self, _model, _identity):
-        return self.asset
+    async def get(self, model, _identity):
+        if model is Asset:
+            return self.asset
+        if model is Task:
+            return SimpleNamespace(created_by=self.owner)
+        return None
 
     async def execute(self, _query) -> ScalarResult:
-        return ScalarResult(self.owner)
+        return ScalarResult(self.asset.task_id)
+
+    async def rollback(self) -> None:
+        return None
 
     async def delete(self, value: object) -> None:
         self.deleted.append(value)
