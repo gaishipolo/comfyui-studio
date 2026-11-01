@@ -289,9 +289,10 @@ export const deleteAsset = (assetId: string) =>
     { method: 'DELETE' },
   )
 
-export const batchDownload = async (assetIds: string[]): Promise<Blob> => {
+/** 准备浏览器原生批量下载：返回一次性下载地址（ZIP 由下载管理器流式保存，不进页面内存） */
+export const prepareBatchDownload = async (assetIds: string[]): Promise<string> => {
   const token = getToken()
-  const resp = await fetch(`${BASE}/assets/batch-download`, {
+  const resp = await fetch(`${BASE}/assets/batch-download/prepare`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -300,7 +301,7 @@ export const batchDownload = async (assetIds: string[]): Promise<Blob> => {
     body: JSON.stringify(assetIds),
   })
   if (!resp.ok) {
-    let message = `下载失败 (${resp.status})`
+    let message = `下载准备失败 (${resp.status})`
     try {
       const body = await resp.json()
       if (typeof body?.detail === 'string') message = body.detail
@@ -309,7 +310,11 @@ export const batchDownload = async (assetIds: string[]): Promise<Blob> => {
     }
     throw new Error(message)
   }
-  return resp.blob()
+  const body = (await resp.json()) as { url?: string }
+  if (typeof body?.url !== 'string') {
+    throw new Error('下载准备未返回有效地址')
+  }
+  return body.url
 }
 
 // ── 素材文件 URL ───────────────────────────

@@ -5,14 +5,15 @@ import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Sequence
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import String, bindparam, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 from starlette.background import BackgroundTask
 
 from app.database import get_db
+from app.download_tickets import registry as download_ticket_registry
 from app.models.models import Asset, Task, Template, User
 from app.schemas.schemas import AssetResponse, AssetShareRequest
 from app.auth import get_current_user
@@ -452,10 +453,24 @@ async def batch_download(
     db: AsyncSession = Depends(get_db),
 ):
     """批量下载素材（打包 ZIP）。用户隔离：无权看的 id 静默剔除（批量语义：拿到自己能拿的）"""
+    archive_path = await _prepare_archive(asset_ids, user, db)
+    try:
+        return _TemporaryArchiveResponse(
+            archive_path,
+            filename="assets.zip",
+            media_type="application/zip",
+            background=BackgroundTask(_remove_temp_archive, archive_path),
+        )
+    except BaseException:
+        _remove_temp_archive(archive_path)
+        raise
+
+
+async def _prepare_archive(asset_ids: list[str], user: User, db: AsyncSession) -> Path:
+    """共享的归档构建逻辑：校验、权限过滤、落临时 ZIP。"""
     if not asset_ids:
         raise HTTPException(status_code=400, detail="No assets selected")
 
-    # 数量与总字节都封顶，超了让用户分批下。
     if len(asset_ids) > BATCH_DOWNLOAD_MAX_FILES:
         raise HTTPException(
             status_code=400,
@@ -474,7 +489,6 @@ async def batch_download(
     if not assets:
         raise HTTPException(status_code=404, detail="No matching assets")
 
-    # file_size 是落库时的元数据，作为总量预估；真实字节数在写 ZIP 时再兜一道
     total = sum(a.file_size or 0 for a in assets)
     if total > BATCH_DOWNLOAD_MAX_BYTES:
         raise HTTPException(
@@ -496,18 +510,56 @@ async def batch_download(
             detail=FILESTORE_UNAVAILABLE_DETAIL,
         ) from exc
     except BaseException:
-        # Executor threads cannot be cancelled. Keep ownership of a late result.
         _abandoned_archive_tasks.add(archive_task)
         archive_task.add_done_callback(_remove_abandoned_archive)
         raise
+    return archive_path
 
+
+@router.post("/batch-download/prepare")
+async def prepare_batch_download(
+    asset_ids: list[str],
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """为浏览器原生下载准备 ZIP：登记一次性票据并返回下载地址。
+
+    浏览器 `<a>` 直链无法带 Authorization 头，因此把安全凭证放进按票据
+    隔离的 HttpOnly Cookie，下载接口单次消费。
+    """
+    archive_path = await _prepare_archive(asset_ids, user, db)
+    ticket = download_ticket_registry.create(archive_path, user.id)
+    secure = request.url.scheme == "https"
+    headers = {
+        "Set-Cookie": download_ticket_registry.cookie_attrs(ticket, secure=secure),
+    }
+    return JSONResponse(
+        content={
+            "url": f"/api/assets/batch-download/file/{ticket.ticket_id}",
+        },
+        headers=headers,
+    )
+
+
+@router.get("/batch-download/file/{ticket_id}")
+async def download_batch_file(
+    ticket_id: str,
+    request: Request,
+):
+    """消费一次性票据并流式返回 ZIP。Cookie 名按 ticket_id 隔离。"""
+    cookie_name = f"comfyui_batch_dl_{ticket_id}"
+    secret = request.cookies.get(cookie_name)
+    ticket = download_ticket_registry.consume(ticket_id, secret)
+    if ticket is None:
+        raise HTTPException(status_code=410, detail="Download ticket missing, expired, or already used")
     try:
-        return _TemporaryArchiveResponse(
-            archive_path,
+        return FileResponse(
+            ticket.archive_path,
             filename="assets.zip",
             media_type="application/zip",
-            background=BackgroundTask(_remove_temp_archive, archive_path),
+            background=BackgroundTask(lambda p=ticket.archive_path: download_ticket_registry._unlink(p)),
         )
     except BaseException:
-        _remove_temp_archive(archive_path)
+        download_ticket_registry._unlink(ticket.archive_path)
         raise

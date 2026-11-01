@@ -7,7 +7,7 @@ import { useState, useEffect, useCallback } from 'react'
 import type { Asset, Template, AssetTag, User } from '../types'
 import {
   listAssets, listAssetTags, addAssetTag, removeAssetTag, shareAsset,
-  batchDownload, getAssetUrl, getAssetThumbUrl, downloadAsset, deleteAsset, listUsers,
+  prepareBatchDownload, getAssetUrl, getAssetThumbUrl, downloadAsset, deleteAsset, listUsers,
 } from '../api/client'
 import { subscribeAssetsChanged } from '../notify'
 import AuthMedia from './AuthMedia'
@@ -148,13 +148,14 @@ export default function AssetGallery({ templates, user }: Props) {
     if (selected.size === 0 || downloading) return
     setDownloading(true)
     try {
-      const blob = await batchDownload([...selected])
-      const url = URL.createObjectURL(blob)
+      const url = await prepareBatchDownload([...selected])
+      // 浏览器原生下载：ZIP 由下载管理器流式落盘，不经过页面内存 Blob。
       const a = document.createElement('a')
       a.href = url
       a.download = `assets_${Date.now()}.zip`
+      document.body.appendChild(a)
       a.click()
-      URL.revokeObjectURL(url)
+      a.remove()
     } catch (err) {
       alert(`下载失败: ${err instanceof Error ? err.message : err}`)
     } finally {

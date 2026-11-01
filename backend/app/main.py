@@ -48,6 +48,11 @@ async def lifespan(app: FastAPI):
         # 启动时初始化数据库 + 默认管理员 + 引擎插件 + 收拾上个进程遗留的中断任务
         await init_db()
         await create_default_admin()
+        # 清理上个进程异常终止遗留的超期下载 ZIP（finally 无法覆盖强杀）
+        from app.download_tickets import cleanup_stale_archives
+        removed_stale = await asyncio.to_thread(cleanup_stale_archives)
+        if removed_stale:
+            print(f"[Download] 启动清理超期下载 ZIP {removed_stale} 个", flush=True)
         # 插件恢复要在任务收割之前 —— 收割会 resume 遗留任务，得先有引擎可用
         from app.api.plugins import restore_plugins
         async with async_session() as db:
@@ -72,6 +77,10 @@ async def lifespan(app: FastAPI):
         from app.engines.factory import close_all_providers
 
         await close_all_providers()
+        # 收掉未消费的一次性下载票据并删除其 ZIP
+        from app.download_tickets import registry as download_ticket_registry
+
+        await download_ticket_registry.shutdown()
         print("Shutting down...")
 
 
