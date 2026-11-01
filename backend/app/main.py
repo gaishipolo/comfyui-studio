@@ -1,4 +1,5 @@
 """FastAPI 应用入口"""
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 
