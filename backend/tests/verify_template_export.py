@@ -6,6 +6,9 @@
 
 需要 COMFYUI_STUDIO_TEST_BASE_URL 指向隔离后端。测试模板与工作流文件自建自删。
 """
+import live_guard
+live_guard.require_live_ok()
+
 import json
 import sys
 import urllib.error

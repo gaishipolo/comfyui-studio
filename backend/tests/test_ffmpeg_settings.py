@@ -20,6 +20,14 @@ def test_ffmpeg_is_a_real_settings_field() -> None:
     assert Settings.model_fields["FFMPEG_PATH"].default == ""
 
 
+def test_dead_debug_setting_is_removed() -> None:
+    assert "DEBUG" not in Settings.model_fields
+    text = (Path(__file__).resolve().parents[1] / ".env.example").read_text(
+        encoding="utf-8"
+    )
+    assert not re.search(r"(?m)^DEBUG=", text)
+
+
 def test_env_example_has_exact_settings_parity() -> None:
     text = (Path(__file__).resolve().parents[1] / ".env.example").read_text(
         encoding="utf-8"
@@ -53,6 +61,7 @@ if __name__ == "__main__":
     failures = []
     for test in (
         test_ffmpeg_is_a_real_settings_field,
+        test_dead_debug_setting_is_removed,
         test_env_example_has_exact_settings_parity,
         test_ffmpeg_lookup_reads_settings_not_os_environ,
     ):
@@ -63,5 +72,5 @@ if __name__ == "__main__":
             print(f"[FAIL] {failures[-1]}")
         else:
             print(f"[PASS] {test.__name__}")
-    print(f"\nRESULT: {3 - len(failures)} passed / {len(failures)} failed")
+    print(f"\nRESULT: {4 - len(failures)} passed / {len(failures)} failed")
     raise SystemExit(1 if failures else 0)

@@ -14,7 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.api import health as health_api  # noqa: E402
+from app.api import plugins as plugins_api  # noqa: E402
 from app.api import uploads as uploads_api  # noqa: E402
+from app import main as app_main  # noqa: E402
 from app.engines import factory  # noqa: E402
 from app.engines.base import GenerationProvider, GenerationResult, TaskStatus  # noqa: E402
 from app.models.models import Base, Task, Template  # noqa: E402
@@ -239,12 +241,116 @@ async def test_task_cancellation_holds_lease_while_notifying_provider() -> None:
                 await engine.dispose()
 
 
+async def test_close_all_providers_has_total_lease_wait_timeout() -> None:
+    """活跃 lease 卡住时，shutdown 只能有限等待，不能跟任务超时一起挂 30 分钟。"""
+    engine_name = "lease_shutdown_timeout"
+    async with registered(engine_name):
+        lease = factory.acquire_provider(engine_name)
+        provider = lease.__enter__()
+        try:
+            await asyncio.wait_for(
+                factory.close_all_providers(lease_timeout=0.05),
+                timeout=0.5,
+            )
+            assert provider.close_calls == 0, "active Provider was force-closed"
+        finally:
+            lease.__exit__(None, None, None)
+        await asyncio.wait_for(provider.closed.wait(), timeout=1)
+        assert provider.close_calls == 1
+
+
+async def test_shutdown_runtime_cancels_background_tasks_before_provider_close() -> None:
+    engine_name = "lease_shutdown_order"
+    async with registered(engine_name):
+        provider = factory.get_provider(engine_name)
+        lease_started = asyncio.Event()
+        blocker = asyncio.Event()
+
+        async def hold_lease() -> None:
+            with factory.acquire_provider(engine_name):
+                lease_started.set()
+                await blocker.wait()
+
+        background = asyncio.create_task(hold_lease())
+        task_service_module._background_tasks[background] = background
+        background.add_done_callback(task_service_module._background_tasks.pop)
+        try:
+            await asyncio.wait_for(lease_started.wait(), timeout=1)
+            await asyncio.wait_for(
+                app_main.shutdown_task_runtime(
+                    background_timeout=0.2,
+                    lease_timeout=0.2,
+                ),
+                timeout=1,
+            )
+            assert background.cancelled(), "background task was not cancelled first"
+            await asyncio.wait_for(provider.closed.wait(), timeout=1)
+            assert provider.close_calls == 1
+        finally:
+            blocker.set()
+            background.cancel()
+            await asyncio.gather(background, return_exceptions=True)
+            task_service_module._background_tasks.pop(background, None)
+
+
+async def test_plugin_health_check_has_timeout() -> None:
+    engine_name = "lease_health_timeout"
+    async with registered(engine_name):
+        old_timeout = getattr(plugins_api, "_HEALTH_CHECK_TIMEOUT_SECONDS", None)
+        plugins_api._HEALTH_CHECK_TIMEOUT_SECONDS = 0.05
+        try:
+            try:
+                await asyncio.wait_for(
+                    plugins_api.test_plugin(
+                        engine_name,
+                        user=SimpleNamespace(id="admin", role="admin"),
+                        db=None,
+                    ),
+                    timeout=0.5,
+                )
+            except plugins_api.HTTPException as exc:
+                assert exc.status_code == 504, exc.status_code
+                assert "超时" in str(exc.detail)
+            else:
+                raise AssertionError("blocking health_check did not time out")
+        finally:
+            if old_timeout is None:
+                delattr(plugins_api, "_HEALTH_CHECK_TIMEOUT_SECONDS")
+            else:
+                plugins_api._HEALTH_CHECK_TIMEOUT_SECONDS = old_timeout
+
+
+async def test_factory_change_hook_failure_is_logged() -> None:
+    messages = []
+
+    class RecordingLog:
+        def exception(self, message, *args):
+            messages.append(message % args if args else message)
+
+    def broken_hook():
+        raise RuntimeError("hook failed")
+
+    old_log = factory.log
+    factory.log = RecordingLog()
+    factory._change_hooks.append(broken_hook)
+    try:
+        factory._fire_change()
+        assert messages and "hook" in messages[0].lower(), messages
+    finally:
+        factory._change_hooks.remove(broken_hook)
+        factory.log = old_log
+
+
 async def main() -> int:
     tests = [
         test_task_execution_holds_one_lease_through_submit_poll_and_finish,
         test_upload_forwarding_holds_lease,
         test_health_probe_holds_lease,
         test_task_cancellation_holds_lease_while_notifying_provider,
+        test_close_all_providers_has_total_lease_wait_timeout,
+        test_shutdown_runtime_cancels_background_tasks_before_provider_close,
+        test_plugin_health_check_has_timeout,
+        test_factory_change_hook_failure_is_logged,
     ]
     failures: list[str] = []
     for test in tests:

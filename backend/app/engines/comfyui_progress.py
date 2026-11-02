@@ -165,6 +165,7 @@ class ProgressTracker:
         self._done.discard(prompt_id)
 
     def tracked(self) -> int:
+        """当前登记（未清理）的 prompt 数量，供监控与上限校验用。"""
         return len(self._best)
 
     async def ensure_running(self) -> None:

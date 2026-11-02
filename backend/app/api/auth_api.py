@@ -1,10 +1,11 @@
 """认证 API — 注册、登录、用户信息"""
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.models import User
+from app import login_guard
 from app.schemas.auth_schemas import (
     RegisterRequest, LoginRequest, TokenResponse, UserResponse,
     ChangePasswordRequest, ResetPasswordRequest, UserUpdateRequest,
@@ -41,16 +42,25 @@ async def register(
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
+async def login(data: LoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
     """登录，返回 JWT"""
+    # 暴力破解防护：连续失败锁定（见 app/login_guard.py）
+    key = login_guard.login_key(data.username, request)
+    if login_guard.limiter.is_locked(key):
+        raise HTTPException(status_code=429, detail="登录失败次数过多，请稍后再试")
+
     result = await db.execute(select(User).where(User.username == data.username))
     user = result.scalar_one_or_none()
 
     if not user or not verify_password(data.password, user.password_hash):
+        login_guard.limiter.record_failure(key)
         raise HTTPException(status_code=401, detail="Invalid username or password")
     if not user.is_active:
+        # 停用账号也计入失败：否则可用错误密码反复探测哪些账号被停用
+        login_guard.limiter.record_failure(key)
         raise HTTPException(status_code=403, detail="Account disabled")
 
+    login_guard.limiter.record_success(key)
     token = create_token(user)
     return TokenResponse(
         access_token=token,
@@ -91,6 +101,7 @@ async def change_own_password(
         raise HTTPException(status_code=400, detail="新密码不能与当前密码相同")
 
     user.password_hash = hash_password(data.new_password)
+    user.token_version = int(user.token_version or 0) + 1  # 吊销旧 token（含当前会话）
     await db.commit()
     await db.refresh(user)
     return user
@@ -109,6 +120,7 @@ async def reset_user_password(
         raise HTTPException(status_code=404, detail="User not found")
 
     user.password_hash = hash_password(data.new_password)
+    user.token_version = int(user.token_version or 0) + 1  # 被盗账号重置后旧 token 立即失效
     await db.commit()
     await db.refresh(user)
     return user

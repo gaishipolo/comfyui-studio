@@ -7,6 +7,7 @@ import type { Task, Asset, User } from '../types'
 import { listTasks, getTaskAssets, retryTask, cancelTask, getAssetUrl, getAssetThumbUrl, openAssetInNewTab, deleteTask, getAllTemplates } from '../api/client'
 import FriendlyError from './FriendlyError'
 import AuthMedia from './AuthMedia'
+import { taskListViewState } from './listViewState'
 
 const statusConfig: Record<string, { label: string; tone: string }> = {
   pending: { label: '排队中', tone: 'neutral' },
@@ -29,6 +30,7 @@ export default function TaskPanel({ user, onReuseTask }: { user: User; onReuseTa
   /** admin 看全员任务，多一列创建人；普通用户只看自己的，没必要显示 */
   const showCreator = user.role === 'admin'
   const [tasks, setTasks] = useState<Task[]>([])
+  const [loadFailed, setLoadFailed] = useState(false)
   /** 模板 id → 名称。任务只存 template_id，列表要显示「用的哪个模板」得自己查一次 */
   const [tplNames, setTplNames] = useState<Record<string, string>>({})
   const [assetsMap, setAssetsMap] = useState<Record<string, Asset[]>>({})
@@ -38,11 +40,13 @@ export default function TaskPanel({ user, onReuseTask }: { user: User; onReuseTa
   >({})
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [batchDeleting, setBatchDeleting] = useState(false)
 
   const refresh = useCallback(async () => {
     try {
       const data = await listTasks()
       setTasks(data)
+      setLoadFailed(false)
       // 轮询期间任务可能已被别处删掉 —— 失效 id 从选中集剔除，别让「删除 (N)」虚高
       setSelected((prev) => {
         const alive = new Set(data.map((t) => t.id))
@@ -50,7 +54,7 @@ export default function TaskPanel({ user, onReuseTask }: { user: User; onReuseTa
         return next.size === prev.size ? prev : next
       })
     } catch {
-      // 静默失败
+      setLoadFailed(true)
     }
   }, [])
 
@@ -182,6 +186,7 @@ export default function TaskPanel({ user, onReuseTask }: { user: User; onReuseTa
   const selectableIds = tasks.filter((t) => isTerminal(t.status)).map((t) => t.id)
   const selectedCount = selectableIds.filter((id) => selected.has(id)).length
   const allSelected = selectableIds.length > 0 && selectedCount === selectableIds.length
+  const listState = taskListViewState({ failed: loadFailed, count: tasks.length })
 
   const toggleSelectAll = () => {
     setSelected(allSelected ? new Set() : new Set(selectableIds))
@@ -189,6 +194,7 @@ export default function TaskPanel({ user, onReuseTask }: { user: User; onReuseTa
 
   /** 批量删除已选任务。逐条调单删接口，跳过执行中的，逐条如实汇总 */
   const handleBatchDelete = async () => {
+    if (batchDeleting) return
     const ids = selectableIds.filter((id) => selected.has(id))
     if (ids.length === 0) return
     if (
@@ -197,48 +203,41 @@ export default function TaskPanel({ user, onReuseTask }: { user: User; onReuseTa
       )
     )
       return
-    const deletedIds: string[] = []
-    const failed: string[] = []
-    const skipped: string[] = []
-    const fileErrors: string[] = []
-    for (const id of ids) {
-      try {
-        const res = await deleteTask(id)
-        deletedIds.push(id)
-        if (res.file_errors?.length) {
-          fileErrors.push(...res.file_errors.map((e) => `${id.slice(0, 8)}: ${e}`))
+    setBatchDeleting(true)
+    try {
+      const deletedIds: string[] = []
+      const failed: string[] = []
+      const skipped: string[] = []
+      const fileErrors: string[] = []
+      for (const id of ids) {
+        try {
+          const res = await deleteTask(id)
+          deletedIds.push(id)
+          if (res.file_errors?.length) {
+            fileErrors.push(...res.file_errors.map((e) => `${id.slice(0, 8)}: ${e}`))
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          if (msg.includes('执行中')) skipped.push(`${id.slice(0, 8)}: ${msg}`)
+          else failed.push(`${id.slice(0, 8)}: ${msg}`)
         }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        // 执行中被拒 ≠ 删不动：前者是设计使然，单独归类，别混进"失败"
-        if (msg.includes('执行中')) skipped.push(`${id.slice(0, 8)}: ${msg}`)
-        else failed.push(`${id.slice(0, 8)}: ${msg}`)
       }
+      setAssetsMap((prev) => {
+        const next = { ...prev }
+        for (const id of deletedIds) delete next[id]
+        return next
+      })
+      if (expandedId && deletedIds.includes(expandedId)) setExpandedId(null)
+      setSelected(new Set())
+      refresh()
+      const lines: string[] = []
+      if (skipped.length) lines.push(`有 ${skipped.length} 条正在执行中，已跳过：\n${skipped.join('\n')}`)
+      if (failed.length) lines.push(`有 ${failed.length} 条删除失败（多为非本人提交，需管理员操作）：\n${failed.join('\n')}`)
+      if (fileErrors.length) lines.push(`记录已删除，但有 ${fileErrors.length} 个磁盘文件未能清理：\n${fileErrors.join('\n')}`)
+      if (lines.length) alert(lines.join('\n\n'))
+    } finally {
+      setBatchDeleting(false)
     }
-    setAssetsMap((prev) => {
-      const next = { ...prev }
-      for (const id of deletedIds) delete next[id]
-      return next
-    })
-    if (expandedId && deletedIds.includes(expandedId)) setExpandedId(null)
-    setSelected(new Set())
-    refresh()
-    // 三种结果分开报，别混成一句"删除完成"
-    const lines: string[] = []
-    if (skipped.length) {
-      lines.push(`有 ${skipped.length} 条正在执行中，已跳过：\n${skipped.join('\n')}`)
-    }
-    if (failed.length) {
-      lines.push(
-        `有 ${failed.length} 条删除失败（多为非本人提交，需管理员操作）：\n${failed.join('\n')}`,
-      )
-    }
-    if (fileErrors.length) {
-      lines.push(
-        `记录已删除，但有 ${fileErrors.length} 个磁盘文件未能清理：\n${fileErrors.join('\n')}`,
-      )
-    }
-    if (lines.length) alert(lines.join('\n\n'))
   }
 
   return (
@@ -248,8 +247,8 @@ export default function TaskPanel({ user, onReuseTask }: { user: User; onReuseTa
         <div className="flex items-center gap-xs">
           {selectedCount > 0 && (
             <>
-              <button onClick={handleBatchDelete} className="btn btn-danger">
-                删除 ({selectedCount})
+              <button onClick={handleBatchDelete} className="btn btn-danger" disabled={batchDeleting}>
+                {batchDeleting ? '删除中…' : `删除 (${selectedCount})`}
               </button>
               <button onClick={() => setSelected(new Set())} className="btn-quiet">
                 清除选择
@@ -262,7 +261,14 @@ export default function TaskPanel({ user, onReuseTask }: { user: User; onReuseTa
         </div>
       </div>
 
-      {tasks.length === 0 ? (
+      {listState === 'error' ? (
+        <div className="mt-md border border-error bg-paper px-sm py-md text-error">
+          <p>任务加载失败，请检查网络或登录状态。</p>
+          <button onClick={refresh} className="btn-quiet mt-xs">
+            重试
+          </button>
+        </div>
+      ) : listState === 'empty' ? (
         <p className="mt-md border-t border-rule py-xl text-base text-muted">
           暂无任务，选择场景并提交生成
         </p>
@@ -430,7 +436,9 @@ export default function TaskPanel({ user, onReuseTask }: { user: User; onReuseTa
                                     onClick={() => {
                                       openAssetInNewTab(
                                         getAssetUrl(task.id, asset.file_name),
-                                      ).catch(() => {})
+                                      ).catch((err) => {
+                                        alert(`打开素材失败: ${err instanceof Error ? err.message : err}`)
+                                      })
                                     }}
                                     className="block w-full text-left"
                                   >

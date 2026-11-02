@@ -23,6 +23,13 @@ export default {
         error: 'var(--color-error)',
         success: 'var(--color-success)',
         scrim: 'var(--color-scrim)',
+        // admin 页（PluginManager / TemplateManager 警示横幅）用到的语义色。
+        // danger 与 error 同色：语义别名，别再有未注册 token 导致样式静默失效。
+        // warning/danger 走 oklch 通道 + <alpha-value>，text-* 与 bg-*/10 都可用。
+        danger: 'oklch(var(--color-danger) / <alpha-value>)',
+        warning: 'oklch(var(--color-warning) / <alpha-value>)',
+        secondary: 'var(--color-secondary)',
+        tertiary: 'var(--color-tertiary)',
       },
       fontFamily: {
         display: 'var(--font-display)',

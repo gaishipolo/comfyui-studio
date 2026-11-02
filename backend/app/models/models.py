@@ -2,11 +2,12 @@
 import json
 import uuid
 from datetime import datetime
-from sqlalchemy import String, Text, Integer, Float, DateTime, ForeignKey, Boolean
+from sqlalchemy import String, Text, Integer, Float, DateTime, ForeignKey, Boolean, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import TypeDecorator
 
 from app.database import Base
+from app.timeutils import utcnow
 
 
 def gen_uuid() -> str:
@@ -45,7 +46,9 @@ class User(Base):
     display_name: Mapped[str] = mapped_column(String(64), default="", comment="显示名")
     role: Mapped[str] = mapped_column(String(16), default="member", comment="角色：admin/member")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, comment="是否启用")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    # 改密/重置密码时 +1，让旧 JWT 立即失效（JWT 无状态，靠版本号对账）
+    token_version: Mapped[int] = mapped_column(Integer, default=0, comment="令牌版本，改密递增以吊销旧 token")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 class Template(Base):
@@ -73,8 +76,8 @@ class Template(Base):
     # 状态
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, comment="是否启用")
     sort_order: Mapped[int] = mapped_column(Integer, default=0, comment="排序")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
     tasks: Mapped[list["Task"]] = relationship(back_populates="template")
 
@@ -104,7 +107,7 @@ class Task(Base):
     result: Mapped[dict] = mapped_column(JSONStore, default=dict, comment="结果信息")
     error_msg: Mapped[str] = mapped_column(Text, default="", comment="错误信息")
 
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
@@ -115,6 +118,9 @@ class Task(Base):
 class Asset(Base):
     """生成素材"""
     __tablename__ = "assets"
+    __table_args__ = (
+        Index("uq_assets_task_file_name", "task_id", "file_name", unique=True),
+    )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=gen_uuid)
     task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id"), comment="关联任务")
@@ -130,7 +136,7 @@ class Asset(Base):
     # is_shared=True 后全团队可见可下载，但**不可改**（打标签/删除/共享开关仍是作者或管理员）
     is_shared: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否共享给团队")
 
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     task: Mapped["Task"] = relationship(back_populates="assets")
 
@@ -153,5 +159,5 @@ class EnginePlugin(Base):
     config: Mapped[dict] = mapped_column(JSONStore, default=dict, comment="运行配置（注入 Provider.config）")
     uploaded_by: Mapped[str] = mapped_column(String(32), default="", comment="上传人 user id（审计；空=手工放置）")
 
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)

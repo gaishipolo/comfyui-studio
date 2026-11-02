@@ -12,6 +12,9 @@
 
 需要 COMFYUI_STUDIO_TEST_BASE_URL 指向正在运行的隔离后端。
 """
+import live_guard
+live_guard.require_live_ok()
+
 import base64
 import json
 import sys

@@ -23,6 +23,7 @@ _REPLAY_CHUNK_SIZE = 1 * MiB
 
 _UNAUTHORIZED_DETAIL = "Invalid or missing bearer token"
 _TOO_LARGE_DETAIL = "Request body too large"
+_INVALID_CONTENT_LENGTH_DETAIL = "Invalid Content-Length"
 
 
 def _raw_limit(scope: dict) -> int | None:
@@ -31,6 +32,10 @@ def _raw_limit(scope: dict) -> int | None:
 
     path = scope.get("path")
     if path == "/api/assets/batch-download":
+        return _BATCH_JSON_RAW_LIMIT
+    # /prepare 是现行批量下载入口（生成 ZIP + 票据），body 是 asset_ids JSON 数组，
+    # 与旧 /batch-download 同一道闸：50 个 UUID 远小于 64KB
+    if path == "/api/assets/batch-download/prepare":
         return _BATCH_JSON_RAW_LIMIT
     if path == "/api/upload/image":
         return _UPLOAD_RAW_LIMITS["image"]
@@ -119,7 +124,7 @@ class ProtectedBodyLimitMiddleware:
         try:
             declared_length = _content_length(scope)
         except ValueError:
-            await _json_response(send, 413, _TOO_LARGE_DETAIL)
+            await _json_response(send, 400, _INVALID_CONTENT_LENGTH_DETAIL)
             return
         if declared_length is not None and declared_length > limit:
             await _json_response(send, 413, _TOO_LARGE_DETAIL)

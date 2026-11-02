@@ -3,8 +3,8 @@
 上传 = 服务端执行任意 Python，只给 admin 且留审计（uploaded_by/sha256）。
 加载失败只影响该插件（PluginError 文案直接给界面看），绝不拖垮主服务。
 """
+import asyncio
 import hashlib
-import re
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
@@ -19,6 +19,7 @@ from app.engines.factory import acquire_provider, set_engine_config, unregister_
 from app.engines.plugin_loader import (
     PLUGIN_DIR,
     PluginError,
+    SAFE_PROVIDER_NAME,
     describe_provider,
     load_all_plugins,
     load_plugin_file,
@@ -27,7 +28,7 @@ from app.models.models import EnginePlugin, User
 
 router = APIRouter(prefix="/api/plugins", tags=["plugins"])
 
-_SAFE_NAME = re.compile(r"^[a-z0-9_\-]{1,64}$")
+_HEALTH_CHECK_TIMEOUT_SECONDS = 15.0
 
 
 class PluginConfigBody(BaseModel):
@@ -120,7 +121,7 @@ async def upload_plugin(
 
     # 加载成功：按注册名落正式文件（同名重传 = 升级覆盖）
     name = info["name"]
-    if not _SAFE_NAME.match(name):
+    if not SAFE_PROVIDER_NAME.fullmatch(name):
         unregister_provider(name)
         tmp_path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail=f"注册名「{name}」不合法（小写字母/数字/下划线/连字符）")
@@ -230,8 +231,14 @@ async def test_plugin(
         lease = acquire_provider(name)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"引擎未启用: {e}") from e
-    with lease as provider:
-        ok = await provider.health_check()
+    try:
+        with lease as provider:
+            ok = await asyncio.wait_for(
+                provider.health_check(),
+                timeout=_HEALTH_CHECK_TIMEOUT_SECONDS,
+            )
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail="引擎健康检查超时") from exc
     return {"ok": ok, "detail": "" if ok else "health_check 未通过（检查 base_url / api_key 配置）"}
 
 
@@ -253,6 +260,12 @@ async def restore_plugins(db: AsyncSession) -> list[dict]:
                 if row.filename == item["file"]:
                     row.last_error = item["error"]
             continue
+        if not isinstance(name, str) or not SAFE_PROVIDER_NAME.fullmatch(name):
+            item["ok"] = False
+            item["error"] = "注册名不合法"
+            if isinstance(name, str):
+                unregister_provider(name)
+            continue
         row = by_name.get(name)
         if row is None:
             row = EnginePlugin(
@@ -271,6 +284,18 @@ async def restore_plugins(db: AsyncSession) -> list[dict]:
 
     # 账上有但文件丢了的
     for row in rows:
+        # 恢复路径与上传路径对称：DB 是不可信的元数据源，注册名/文件名都要过
+        # SAFE_PROVIDER_NAME。否则被篡改的行可让恢复逻辑读到 plugins/ 之外的路径。
+        filename_path = Path(row.filename)
+        filename_ok = (
+            SAFE_PROVIDER_NAME.fullmatch(filename_path.stem)
+            and filename_path.name == row.filename
+            and filename_path.suffix == ".py"
+        )
+        if not SAFE_PROVIDER_NAME.fullmatch(row.name or "") or not filename_ok:
+            row.last_error = "注册名或文件名不合法"
+            unregister_provider(row.name)
+            continue
         if not (PLUGIN_DIR / row.filename).exists() and row.name not in ("comfyui", "generic_api"):
             row.last_error = "代码文件丢失"
             unregister_provider(row.name)

@@ -9,6 +9,7 @@ import {
   uploadWorkflow, getWorkflowInventory, listPlugins,
   exportTemplate, importTemplate,
 } from '../api/client'
+import { applyTemplateEngine, normalizeTemplateEngineFields } from './templateFormState'
 
 interface Props {
   onTemplatesChange: () => void
@@ -200,17 +201,18 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
 
   const handleSave = async () => {
     if (!editing) return
-    if (!editing.name.trim()) return alert('请填写模板名称')
+    const payload = normalizeTemplateEngineFields(editing)
+    if (!payload.name.trim()) return alert('请填写模板名称')
     // 配了工作流就必须显式勾选出图节点 —— 后端会再校验一遍，这里先给即时反馈
-    if (editing.workflow_file && (editing.output_config.nodes ?? []).length === 0) {
+    if (payload.workflow_file && (payload.output_config.nodes ?? []).length === 0) {
       return alert('请至少勾选一个出图节点（决定任务保存哪些节点的结果）')
     }
     setSaving(true)
     try {
       if (editId) {
-        await updateTemplate(editId, editing as Partial<Template>)
+        await updateTemplate(editId, payload as Partial<Template>)
       } else {
-        await createTemplate(editing as Partial<Template>)
+        await createTemplate(payload as Partial<Template>)
       }
       setEditing(null)
       setEditId(null)
@@ -502,7 +504,7 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
                 className="field"
                 value={editing.engine}
                 onChange={(e) =>
-                  setEditing({ ...editing, engine: e.target.value, capability: '' })
+                  setEditing(applyTemplateEngine(editing, e.target.value))
                 }
               >
                 {(plugins.length > 0
@@ -587,6 +589,7 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
                 onChange={(e) => {
                   const file = e.target.files?.[0]
                   if (file) handleWorkflowUpload(file)
+                  e.target.value = '' // 允许重复选择同一个文件（上传失败后重试）
                 }}
               />
               {editing.workflow_file && (

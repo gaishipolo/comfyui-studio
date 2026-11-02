@@ -77,6 +77,12 @@ async def main() -> None:
         reg.consume(ticket3.ticket_id, ticket3.secret)
         report("consuming one leaves other", reg.active_count() == 1 and reg.consume(ticket4.ticket_id, ticket4.secret) is not None)
 
+        # API 层只调用公开清理方法，不穿透注册表私有实现
+        root6, archive6 = make_archive()
+        reg.discard_archive(archive6)
+        report("public discard removes archive", not archive6.exists())
+        reg.discard_archive(archive6)  # 幂等：已不存在也不抛
+
         # shutdown removes pending
         root5, archive5 = make_archive()
         reg.create(archive5, "user-3")

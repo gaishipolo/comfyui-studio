@@ -3,6 +3,9 @@
 tsc 只能保证前端内部类型一致，无法发现「后端返回的字段名/结构与 TS 声明不符」。
 这里按 TS 接口逐字段核对真实响应，缺失必报，多余仅提示。
 """
+import live_guard
+live_guard.require_live_ok()
+
 import json, sys, urllib.parse, urllib.request
 
 from test_env import API_BASE_URL

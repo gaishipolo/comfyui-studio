@@ -2,9 +2,8 @@
 import hashlib
 import json
 import uuid
-from datetime import datetime
 from pathlib import Path
-from urllib.parse import quote
+from app.disposition import attachment_disposition
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import Response
@@ -23,8 +22,10 @@ from app.schemas.schemas import (
 from app.services.workflow_inspect import inspect_workflow
 from app.config import settings
 from app.auth import get_current_user, require_admin
+from app.timeutils import utcnow
 
 router = APIRouter(prefix="/api/templates", tags=["templates"])
+_WORKFLOW_UPLOAD_LIMIT = 10 * 1024 * 1024
 
 
 def _read_workflow_file(workflow_file: str) -> dict:
@@ -88,6 +89,8 @@ async def list_templates(
     db: AsyncSession = Depends(get_db),
 ):
     """模板列表。include_inactive=true 返回全部（含停用，供管理页使用）"""
+    if include_inactive and user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
     query = select(Template).order_by(Template.sort_order)
     if not include_inactive:
         query = query.where(Template.is_active == True)
@@ -125,7 +128,7 @@ async def get_template(
     db: AsyncSession = Depends(get_db),
 ):
     template = await db.get(Template, template_id)
-    if not template:
+    if not template or (not template.is_active and user.role != "admin"):
         raise HTTPException(status_code=404, detail="Template not found")
     return template
 
@@ -228,7 +231,9 @@ async def upload_workflow(
     回执顺带带回三份清单（节点表 / 可注入输入 / 出图节点），
     界面据此渲染映射下拉与出图节点勾选 —— 用户不用再翻 JSON 对节点。
     """
-    content = await file.read()
+    content = await file.read(_WORKFLOW_UPLOAD_LIMIT + 1)
+    if len(content) > _WORKFLOW_UPLOAD_LIMIT:
+        raise HTTPException(status_code=413, detail="工作流文件不能超过 10MB")
     try:
         workflow = json.loads(content)
     except json.JSONDecodeError:
@@ -395,7 +400,7 @@ async def export_template(
     doc = {
         "format": TEMPLATE_EXPORT_FORMAT,
         "version": TEMPLATE_EXPORT_VERSION,
-        "exported_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "exported_at": utcnow().isoformat(timespec="seconds") + "Z",
         "source": {
             "template_id": tpl.id,
             "updated_at": tpl.updated_at.isoformat(timespec="seconds") if tpl.updated_at else "",
@@ -403,14 +408,13 @@ async def export_template(
         "template": _export_payload(tpl),
         "workflow": workflow,
     }
-    # 文件名带模板名方便认，但必须走 RFC 5987 编码 —— 中文名直接塞 filename=
-    # 会被部分浏览器丢掉，变成一串乱码或纯 download.json
+    # 文件名带模板名方便认；编码细节（RFC 5987 + ASCII 兜底）统一走 disposition helper
     filename = f"{tpl.name}.template.json"
     return Response(
         content=json.dumps(doc, ensure_ascii=False, indent=2).encode("utf-8"),
         media_type="application/json",
         headers={
-            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
+            "Content-Disposition": attachment_disposition(filename),
             "Cache-Control": "no-store",
         },
     )

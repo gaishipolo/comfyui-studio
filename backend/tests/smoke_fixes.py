@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
 """修复项冒烟测试 — review 修复后验证"""
+import live_guard
+live_guard.require_live_ok()
+
 import json
+import os
 import sys
 import urllib.parse
 import urllib.request
@@ -117,6 +121,13 @@ p = settings.WORKFLOW_DIR / saved
 check("B3 文件落在 WORKFLOW_DIR 内", bool(saved) and p.exists(), str(p))
 outside = (settings.WORKFLOW_DIR.parent / "evil_smoke.json")
 check("B3 目录外无穿越文件", not outside.exists(), str(outside))
+# 上传的工作流只是测试垃圾，跑完必须删掉（否则 WORKFLOW_DIR 越攒越多）
+if saved:
+    try:
+        (settings.WORKFLOW_DIR / saved).unlink(missing_ok=True)
+        check("B3 测试工作流已清理", not (settings.WORKFLOW_DIR / saved).exists())
+    except OSError as exc:
+        check("B3 测试工作流已清理", False, f"删除失败: {exc}")
 
 # ── 7. B7: inject_params 映射校验 ──
 wf_dict = {"76": {"class_type": "X", "inputs": {"value": "old"}}}
@@ -148,7 +159,12 @@ code, _ = req("POST", "/api/auth/register",
 check("B12 非法 role 被拒", code == 422, f"code={code}")
 
 # ── 10. F1: 图片上传通道（依赖 ComfyUI 在线）──
-img_path = Path(r"E:\xx\ai\comfyui-studio\images.jfif")
+# 测试图路径：环境变量优先，否则用仓库内的相对路径 —— 脚本不能写死某台机器的盘符
+_img_env = os.environ.get("COMFYUI_STUDIO_SMOKE_IMAGE", "").strip()
+if _img_env:
+    img_path = Path(_img_env)
+else:
+    img_path = Path(__file__).resolve().parents[2] / "images.jfif"
 if img_path.exists():
     code, body = multipart("/api/upload/image?engine=comfyui", token, "smoke_upload.jfif",
                            img_path.read_bytes(), "image/jpeg")

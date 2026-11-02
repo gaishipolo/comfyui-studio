@@ -13,6 +13,8 @@
   GENERIC_API_KEY_HEADER    — 密钥请求头名，默认 Authorization
   GENERIC_API_KEY_PREFIX    — 密钥前缀，默认 Bearer
 """
+import math
+
 import httpx
 
 from app.config import settings
@@ -24,6 +26,27 @@ class GenericAPIProvider(GenerationProvider):
 
     name = "generic_api"
     label = "通用 HTTP API"
+
+    @staticmethod
+    def _normalize_progress(value, default: float = 50.0) -> float:
+        try:
+            progress = float(value)
+        except (TypeError, ValueError):
+            return default
+        if not math.isfinite(progress):
+            return default
+        return min(100.0, max(0.0, progress))
+
+    def _status_http_error(self, task_id: str, response) -> GenerationResult:
+        """Map status endpoint failures that have a stable task meaning."""
+        if response.status_code == 404:
+            result = GenerationResult(
+                status=TaskStatus.ERROR,
+                error=f"Remote task not found: {task_id}",
+            )
+            self._cache_result(task_id, result)
+            return result
+        raise RuntimeError(f"Unexpected status response: {response.status_code}")
 
     def __init__(
         self,
@@ -48,8 +71,18 @@ class GenericAPIProvider(GenerationProvider):
             key_prefix if key_prefix is not None
             else cfg.get("key_prefix", getattr(settings, "GENERIC_API_KEY_PREFIX", "Bearer"))
         )
+        self.timeout = float(
+            cfg.get("timeout", getattr(settings, "GENERIC_API_TIMEOUT", 300.0))
+        )
+        self.download_timeout = float(
+            cfg.get(
+                "download_timeout",
+                getattr(settings, "GENERIC_API_DOWNLOAD_TIMEOUT", 60.0),
+            )
+        )
 
         self._client: httpx.AsyncClient | None = None
+        self._download_client: httpx.AsyncClient | None = None
         self._results: dict[str, GenerationResult] = {}  # 本地缓存结果（兼容无状态 API）
 
     def _cache_result(self, task_id: str, result: GenerationResult):
@@ -69,9 +102,17 @@ class GenericAPIProvider(GenerationProvider):
             self._client = httpx.AsyncClient(
                 base_url=self.base_url,
                 headers=self._get_headers(),
-                timeout=httpx.Timeout(settings.COMFYUI_TIMEOUT, connect=10.0),
+                timeout=httpx.Timeout(self.timeout, connect=10.0),
             )
         return self._client
+
+    async def _get_download_client(self) -> httpx.AsyncClient:
+        if self._download_client is None or self._download_client.is_closed:
+            # Output URLs often point at third-party CDNs: never forward the API key.
+            self._download_client = httpx.AsyncClient(
+                timeout=httpx.Timeout(self.download_timeout, connect=10.0)
+            )
+        return self._download_client
 
     # ── Provider 接口实现 ──────────────────────────────────
 
@@ -113,7 +154,7 @@ class GenericAPIProvider(GenerationProvider):
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
-                return self._results.get(task_id, GenerationResult(status=TaskStatus.RUNNING, progress=50.0))
+                return self._status_http_error(task_id, e.response)
             raise
 
         data = resp.json()
@@ -142,7 +183,7 @@ class GenericAPIProvider(GenerationProvider):
                 raw=data,
             )
         else:
-            progress = float(data.get("progress", 50.0))
+            progress = self._normalize_progress(data.get("progress"))
             result = GenerationResult(status=TaskStatus.RUNNING, progress=progress, raw=data)
 
         self._cache_result(task_id, result)
@@ -182,10 +223,10 @@ class GenericAPIProvider(GenerationProvider):
 
         # 如果 filename 是完整 URL，直接下载
         if filename.startswith("http://") or filename.startswith("https://"):
-            async with httpx.AsyncClient(timeout=60.0) as dl_client:
-                resp = await dl_client.get(filename)
-                resp.raise_for_status()
-                return resp.content
+            dl_client = await self._get_download_client()
+            resp = await dl_client.get(filename)
+            resp.raise_for_status()
+            return resp.content
 
         # 否则按相对路径下载
         path = f"/files/{subfolder}/{filename}".replace("//", "/")
@@ -210,3 +251,5 @@ class GenericAPIProvider(GenerationProvider):
     async def close(self):
         if self._client and not self._client.is_closed:
             await self._client.aclose()
+        if self._download_client and not self._download_client.is_closed:
+            await self._download_client.aclose()

@@ -15,6 +15,9 @@
 
 脚本不负责建账号：默认账号 e2e-recover 由一次性脚本建好；传 --user/--pass 可换。
 """
+import live_guard
+live_guard.require_live_ok()
+
 import argparse
 import json
 import subprocess
@@ -75,10 +78,20 @@ def run_cmd(cmd: str) -> str:
 
 
 def listen_pid() -> int | None:
-    """找出测试服务端口的监听进程号。"""
+    """找出测试服务端口的监听进程号。
+
+    只解析「本地地址」字段的端口（parts[1]，形如 0.0.0.0:8000 / [::]:8000），
+    且必须精确等于 SERVICE_PORT —— 旧版整行子串匹配 `f":{port}" in line`
+    会让 :8000 命中 :80001/:80000，配合 taskkill 就是误杀无关进程。
+    """
     for line in run_cmd("netstat -ano").splitlines():
-        if f":{SERVICE_PORT}" in line and "LISTENING" in line:
-            return int(line.split()[-1])
+        parts = line.split()
+        if len(parts) < 5 or parts[3] != "LISTENING":
+            continue
+        local = parts[1]
+        if not local.endswith(f":{SERVICE_PORT}"):
+            continue
+        return int(parts[4])
     return None
 
 

@@ -5,7 +5,6 @@ import asyncio
 import json
 import time
 from contextlib import nullcontext
-from datetime import datetime
 from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,9 +14,11 @@ from app.models.models import Task, Template, Asset
 from app.engines.factory import acquire_provider
 from app.engines.base import GenerationResult, TaskStatus
 from app.config import settings
+from app.asset_names import unique_asset_name
 from app.filestore import save_asset_file
 from app.media import guess_mime
 from app.safe_detail import safe_detail
+from app.timeutils import utcnow
 from app.thumbs import (
     cleanup_asset_files,
     make_video_thumb,
@@ -53,11 +54,20 @@ def clear_cancel_request(task_id: str) -> None:
 # 挪到这里让 reap_stale_tasks / resume_task 能共用同一份。
 _running_tasks: set[str] = set()
 
+# create_task 的返回值（asyncio.Task）必须被强引用持有 —— asyncio 官方文档
+# 明确警告：只保留弱引用时，任务可能在执行到一半被 GC 掉。这里按 Task 对象
+# 登记，任务结束时移除。key 是 Task 本身，value 同样存 Task（占位防丢失）。
+_background_tasks: dict[asyncio.Task, asyncio.Task] = {}
+_BACKGROUND_STOP_TIMEOUT_SECONDS = 5.0
+
 # 并发闸门。settings.MAX_CONCURRENT_TASKS 以前是**死配置**（没人读它），
 # 结果一次批量提交 N 个就同时打引擎 N 个 prompt、开 N 个轮询协程。
 # ComfyUI 本来就串行执行，闸门放在我们这边能让排队可预测。
 _run_slots = asyncio.Semaphore(max(1, int(settings.MAX_CONCURRENT_TASKS)))
 _TERMINAL_STATUSES = {"done", "error", "cancelled"}
+# get_status 连续失败的宽限窗口（秒）：网络抖动/引擎瞬时 busy 不应立刻判任务失败——
+# 引擎侧可能还在正常跑，直接判败 = 白烧一次生成（5 分钟视频也是）
+_POLL_FAIL_GRACE_SECONDS = 60.0
 
 
 async def _run_and_cleanup(task_id: str, resume: bool = False):
@@ -75,6 +85,7 @@ async def _run_and_cleanup(task_id: str, resume: bool = False):
         )
     finally:
         _running_tasks.discard(task_id)
+        _cancel_requested.discard(task_id)
 
 
 async def spawn_task(task_id: str, resume: bool = False) -> bool:
@@ -85,8 +96,41 @@ async def spawn_task(task_id: str, resume: bool = False) -> bool:
     if task_id in _running_tasks:
         return False
     _running_tasks.add(task_id)
-    asyncio.create_task(_run_and_cleanup(task_id, resume=resume))
+    task = asyncio.create_task(_run_and_cleanup(task_id, resume=resume))
+    # 强引用持有，任务结束时自我注销；否则 asyncio 只做弱引用，任务可能被 GC
+    _background_tasks[task] = task
+    task.add_done_callback(_background_tasks.pop)
     return True
+
+
+async def cancel_background_tasks(
+    timeout: float = _BACKGROUND_STOP_TIMEOUT_SECONDS,
+) -> dict[str, int]:
+    """进程停机时硬取消后台执行，并有限等待其释放 DB / Provider lease。
+
+    正常运行仍走协作式取消；这里只用于进程即将退出。未在 timeout 内退出的
+    协程留给进程终止，不能让 graceful shutdown 跟任务超时一起阻塞 30 分钟。
+    """
+    current = asyncio.current_task()
+    tasks = [
+        task for task in list(_background_tasks)
+        if task is not current and not task.done()
+    ]
+    if not tasks:
+        return {"cancelled": 0, "pending": 0}
+
+    for task in tasks:
+        task.cancel()
+    done, pending = await asyncio.wait(tasks, timeout=max(0.0, float(timeout)))
+    if done:
+        await asyncio.gather(*done, return_exceptions=True)
+    if pending:
+        logger.warning(
+            "Shutdown timeout: %d background task(s) still pending after %.1fs",
+            len(pending),
+            timeout,
+        )
+    return {"cancelled": len(done), "pending": len(pending)}
 
 
 class TaskService:
@@ -131,7 +175,7 @@ class TaskService:
                 return
             task.status = "error"
             task.error_msg = detail
-            task.finished_at = datetime.utcnow()
+            task.finished_at = utcnow()
             await db.commit()
 
     @staticmethod
@@ -173,7 +217,7 @@ class TaskService:
 
             _cancel_requested.add(task_id)
             task.status = "cancelled"
-            task.finished_at = datetime.utcnow()
+            task.finished_at = utcnow()
             task.error_msg = ""
             try:
                 await db.commit()
@@ -195,17 +239,17 @@ class TaskService:
                 # 这个引擎不支持取消：本地状态照样记成 cancelled，只是引擎那边会跑完
                 pass
             except Exception as e:  # noqa: BLE001 —— 引擎侧失败不能反过来否定用户的取消
-                print(f"[TaskService] 通知引擎取消失败（本地已标记 cancelled）: {e}")
+                logger.warning("通知引擎取消失败（本地已标记 cancelled）：%s", e)
         return task
 
     @staticmethod
-    async def _finish_task(db: AsyncSession, task: Task, template: Template, provider, prompt_id: str):
+    async def _finish_task(db: AsyncSession, task: Task, template: Template, provider, prompt_id: str, engine_name: str = ""):
         """等引擎出结果并落库。execute_task（新任务）与 resume_task（重启接回）共用。
 
         抽出来是为了让「重启后接着跑」不必再走一遍提交 —— prompt 已经在引擎上，
         重新挂上去轮询就行，跑完照常按 output_config 取产出、存素材。
         """
-        result = await TaskService._poll_result(db, task, provider, prompt_id)
+        result = await TaskService._poll_result(db, task, provider, prompt_id, engine_name=engine_name)
 
         if result.status == TaskStatus.CANCELLED:
             return  # 终态已由 cancel_task 写好，别覆盖
@@ -245,7 +289,7 @@ class TaskService:
                         **(current.result or {}),
                         "outputs": outputs,
                     }
-                    current.finished_at = datetime.utcnow()
+                    current.finished_at = utcnow()
                     await db.commit()
             except BaseException:
                 await TaskService._discard_staged_assets(db, staged_assets)
@@ -264,27 +308,48 @@ class TaskService:
         """后台执行任务：加载模板 → 注入参数 → 提交引擎 → 轮询结果 → 存储素材"""
         async with _run_slots:  # 并发闸门：超出 MAX_CONCURRENT_TASKS 的在这里排队
             async with async_session() as db:
-                task = await db.get(Task, task_id)
-                if not task:
-                    return
+                try:
+                    task = await db.get(Task, task_id)
+                    if not task:
+                        return
 
-                # 排队等闸门期间可能已经被取消了（cancel_task 不经过这里）
-                if _cancel_requested_for(task.id) or task.status == "cancelled":
-                    return
+                    # 排队等闸门期间可能已经被取消了（cancel_task 不经过这里）
+                    if _cancel_requested_for(task.id) or task.status in _TERMINAL_STATUSES:
+                        return
 
-                template = await db.get(Template, task.template_id)
-                if not template:
-                    await TaskService._commit_error(
-                        db,
-                        task.id,
-                        "Template not found",
+                    template = await db.get(Template, task.template_id)
+                    if not template:
+                        await TaskService._commit_error(
+                            db,
+                            task.id,
+                            "Template not found",
+                        )
+                        return
+
+                    # pending→running 的提交必须持 lifecycle 锁 + 重读：并发
+                    # cancel_task 的 commit 可能恰好落在上面 db.get 与这次 commit
+                    # 之间，无锁覆盖会把已提交的 cancelled 打回 running，
+                    # 任务从此永远卡在 running（前端一直转圈）
+                    async with thumbnail_lifecycle([task_lifecycle_key(task.id)]):
+                        current = await TaskService._reload_task(db, task.id)
+                        if (
+                            current is None
+                            or current.status != "pending"
+                            or _cancel_requested_for(task.id)
+                        ):
+                            return
+                        current.status = "running"
+                        current.started_at = utcnow()
+                        await db.commit()
+                except Exception as e:  # noqa: BLE001 —— 入口 db.get/commit 失败不能让任务永远停 running
+                    logger.error(
+                        "Task execute entry failed task_id=%s",
+                        task_id,
+                        exc_info=(type(e), e, e.__traceback__),
                     )
+                    await db.rollback()
+                    await TaskService._commit_error(db, task_id, "任务启动阶段数据库错误")
                     return
-
-                # 更新状态
-                task.status = "running"
-                task.started_at = datetime.utcnow()
-                await db.commit()
 
                 try:
                     with acquire_provider(template.engine) as provider:
@@ -327,7 +392,7 @@ class TaskService:
                             try:
                                 await provider.cancel(prompt_id)
                             except Exception as e:  # noqa: BLE001
-                                print(f"[TaskService] 补刀取消引擎任务失败: {e}")
+                                logger.warning("补刀取消引擎任务失败：%s", e)
                             return
 
                         await TaskService._finish_task(
@@ -336,6 +401,7 @@ class TaskService:
                             template,
                             provider,
                             prompt_id,
+                            engine_name=template.engine,
                         )
 
                 except Exception as e:
@@ -357,19 +423,52 @@ class TaskService:
         """
         async with _run_slots:
             async with async_session() as db:
-                task = await db.get(Task, task_id)
-                if not task or not task.provider_task_id:
-                    return
-                if task.status in ("done", "error", "cancelled"):
-                    return
+                template: Template | None = None
+                entry_engine = "?"
+                try:
+                    task = await db.get(Task, task_id)
+                    if not task or not task.provider_task_id:
+                        return
+                    if task.status in ("done", "error", "cancelled"):
+                        return
 
-                template = await db.get(Template, task.template_id)
-                if not template:
-                    await TaskService._commit_error(
-                        db,
-                        task.id,
-                        "Template not found",
+                    template = await db.get(Template, task.template_id)
+                    if not template:
+                        await TaskService._commit_error(
+                            db,
+                            task.id,
+                            "Template not found",
+                        )
+                        return
+                    # 在 commit（会 expire_all）之前先把 engine 名捞出来，
+                    # 异常分支里直接读 template.engine 会触发 lazy 刷新 → MissingGreenlet
+                    entry_engine = template.engine
+
+                    # 与 execute_task 同理：持 lifecycle 锁 + 重读，防止并发
+                    # cancel 的 commit 落在读/写之间被覆盖（pending 接回场景下
+                    # 会把 cancelled 打回 running）
+                    async with thumbnail_lifecycle([task_lifecycle_key(task.id)]):
+                        current = await TaskService._reload_task(db, task.id)
+                        if (
+                            current is None
+                            or current.status not in ("pending", "running")
+                            or _cancel_requested_for(task.id)
+                        ):
+                            return
+                        current.status = "running"
+                        current.started_at = current.started_at or utcnow()
+                        await db.commit()
+                except Exception as e:  # noqa: BLE001 —— 入口 db.get/commit 失败不能让任务永远停 running
+                    # 错误边界契约：持久化的 error_msg 只放 safe_detail（无明文密钥），
+                    # 服务端日志保留 task/provider 上下文 + 原始异常 traceback
+                    logger.error(
+                        "Task resume entry failed task_id=%s provider=%s",
+                        task_id,
+                        entry_engine,
+                        exc_info=(type(e), e, e.__traceback__),
                     )
+                    await db.rollback()
+                    await TaskService._commit_error(db, task_id, safe_detail(e))
                     return
 
                 persisted_task_id = task.id
@@ -377,15 +476,13 @@ class TaskService:
                 engine_name = template.engine
                 try:
                     with acquire_provider(engine_name) as provider:
-                        task.status = "running"
-                        task.started_at = task.started_at or datetime.utcnow()
-                        await db.commit()
                         await TaskService._finish_task(
                             db,
                             task,
                             template,
                             provider,
                             provider_task_id,
+                            engine_name=engine_name,
                         )
                 except Exception as e:  # noqa: BLE001
                     logger.error(
@@ -436,7 +533,7 @@ class TaskService:
                     else:
                         task.status = "error"
                         task.error_msg = "服务重启时任务还没提交到引擎，可点击重试"
-                        task.finished_at = datetime.utcnow()
+                        task.finished_at = utcnow()
                         failed.append(task.id)
                 await db.commit()
 
@@ -453,6 +550,7 @@ class TaskService:
         provider,
         prompt_id: str,
         max_wait: int | None = None,
+        engine_name: str = "",
     ):
         """轮询引擎状态，期间把进度回写到 task.progress。
 
@@ -462,12 +560,44 @@ class TaskService:
         max_wait = settings.TASK_TIMEOUT_SECONDS if max_wait is None else max_wait
         started = time.monotonic()
         interval = settings.TASK_POLL_INTERVAL
+        grace_deadline = 0.0  # get_status 连续失败时，宽限到什么时候
         while time.monotonic() - started < max_wait:
             # 取消优先于一切：在轮询间隙这个安全点退出
             if _cancel_requested_for(task.id):
                 return GenerationResult(status=TaskStatus.CANCELLED)
 
-            result = await provider.get_status(prompt_id)
+            try:
+                result = await provider.get_status(prompt_id)
+            except Exception as e:  # noqa: BLE001
+                # 单次瞬时失败（网络抖动/引擎瞬时 busy）不判败：在宽限窗口内
+                # 继续轮询；窗口耗尽才判 error，并且**先**撤掉引擎侧 prompt
+                # （不撤的话它继续占显存跑完，产物成了没人收的孤儿）
+                if grace_deadline == 0.0:
+                    grace_deadline = time.monotonic() + _POLL_FAIL_GRACE_SECONDS
+                if time.monotonic() >= grace_deadline:
+                    try:
+                        await provider.cancel(prompt_id)
+                    except Exception:  # noqa: BLE001
+                        logger.warning("查询失败判败前撤引擎任务失败 prompt_id=%s", prompt_id, exc_info=True)
+                    # 错误边界契约：持久化的 error_msg 已由调用方 safe_detail 脱敏，
+                    # 但服务端日志必须保留原始异常 + task/provider 上下文（排障用）
+                    logger.error(
+                        "引擎状态查询连续失败，判败 task_id=%s provider=%s",
+                        task.id,
+                        engine_name or "?",
+                        exc_info=(type(e), e, e.__traceback__),
+                    )
+                    return GenerationResult(
+                        status=TaskStatus.ERROR,
+                        error=(
+                            f"引擎状态查询连续失败超过 "
+                            f"{int(_POLL_FAIL_GRACE_SECONDS)} 秒：{safe_detail(e)}"
+                        ),
+                    )
+                await asyncio.sleep(interval)
+                continue
+            grace_deadline = 0.0
+
             if result.status in (TaskStatus.DONE, TaskStatus.ERROR):
                 return result
             # 进度回写，前端进度条实时可见
@@ -480,7 +610,7 @@ class TaskService:
         try:
             await provider.cancel(prompt_id)
         except Exception as e:  # noqa: BLE001
-            print(f"[TaskService] 超时后取消引擎任务失败: {e}")
+            logger.warning("超时后取消引擎任务失败：%s", e)
         return GenerationResult(
             status=TaskStatus.ERROR,
             error=f"任务执行超时（超过 {max_wait} 秒），已向引擎发出中断",
@@ -512,11 +642,15 @@ class TaskService:
         # generic_api 提取产物时 filename 已截成纯文件名（URL 在 url 字段），
         # 传纯文件名会拼出 /files//xxx.png 的错误路径，素材根本落不了盘
         src = output.get("url") or output["filename"]
+        raw_name = Path(output["filename"]).name or f"{uuid.uuid4().hex}.bin"
+        existing = await db.execute(
+            select(Asset.file_name).where(Asset.task_id == task.id)
+        )
+        safe_name = unique_asset_name(raw_name, set(existing.scalars().all()))
         file_bytes = await provider.download_output(
             src, output.get("subfolder", ""), output.get("type", "output")
         )
-        # 保存文件（文件名只取纯名字，防止路径穿越/非法字符）
-        safe_name = Path(output["filename"]).name or f"{uuid.uuid4().hex}.bin"
+        # 保存文件（文件名已去路径并在同任务内去重）
         # 插件产物常是无扩展名的 CDN URL → 扩展名猜不出时看文件头，否则视频会被当图片渲染
         mime = guess_mime(safe_name, file_bytes)
 

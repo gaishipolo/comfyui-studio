@@ -1,5 +1,16 @@
-r"""清理真实库中的测试残留行（只删测试 task_id，不碰真实数据）"""
-import asyncio, sys
+r"""清理真实库中的测试残留行。
+
+删除范围（默认 DRY-RUN 只打印，加 --apply 才真删）：
+- task_id 以测试前缀开头的 assets / tasks
+- 名字以**测试脚本专用前缀**开头的 templates，并级联其任务与素材
+- username 以 deltest- 开头且名下 0 任务的 users
+
+**绝不碰产品数据**：模板前缀是显式 allow-list（每个前缀对应哪个测试脚本
+有注释），产品演示模板「测试模板-M5」另在 PROTECTED_TEMPLATE_NAMES 里
+双保险——即使某天前缀失手命中它也会被排除。
+"""
+import asyncio
+import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -9,8 +20,37 @@ from app.database import engine
 
 # 测试脚本用过的 task_id 前缀
 TEST_TASK_PREFIXES = ("persist-", "je-", "smoke-", "e2e-", "fix-")
-# 测试脚本建的模板名前缀（任务/素材没有 DELETE 接口，只能按模板名级联清理）
-TEST_TEMPLATE_PREFIXES = ("验证用-", "测试模板-")
+
+# 测试脚本建的模板名前缀（任务/素材没有 DELETE 接口，只能按模板名级联清理）。
+# **显式 allow-list**：只收录各测试脚本实际创建的前缀，不用宽泛前缀——
+# 宽前缀（如曾经的「测试模板-」）会命中产品演示模板「测试模板-M5」。
+TEST_TEMPLATE_PREFIXES = (
+    "验证用-B5-generic-",  # verify_b5_b6.py
+    "验证用模板-",          # 历史 B9 fixture
+    "选材验证-",            # verify_from_asset_upload.py
+    "素材筛选-",            # verify_asset_filters.py
+    "删除能力-",            # verify_delete_assets_tasks.py
+    "用量验证-",            # verify_usage_stats.py
+    "隔离验证-",            # verify_user_isolation.py
+    "停用语义-",            # verify_delete_semantics.py
+    "deltest-",             # verify_template_export.py / verify_multi_image_api.py
+)
+
+# 双保险：这些是产品/演示模板，即便命中上面的测试前缀也绝不删。
+PROTECTED_TEMPLATE_NAMES = frozenset({"测试模板-M5"})
+
+
+def select_template_victims(
+    template_rows,
+    prefixes=TEST_TEMPLATE_PREFIXES,
+    protected=PROTECTED_TEMPLATE_NAMES,
+):
+    """从 (id, name) 行里挑出可清理的测试模板，保护名单永远排除。"""
+    return [
+        (tid, nm)
+        for tid, nm in template_rows
+        if (nm or "") and (nm or "").startswith(prefixes) and (nm or "") not in protected
+    ]
 
 
 async def main():
@@ -37,8 +77,7 @@ async def main():
         # 4. 测试模板 + 级联（任务/素材没有 DELETE 接口，只能按模板名前缀定位）
         r = await conn.execute(text("SELECT id, name FROM templates"))
         tpl_rows = r.fetchall()
-        tpl_victims = [(tid_, nm) for tid_, nm in tpl_rows
-                       if (nm or "").startswith(TEST_TEMPLATE_PREFIXES)]
+        tpl_victims = select_template_victims(tpl_rows)
         print(f"测试残留 templates {len(tpl_victims)} 条: {[nm for _, nm in tpl_victims]}")
         tpl_ids = [tid_ for tid_, _ in tpl_victims]
         cascaded_tasks = [tid for tid, tpid in trows if tpid in tpl_ids]
@@ -76,4 +115,8 @@ async def main():
         print(f"\n[APPLIED] 清理后 assets 共 {r.scalar_one()} 条")
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    import live_guard
+    live_guard.require_live_ok()
+    asyncio.run(main())
+

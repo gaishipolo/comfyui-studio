@@ -11,6 +11,9 @@
 
 需要 COMFYUI_STUDIO_TEST_BASE_URL 指向隔离后端，且 ComfyUI 引擎可达。
 """
+import live_guard
+live_guard.require_live_ok()
+
 import asyncio
 import json
 import sys

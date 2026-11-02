@@ -11,6 +11,9 @@
     python tests/align_template_fields.py           # 只看差异
     python tests/align_template_fields.py --apply   # 真正写回
 """
+import live_guard
+live_guard.require_live_ok()
+
 import argparse
 import json
 import sys

@@ -58,6 +58,11 @@ _run_slots = asyncio.Semaphore(max(1, int(settings.MAX_CONCURRENT_TASKS)))
 浪费一份显存和时间。`resume_task` 与 `execute_task` 的唯一区别就是**不 submit**，
 直接拿旧 `prompt_id` 走 `_finish_task` 收尾。
 
+**进度限制**：ComfyUI 的细粒度进度来自按 `client_id` 订阅的 WebSocket。后端重启
+会生成新 `client_id`，旧 prompt 不会把历史/后续 WS 事件推给新连接，因此接回任务
+只能靠 `/queue` / `/history` 轮询显示粗粒度进度，直到终态再变为 100%。这不影响
+结果接回，也不会重复 submit；只是重启后的进度条精度下降，属现有协议约束。
+
 ### 4.2 启动接线
 
 `main.py` 的 startup 里 `await TaskService.reap_stale_tasks()`，然后打印：

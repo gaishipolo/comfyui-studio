@@ -132,13 +132,13 @@ async def test_invalid_bearer_is_rejected_without_consuming_body() -> None:
     assert app.calls == 0, app.calls
 
 
-async def test_oversized_and_invalid_content_length_never_reach_body_or_app() -> None:
+async def test_oversized_content_length_never_reaches_body_or_app() -> None:
     cases = [
         ("/api/upload/image", 21 * MiB + 1, None),
         ("/api/upload/file", 51 * MiB + 1, {"kind": "audio"}),
         ("/api/upload/file", 201 * MiB + 1, {"kind": "video"}),
         ("/api/assets/batch-download", 64 * 1024 + 1, None),
-        ("/api/upload/file", "invalid", {"kind": "image"}),
+        ("/api/assets/batch-download/prepare", 64 * 1024 + 1, None),
     ]
     for path, length, query in cases:
         app, receive, status, detail = await invoke(
@@ -149,6 +149,23 @@ async def test_oversized_and_invalid_content_length_never_reach_body_or_app() ->
         assert detail == {"detail": "Request body too large"}, detail
         assert receive.calls == 0, (path, receive.calls)
         assert app.calls == 0, (path, app.calls)
+
+
+async def test_invalid_or_duplicate_content_length_is_400() -> None:
+    scopes = [
+        scope_for("/api/upload/file", content_length="invalid", query={"kind": "image"}),
+        scope_for("/api/assets/batch-download", content_length=-1),
+    ]
+    duplicate = scope_for("/api/assets/batch-download", content_length=2)
+    duplicate["headers"].append((b"content-length", b"2"))
+    scopes.append(duplicate)
+
+    for scope in scopes:
+        app, receive, status, detail = await invoke(scope, [b"must-not-be-read"])
+        assert status == 400, (scope["headers"], status)
+        assert detail == {"detail": "Invalid Content-Length"}, detail
+        assert receive.calls == 0
+        assert app.calls == 0
 
 
 async def test_chunked_overflow_is_consumed_only_by_gate_and_never_reaches_app() -> None:
@@ -197,6 +214,34 @@ async def test_audio_video_raw_allowance_boundaries_reach_app() -> None:
         assert app.bodies == [b"small-test-body"]
 
 
+async def test_prepare_batch_endpoint_shares_batch_limit() -> None:
+    # /prepare 是现行批量下载入口：必须和旧 /batch-download 同一道 64KB 闸
+    oversized = b"[" + b'"0123456789abcdef",' * (20 * 1024) + b"]"  # >64KB
+    app, receive, status, detail = await invoke(
+        scope_for("/api/assets/batch-download/prepare", content_length=len(oversized)),
+        [oversized[:123], oversized[123:]],
+    )
+    assert status == 413, (len(oversized), status)
+    assert detail == {"detail": "Request body too large"}, detail
+    assert app.calls == 0, app.calls
+
+    prepare_body = b" " * (64 * 1024)
+    app, _receive, status, _detail = await invoke(
+        scope_for("/api/assets/batch-download/prepare", content_length=len(prepare_body)),
+        [prepare_body[:123], prepare_body[123:]],
+    )
+    assert status == 204, status
+    assert app.bodies == [prepare_body]
+
+    app, receive, status, detail = await invoke(
+        scope_for("/api/assets/batch-download/prepare", token=None, content_length=4),
+        [b"[]"],
+    )
+    assert status == 401, status
+    assert receive.calls == 0
+    assert app.calls == 0
+
+
 async def test_options_and_non_target_paths_are_unchanged() -> None:
     cases = [
         scope_for("/api/upload/file", method="OPTIONS", token=None, content_length=4),
@@ -214,9 +259,11 @@ async def main() -> int:
     tests = [
         test_missing_bearer_is_rejected_without_consuming_body,
         test_invalid_bearer_is_rejected_without_consuming_body,
-        test_oversized_and_invalid_content_length_never_reach_body_or_app,
+        test_oversized_content_length_never_reaches_body_or_app,
+        test_invalid_or_duplicate_content_length_is_400,
         test_chunked_overflow_is_consumed_only_by_gate_and_never_reaches_app,
         test_exact_batch_limit_and_exact_file_payload_reach_app_unchanged,
+        test_prepare_batch_endpoint_shares_batch_limit,
         test_audio_video_raw_allowance_boundaries_reach_app,
         test_options_and_non_target_paths_are_unchanged,
     ]

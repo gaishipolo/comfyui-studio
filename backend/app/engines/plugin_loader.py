@@ -10,6 +10,7 @@
 import ast
 import importlib.util
 import inspect
+import re
 import sys
 import uuid
 from dataclasses import asdict, is_dataclass
@@ -23,6 +24,7 @@ PLUGIN_DIR = Path(__file__).resolve().parents[2] / "plugins"
 
 # 依赖白名单：标准库 + httpx + 本项目（拿引擎基类）。白名单外静态拒绝
 _ALLOWED_MODULES = set(sys.stdlib_module_names) | {"httpx", "app"}
+SAFE_PROVIDER_NAME = re.compile(r"^[a-z0-9_-]{1,64}$")
 
 # 内置引擎注册名，插件不许撞
 _RESERVED_NAMES = {"comfyui", "generic_api"}
@@ -47,7 +49,7 @@ def _check_dependencies(tree: ast.AST) -> None:
                 bad.add(node.module)
     if bad:
         raise PluginError(
-            f"依赖不在白名单（只允许标准库 / httpx / app.engines.base）: {sorted(bad)}"
+            f"依赖不在白名单（只允许标准库 / httpx / app 顶层包）: {sorted(bad)}"
         )
 
 
@@ -75,6 +77,8 @@ def _validate(cls: type[GenerationProvider]) -> None:
     name = getattr(cls, "name", "")
     if not name:
         raise PluginError("Provider.name 不能为空（这是引擎注册名）")
+    if not SAFE_PROVIDER_NAME.fullmatch(name):
+        raise PluginError("Provider 注册名不合法（限小写字母/数字/下划线/连字符，最长 64）")
     if name in _RESERVED_NAMES:
         raise PluginError(f"注册名「{name}」与内置引擎冲突，换一个")
     caps = getattr(cls, "capabilities", None)
@@ -133,10 +137,15 @@ def load_plugin_file(path: Path) -> dict:
         sys.modules.pop(module_name, None)
         raise PluginError(f"代码执行失败: {type(e).__name__}: {e}") from e
 
-    cls = _find_provider_cls(module)
-    _validate(cls)
-    register_provider(cls.name, cls)
-    return describe_provider(cls)
+    try:
+        cls = _find_provider_cls(module)
+        _validate(cls)
+        register_provider(cls.name, cls)
+        return describe_provider(cls)
+    finally:
+        # 类对象已经持有自己的 globals；成功加载后无需让每次 UUID 模块名
+        # 永久占在 sys.modules 里。重复升级插件时否则会线性增长。
+        sys.modules.pop(module_name, None)
 
 
 def load_all_plugins() -> list[dict]:
@@ -148,6 +157,16 @@ def load_all_plugins() -> list[dict]:
     results: list[dict] = []
     PLUGIN_DIR.mkdir(parents=True, exist_ok=True)
     for path in sorted(PLUGIN_DIR.glob("*.py")):
+        if path.name.startswith("_upload_"):
+            try:
+                path.unlink()
+            except OSError as exc:
+                results.append({
+                    "file": path.name,
+                    "ok": False,
+                    "error": f"清理上传临时文件失败: {exc}",
+                })
+            continue
         try:
             info = load_plugin_file(path)
             results.append({"file": path.name, "ok": True, **info})

@@ -5,12 +5,13 @@
  *
  *  后端会再校验一遍（旧密码不对 → 400；新旧相同 → 400；少于 6 位 → 422），
  *  这里做的是**提前**拦住，好让用户在按下按钮前就知道哪里填错了。 */
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { changePassword } from '../api/client'
+import { useModalKeyboard } from './useModalKeyboard'
 
 interface Props {
   onClose: () => void
-  /** 改密成功后回调（顶栏可以提示一句，不必重登 —— token 不受影响） */
+  /** 改密成功后回调。后端会吊销旧 token，调用方应退出当前会话。 */
   onSuccess?: () => void
 }
 
@@ -20,6 +21,8 @@ export default function ChangePasswordModal({ onClose, onSuccess }: Props) {
   const [confirm, setConfirm] = useState('')
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
+  const dialogRef = useRef<HTMLDivElement>(null)
+  useModalKeyboard(true, dialogRef, onClose)
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -58,11 +61,16 @@ export default function ChangePasswordModal({ onClose, onSuccess }: Props) {
       onClick={onClose}
     >
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="change-password-title"
+        tabIndex={-1}
         className="flex w-full max-w-md flex-col border border-rule bg-paper"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between gap-xs border-b border-rule p-md">
-          <h3 className="font-display text-title">修改密码</h3>
+          <h3 id="change-password-title" className="font-display text-title">修改密码</h3>
           <button type="button" onClick={onClose} className="x-btn" aria-label="关闭修改密码">
             ✕
           </button>
@@ -119,7 +127,7 @@ export default function ChangePasswordModal({ onClose, onSuccess }: Props) {
             <button type="button" onClick={onClose} className="btn-quiet">
               取消
             </button>
-            <button type="submit" className="btn-primary" disabled={saving}>
+            <button type="submit" className="btn btn-primary" disabled={saving}>
               {saving ? '保存中…' : '保存'}
             </button>
           </div>

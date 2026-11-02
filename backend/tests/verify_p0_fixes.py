@@ -6,6 +6,9 @@ COMFYUI_STUDIO_TEST_BASE_URL to its origin; the manual default remains port 8000
 """
 
 from __future__ import annotations
+import live_guard
+live_guard.require_live_ok()
+
 
 import asyncio
 import io

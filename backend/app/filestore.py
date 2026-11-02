@@ -307,8 +307,20 @@ class MinioFileStore:
         try:
             self._c().stat_object(self.bucket, key)
             return True
-        except Exception:
-            return False
+        except Exception as exc:
+            if (
+                isinstance(exc, FileNotFoundError)
+                or _object_error_code(exc) in _MISSING_OBJECT_CODES
+            ):
+                return False
+            logger.error(
+                "检查对象存储素材失败 bucket=%s key=%s code=%s",
+                self.bucket,
+                key,
+                _object_error_code(exc),
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+            raise FileStoreUnavailableError() from exc
 
     def read_bytes(self, file_path: str) -> bytes | None:
         handle = self.open(file_path)

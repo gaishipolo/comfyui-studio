@@ -112,10 +112,11 @@ class DownloadTicketRegistry:
             return
         if ticket.expiry_task is not None and not ticket.expiry_task.done():
             ticket.expiry_task.cancel()
-        self._unlink(ticket.archive_path)
+        self.discard_archive(ticket.archive_path)
 
     @staticmethod
-    def _unlink(path: Path) -> None:
+    def discard_archive(path: Path) -> None:
+        """Best-effort, idempotent deletion for an archive no longer ticketed."""
         try:
             Path(path).unlink()
         except FileNotFoundError:
@@ -127,7 +128,7 @@ class DownloadTicketRegistry:
         for ticket in tickets:
             if ticket.expiry_task is not None and not ticket.expiry_task.done():
                 ticket.expiry_task.cancel()
-            self._unlink(ticket.archive_path)
+            self.discard_archive(ticket.archive_path)
 
     def active_count(self) -> int:
         return len(self._tickets)

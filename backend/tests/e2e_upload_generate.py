@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 """Real E2E: upload a configured image, generate, and persist an asset."""
 
+import live_guard
+live_guard.require_live_ok()
+
 import json
 import mimetypes
 import os

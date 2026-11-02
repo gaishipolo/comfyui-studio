@@ -12,6 +12,9 @@ workflow_file 指向它」—— 注意这也会列出「刚上传还没建模�
     python tests/cleanup_orphan_workflows.py --apply
     python tests/cleanup_orphan_workflows.py --pattern evil_smoke_ --apply
 """
+import live_guard
+live_guard.require_live_ok()
+
 import argparse
 import asyncio
 import sys

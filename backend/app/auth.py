@@ -1,6 +1,6 @@
 """认证模块 — 密码哈希、JWT、权限依赖"""
 import secrets
-from datetime import datetime, timedelta
+from datetime import timedelta
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError, jwt
@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database import get_db
 from app.models.models import User
+from app.timeutils import utcnow
 
 # 配置 — SECRET_KEY 从环境变量读取，未配置时生成临时密钥（重启后已有 token 失效）
 SECRET_KEY = settings.SECRET_KEY
@@ -41,9 +42,21 @@ def create_token(user: User) -> str:
         "sub": user.id,
         "username": user.username,
         "role": user.role,
-        "exp": datetime.utcnow() + timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS),
+        # 版本号随改密递增：JWT 无状态，靠它让旧 token 在改密后立即失效
+        "ver": int(getattr(user, "token_version", 0) or 0),
+        "exp": utcnow() + timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS),
     }
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def token_version_matches(payload: dict, user: User) -> bool:
+    """校验 token 里的版本号是否仍是当前用户的有效版本。
+
+    老 token（改密功能上线前签发）没有 ver 字段，视为版本 0；用户一旦改密
+    token_version 变为 >=1，这些老 token 立即失效。"""
+    token_ver = int(payload.get("ver", 0) or 0)
+    user_ver = int(getattr(user, "token_version", 0) or 0)
+    return token_ver == user_ver
 
 
 def decode_token(token: str) -> dict:
@@ -71,6 +84,9 @@ async def get_current_user(
     user = await db.get(User, user_id)
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="User not found or inactive")
+    # 改密/重置后旧 token 立即失效（版本号对不上）
+    if not token_version_matches(payload, user):
+        raise HTTPException(status_code=401, detail="Token has been revoked")
     return user
 
 

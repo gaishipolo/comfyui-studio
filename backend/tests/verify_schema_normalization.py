@@ -1,4 +1,7 @@
 """验证 input_schema 归一化：写入时补齐缺键，读出时也归一化（兼容存量脏数据）"""
+import live_guard
+live_guard.require_live_ok()
+
 import json, sys, urllib.error, urllib.request, uuid
 
 from test_env import API_BASE_URL

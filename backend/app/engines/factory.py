@@ -18,6 +18,7 @@ from app.engines.generic_api import GenericAPIProvider
 _providers: dict[str, GenerationProvider] = {}
 _engine_configs: dict[str, dict] = {}
 _CLOSE_TIMEOUT_SECONDS = 10.0
+_LEASE_DRAIN_TIMEOUT_SECONDS = 5.0
 _retire_tasks: set[asyncio.Task[None]] = set()
 _pending_retirements: dict[int, GenerationProvider] = {}
 
@@ -157,7 +158,7 @@ def _fire_change() -> None:
         try:
             cb()
         except Exception:  # noqa: BLE001 —— 清理缓存失败不该影响注册本身
-            pass
+            log.exception("Provider registry change hook failed: %r", cb)
 
 # 引擎注册表：engine_name → Provider 类
 _REGISTRY: dict[str, type[GenerationProvider]] = {
@@ -222,7 +223,10 @@ def list_engines() -> list[str]:
     return list(_REGISTRY.keys())
 
 
-async def close_all_providers() -> None:
+async def close_all_providers(
+    *,
+    lease_timeout: float = _LEASE_DRAIN_TIMEOUT_SECONDS,
+) -> None:
     """进程退出前的统一清理（lifespan 关闭段调用）。
 
     活着的实例和已经退役但还没关完的实例并发清理。"""
@@ -234,6 +238,8 @@ async def close_all_providers() -> None:
     for state in list(_provider_states.values()):
         state.retired = True
 
+    loop = asyncio.get_running_loop()
+    lease_deadline = loop.time() + max(0.0, float(lease_timeout))
     while True:
         states = [state for state in _provider_states.values() if not state.closed]
         if not states:
@@ -242,12 +248,30 @@ async def close_all_providers() -> None:
 
         leased = [state for state in states if state.leases]
         if leased:
+            remaining = lease_deadline - loop.time()
+            if remaining <= 0:
+                log.warning(
+                    "Provider lease drain timed out after %.1f seconds; "
+                    "leaving %d active provider(s) for process exit",
+                    lease_timeout,
+                    len(leased),
+                )
+                return
             waits = []
             for state in leased:
                 if state.lease_zero is None:
                     state.lease_zero = asyncio.Event()
                 waits.append(state.lease_zero.wait())
-            await asyncio.gather(*waits)
+            try:
+                await asyncio.wait_for(asyncio.gather(*waits), timeout=remaining)
+            except TimeoutError:
+                log.warning(
+                    "Provider lease drain timed out after %.1f seconds; "
+                    "leaving %d active provider(s) for process exit",
+                    lease_timeout,
+                    len(leased),
+                )
+                return
             continue
 
         for state in states:

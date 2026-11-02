@@ -279,7 +279,9 @@ export default function GenerateWorkspace({
                               title="点开看大图"
                               onClick={() =>
                                 openAssetInNewTab(getAssetUrl(task.id, asset.file_name)).catch(
-                                  () => {},
+                                  (err) => {
+                                    alert(`打开素材失败: ${err instanceof Error ? err.message : err}`)
+                                  },
                                 )
                               }
                               className="block w-full"

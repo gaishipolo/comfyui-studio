@@ -72,6 +72,7 @@ export interface Task {
 export interface Asset {
   id: string
   task_id: string
+  /** FileStore 相对键（不是服务器绝对磁盘路径）；保留给诊断/验证。 */
   file_path: string
   file_name: string
   file_size: number
@@ -194,7 +195,7 @@ export interface FieldSpec {
   required: boolean
   default: unknown
   /** enum 选项，值直接用 API 原生值 */
-  options: string[]
+  options: (string | number | boolean)[]
   description: string
   /** 多值字段（图片可一次上传多张，表单值变数组） */
   multiple: boolean

@@ -185,15 +185,17 @@ def run_verifier(
                 "SECRET_KEY": "task7-b6-contract-secret",
             }
         )
-        return subprocess.run(
+        proc = subprocess.run(
             [sys.executable, "-u", "-X", "utf8", str(VERIFIER)],
             cwd=BACKEND,
             env=env,
-            text=True,
             capture_output=True,
             timeout=30,
             check=False,
         )
+        stdout = proc.stdout.decode("utf-8", errors="replace") if proc.stdout is not None else ""
+        stderr = proc.stderr.decode("utf-8", errors="replace") if proc.stderr is not None else ""
+        return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
 
 
 def load_verifier_module():

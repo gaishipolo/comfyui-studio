@@ -11,6 +11,9 @@
 
 全部用假客户端/假 provider，不连真引擎，可重复跑。
 """
+import live_guard
+live_guard.require_live_ok()
+
 import asyncio
 import inspect
 import sys

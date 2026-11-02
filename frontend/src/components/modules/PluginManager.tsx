@@ -40,8 +40,9 @@ export default function PluginManager({ user }: ModuleProps) {
   }, [])
 
   useEffect(() => {
+    if (user.role !== 'admin') return
     load()
-  }, [load])
+  }, [load, user.role])
 
   if (user.role !== 'admin') {
     return <p className="py-xl text-center text-base text-muted">仅管理员可管理引擎插件</p>
@@ -148,7 +149,7 @@ export default function PluginManager({ user }: ModuleProps) {
               if (f) handleUpload(f)
             }}
           />
-          <button className="btn-primary" disabled={uploading} onClick={() => fileInputRef.current?.click()}>
+          <button className="btn btn-primary" disabled={uploading} onClick={() => fileInputRef.current?.click()}>
             {uploading ? '上传中…' : '上传插件 (.py)'}
           </button>
         </div>
@@ -178,7 +179,7 @@ export default function PluginManager({ user }: ModuleProps) {
                 </div>
                 <div className="mt-xs flex flex-wrap gap-xs">
                   {Object.values(p.capabilities).map((c) => (
-                    <span key={c.kind} className="rounded bg-secondary px-sm py-xs text-xs text-secondary">
+                    <span key={c.kind} className="rounded bg-secondary px-sm py-xs text-xs text-ink-2">
                       {c.label}
                     </span>
                   ))}
@@ -220,7 +221,7 @@ export default function PluginManager({ user }: ModuleProps) {
                 <div className="mt-sm flex flex-col gap-sm">
                   {p.config_schema.map((f) => (
                     <label key={f.name} className="flex items-center gap-sm">
-                      <span className="w-40 text-sm text-secondary">
+                      <span className="w-40 text-sm text-ink-2">
                         {f.label}
                         {f.required && <span className="text-danger"> *</span>}
                       </span>
@@ -232,7 +233,8 @@ export default function PluginManager({ user }: ModuleProps) {
                         >
                           <option value="">请选择</option>
                           {f.options.map((o) => (
-                            <option key={o} value={o}>{o}</option>
+                            // option 的 key/value 只接受字符串：枚举值可能是数字/布尔
+                            <option key={String(o)} value={String(o)}>{String(o)}</option>
                           ))}
                         </select>
                       ) : (
@@ -248,7 +250,7 @@ export default function PluginManager({ user }: ModuleProps) {
                   ))}
                 </div>
                 <div className="mt-md flex gap-xs">
-                  <button className="btn-primary" onClick={() => handleSaveConfig(p.name, p.config_schema)}>
+                  <button className="btn btn-primary" onClick={() => handleSaveConfig(p.name, p.config_schema)}>
                     保存配置
                   </button>
                   <button className="btn-quiet" onClick={() => setEditingName('')}>取消</button>

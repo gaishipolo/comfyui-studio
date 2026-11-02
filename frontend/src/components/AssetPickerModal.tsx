@@ -6,10 +6,12 @@
  *  按 kind 过滤（image / video / audio）由调用方决定 —— 音频字段只能选音频，
  *  这里不做「切换类型」的入口：能选什么是字段声明的，不是用户临时决定的。
  *  multiple 时进入多选模式，点格子只切换勾选，点「确定」才提交。 */
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { Asset } from '../types'
 import { listAssets, getAssetUrl, getAssetThumbUrl } from '../api/client'
 import AuthMedia from './AuthMedia'
+import { useModalKeyboard } from './useModalKeyboard'
+
 
 export type AssetKind = 'image' | 'video' | 'audio'
 
@@ -46,6 +48,8 @@ export default function AssetPickerModal({
   const [reloadKey, setReloadKey] = useState(0)
   // 多选模式的已选集合（单选模式不用它）
   const [picked, setPicked] = useState<Set<string>>(new Set())
+  const dialogRef = useRef<HTMLDivElement>(null)
+  useModalKeyboard(true, dialogRef, onClose)
 
   // 搜索防抖 300ms，与素材库一致
   useEffect(() => {
@@ -101,13 +105,18 @@ export default function AssetPickerModal({
       onClick={onClose}
     >
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="asset-picker-title"
+        tabIndex={-1}
         className="flex max-h-[85dvh] w-full max-w-3xl flex-col overflow-hidden border border-rule bg-paper"
         onClick={(e) => e.stopPropagation()}
       >
         {/* 头部 */}
         <div className="flex items-center justify-between gap-xs border-b border-rule p-md">
           <div className="flex items-baseline gap-xs">
-            <h3 className="font-display text-title">从素材库选择</h3>
+            <h3 id="asset-picker-title" className="font-display text-title">从素材库选择</h3>
             <span className="border border-rule bg-paper-2 px-2xs text-xs text-ink-2">
               只看{KIND_LABEL[kind]}
             </span>

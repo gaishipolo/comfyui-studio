@@ -24,7 +24,13 @@ export function clearToken() {
 
 export function getStoredUser(): User | null {
   const raw = localStorage.getItem('user')
-  return raw ? JSON.parse(raw) : null
+  if (!raw) return null
+  try {
+    return JSON.parse(raw) as User
+  } catch {
+    localStorage.removeItem('user')
+    return null
+  }
 }
 
 export function setStoredUser(user: User) {
@@ -33,21 +39,32 @@ export function setStoredUser(user: User) {
 
 // ── 请求封装 ───────────────────────────────
 
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
+async function authFetch(
+  input: RequestInfo | URL,
+  options?: RequestInit,
+  reloadOn401 = true,
+): Promise<Response> {
+  const headers = new Headers(options?.headers)
   const token = getToken()
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    ...(options?.headers as Record<string, string>),
-  }
-  if (token) headers['Authorization'] = `Bearer ${token}`
-
-  const resp = await fetch(`${BASE}${path}`, { ...options, headers })
-
-  if (resp.status === 401) {
+  if (token && !headers.has('Authorization')) headers.set('Authorization', `Bearer ${token}`)
+  const resp = await fetch(input, { ...options, headers })
+  if (resp.status === 401 && reloadOn401) {
     clearToken()
     window.location.reload()
     throw new Error('登录已过期，请重新登录')
   }
+  return resp
+}
+
+async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const headers = new Headers(options?.headers)
+  if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
+  // 登录 401 是「凭据错误」，不是「现有会话过期」；reload 会把后端错误吞掉。
+  const resp = await authFetch(
+    `${BASE}${path}`,
+    { ...options, headers },
+    path !== '/auth/login',
+  )
   if (!resp.ok) {
     // 优先提取后端 detail 字段，给出可读错误
     let message = `请求失败 (${resp.status})`
@@ -69,8 +86,6 @@ export const login = (username: string, password: string) =>
     method: 'POST',
     body: JSON.stringify({ username, password }),
   })
-
-export const getMe = () => request<User>('/auth/me')
 
 /** 改自己的密码。必须提供当前密码，后端会校验且拒绝新旧相同 */
 export const changePassword = (oldPassword: string, newPassword: string) =>
@@ -121,8 +136,6 @@ export const getTemplates = () => request<Template[]>('/templates')
 /** 全量模板（含停用），管理页使用 */
 export const getAllTemplates = () => request<Template[]>('/templates?include_inactive=true')
 
-export const getTemplate = (id: string) => request<Template>(`/templates/${id}`)
-
 export const createTemplate = (data: Partial<Template>) =>
   request<Template>('/templates', { method: 'POST', body: JSON.stringify(data) })
 
@@ -135,10 +148,8 @@ export const deleteTemplate = (id: string) =>
 export const uploadWorkflow = async (file: File): Promise<WorkflowUploadResponse> => {
   const form = new FormData()
   form.append('file', file)
-  const token = getToken()
-  const resp = await fetch(`${BASE}/templates/upload-workflow`, {
+  const resp = await authFetch(`${BASE}/templates/upload-workflow`, {
     method: 'POST',
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
     body: form,
   })
   const data = await resp.json()
@@ -188,12 +199,10 @@ export const uploadInput = async (
 ): Promise<string> => {
   const form = new FormData()
   form.append('file', file)
-  const token = getToken()
-  const resp = await fetch(
+  const resp = await authFetch(
     `${BASE}/upload/file?engine=${encodeURIComponent(engine)}&kind=${kind}`,
     {
       method: 'POST',
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
       body: form,
     },
   )
@@ -202,10 +211,7 @@ export const uploadInput = async (
   return data.filename as string
 }
 
-/** 兼容旧调用点：等价于 uploadInput(file, engine, 'image') */
-export const uploadImage = (file: File, engine = 'comfyui') => uploadInput(file, engine, 'image')
-
-/** 从素材库选用已有素材推进生成引擎，返回引擎侧文件名（与 uploadImage 同构，
+/** 从素材库选用已有素材推进生成引擎，返回引擎侧文件名（与 uploadInput 同构，
  *  表单拿到文件名后走同一条参数注入链路，无需区分来源） */
 export const uploadFromAsset = async (assetId: string, engine = 'comfyui'): Promise<string> => {
   const data = await request<{ filename: string }>('/upload/from-asset', {
@@ -222,8 +228,6 @@ export const submitTask = (templateId: string, params: Record<string, unknown>, 
     method: 'POST',
     body: JSON.stringify({ template_id: templateId, params, batch_count: batchCount }),
   })
-
-export const getTask = (id: string) => request<Task>(`/tasks/${id}`)
 
 export const listTasks = (status?: string) =>
   request<Task[]>(`/tasks${status ? `?status=${status}` : ''}`)
@@ -291,12 +295,10 @@ export const deleteAsset = (assetId: string) =>
 
 /** 准备浏览器原生批量下载：返回一次性下载地址（ZIP 由下载管理器流式保存，不进页面内存） */
 export const prepareBatchDownload = async (assetIds: string[]): Promise<string> => {
-  const token = getToken()
-  const resp = await fetch(`${BASE}/assets/batch-download/prepare`, {
+  const resp = await authFetch(`${BASE}/assets/batch-download/prepare`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
     body: JSON.stringify(assetIds),
   })
@@ -406,11 +408,21 @@ export async function fetchAssetBlob(
 
 /** 带鉴权打开素材（新标签），用于替代 <a href> 直链 */
 export async function openAssetInNewTab(path: string): Promise<void> {
-  const blob = await fetchAssetBlob(path, { silent: false })
-  const url = URL.createObjectURL(blob)
-  window.open(url, '_blank', 'noopener')
-  // 稍后回收，给新标签页留出加载时间
-  setTimeout(() => URL.revokeObjectURL(url), 60_000)
+  // 必须在用户点击的同步调用栈里先开标签页；等 fetch 后再 window.open 会被
+  // 浏览器当成异步弹窗拦截。先开空白页，鉴权取流完成后再导航到 Blob URL。
+  const popup = window.open('about:blank', '_blank')
+  if (!popup) throw new Error('浏览器拦截了新标签页，请允许本站弹出窗口')
+  popup.opener = null
+  try {
+    const blob = await fetchAssetBlob(path, { silent: false })
+    const url = URL.createObjectURL(blob)
+    popup.location.href = url
+    // 稍后回收，给新标签页留出加载时间
+    setTimeout(() => URL.revokeObjectURL(url), 60_000)
+  } catch (error) {
+    popup.close()
+    throw error
+  }
 }
 
 /** 带鉴权下载素材（替代 <a href download> 直链，直链拿不到 Authorization 头） */
@@ -448,10 +460,8 @@ export const listPlugins = () => request<EnginePluginInfo[]>('/plugins')
 export const uploadPlugin = async (file: File): Promise<EnginePluginInfo> => {
   const form = new FormData()
   form.append('file', file)
-  const token = getToken()
-  const resp = await fetch(`${BASE}/plugins/upload`, {
+  const resp = await authFetch(`${BASE}/plugins/upload`, {
     method: 'POST',
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
     body: form,
   })
   const data = await resp.json()

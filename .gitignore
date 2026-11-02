@@ -5,6 +5,8 @@ backend/.env
 
 # 数据库与生成产物
 *.db
+*.db-wal
+*.db-shm
 *.sqlite*
 storage/
 backend/storage/

@@ -12,9 +12,10 @@ import {
 import { getVisibleModules } from './modules'
 import {
   subscribe as subscribeToasts, dismiss as dismissToast,
-  notifyOnce, emitAssetsChanged,
+  notifyOnce, emitAssetsChanged, resetNotifications,
 } from './notify'
 import { friendlyError } from './components/FriendlyError'
+import { clearTaskStatusHistory, taskPollDelay } from './components/uiBehavior'
 import type { Toast } from './notify'
 import Login from './components/Login'
 import ChangePasswordModal from './components/ChangePasswordModal'
@@ -28,7 +29,6 @@ export default function App() {
   const [engines, setEngines] = useState<EngineInfo[] | null>(null)
   const [activeKey, setActiveKey] = useState('generate')
   const [showChangePassword, setShowChangePassword] = useState(false)
-  const [notice, setNotice] = useState('')
   /** 「用这些参数再生成」的草稿：任务页发起，生成页消费 */
   const [draft, setDraft] = useState<GenerateDraft | null>(null)
   /** 任务完成/失败的通知（notify.ts 全局 store，双轮询器按 key 去重） */
@@ -65,9 +65,13 @@ export default function App() {
   const prevTaskStatusRef = useRef<Map<string, string>>(new Map())
   useEffect(() => {
     if (!getToken()) return
+    let stopped = false
+    let timer: ReturnType<typeof setTimeout> | undefined
     const checkTasks = async () => {
+      let nextDelay = 15_000
       try {
         const data = await listTasks()
+        nextDelay = taskPollDelay(data)
         let changed = false
         for (const t of data) {
           const prev = prevTaskStatusRef.current.get(t.id)
@@ -95,15 +99,22 @@ export default function App() {
         if (changed) emitAssetsChanged()
       } catch {
         // 静默失败，下个轮询周期再试
+        nextDelay = 15_000
+      } finally {
+        if (!stopped) timer = setTimeout(checkTasks, nextDelay)
       }
     }
     checkTasks()
-    const timer = setInterval(checkTasks, 3000)
-    return () => clearInterval(timer)
+    return () => {
+      stopped = true
+      if (timer) clearTimeout(timer)
+    }
   }, [user])
 
   const handleLogout = () => {
     clearToken()
+    resetNotifications()
+    clearTaskStatusHistory(prevTaskStatusRef.current)
     setUser(null)
     setActiveKey('generate')
     setDraft(null)
@@ -234,17 +245,6 @@ export default function App() {
 
       {/* 主内容 — 渲染激活的模块组件 */}
       <main className="container flex-1 py-lg">
-        {notice && (
-          <p
-            className="mb-md border border-rule bg-paper-2 p-sm text-sm text-ink"
-            role="status"
-          >
-            {notice}
-            <button className="btn-quiet ml-sm" onClick={() => setNotice('')}>
-              知道了
-            </button>
-          </p>
-        )}
         {ActiveComponent && (
           <ActiveComponent
             user={user}
@@ -286,7 +286,7 @@ export default function App() {
       {showChangePassword && (
         <ChangePasswordModal
           onClose={() => setShowChangePassword(false)}
-          onSuccess={() => setNotice('密码已修改，下次登录请用新密码')}
+          onSuccess={handleLogout}
         />
       )}
     </div>

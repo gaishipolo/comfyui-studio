@@ -1,5 +1,8 @@
 """Verify that template disable and delete remain distinct operations."""
 
+import live_guard
+live_guard.require_live_ok()
+
 import asyncio
 import json
 import sys

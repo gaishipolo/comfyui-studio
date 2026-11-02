@@ -10,6 +10,9 @@
 
 测试数据全部自建（uuid 前缀），跑完自清理，**不碰库里任何真实素材**。
 """
+import live_guard
+live_guard.require_live_ok()
+
 import asyncio
 import json
 import sys

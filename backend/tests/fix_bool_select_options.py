@@ -13,6 +13,9 @@
   python tests/fix_bool_select_options.py            # 只看会改什么
   python tests/fix_bool_select_options.py --apply    # 真改
 """
+import live_guard
+live_guard.require_live_ok()
+
 import json
 import sys
 import urllib.error

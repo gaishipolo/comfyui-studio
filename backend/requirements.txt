@@ -1,20 +1,27 @@
-fastapi>=0.115.0
-uvicorn[standard]>=0.30.0
-sqlalchemy[asyncio]>=2.0.0
-greenlet>=3.0.0
-pydantic>=2.0.0
-pydantic-settings>=2.0.0
-aiosqlite>=0.20.0
-httpx>=0.27.0
-websockets>=12.0
-python-multipart>=0.0.9
-aiofiles>=23.0.0
-python-jose>=3.5.0
-passlib>=1.7.4
+# 依赖同时给下限与上限：只有下限的话，下次重建环境会被上游的破坏性升级
+# 打穿（fastapi/pydantic 大版本、httpx 参数语义变化都出过事）。
+# 上限按「当前验证过的可用范围」给，需要新版本时显式改这里并跑回归。
+fastapi>=0.115.0,<1.0.0
+uvicorn[standard]>=0.30.0,<1.0.0
+sqlalchemy[asyncio]>=2.0.0,<3.0.0
+greenlet>=3.0.0,<4.0.0
+pydantic>=2.0.0,<3.0.0
+pydantic-settings>=2.0.0,<3.0.0
+aiosqlite>=0.20.0,<1.0.0
+httpx>=0.27.0,<1.0.0
+websockets>=12.0,<16.0
+python-multipart>=0.0.9,<1.0.0
+tzdata>=2025.2,<2027.0
+aiofiles>=23.0.0,<25.0.0
+# python-jose / passlib 上游维护停滞（见 docs/code-review-2026-11-01.md M42）：
+# 本次不动认证实现，只用上限锁住现状，迁移到 pyjwt/pwdlib 需另开一次有测试的改动。
+python-jose>=3.5.0,<4.0.0
+passlib>=1.7.4,<2.0.0
+# passlib 1.7.4 与 bcrypt>=4 不兼容（__about__ 探测报错），必须钉住 bcrypt<4
 bcrypt>=3.2,<4
-Pillow>=10.0.0
-minio>=7.2.0
+Pillow>=10.0.0,<12.0.0
+minio>=7.2.0,<8.0.0
 
 # 视频缩略图（抽一帧当封面）。纯可选：没装也不会报错，只是素材库视频卡片
 # 会退回「拉整个 mp4 显示首帧」的老行为。自带 ffmpeg 二进制，不需要系统装 ffmpeg
-imageio-ffmpeg>=0.5.0
+imageio-ffmpeg>=0.5.0,<1.0.0

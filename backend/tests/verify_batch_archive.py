@@ -440,13 +440,17 @@ async def call_response(response: FileResponse, send) -> None:
     }
 
     request_sent = False
+    # 新版 Starlette 的 FileResponse 会起一个断连监听，循环调用 receive() 直到
+    # 收到 http.disconnect。本测试里客户端不会断开：流式发送先完成、任务组取消
+    # 这个等待。后续调用必须阻塞（而不是抛错），否则误报「receive 被多调」。
+    _disconnect = asyncio.Event()
 
     async def receive():
         nonlocal request_sent
         if not request_sent:
             request_sent = True
             return {"type": "http.request", "body": b"", "more_body": False}
-        await asyncio.sleep(3600)
+        await _disconnect.wait()
         return {"type": "http.disconnect"}
 
     await response(scope, receive, send)

@@ -1,5 +1,5 @@
-"""验证标签落库 + 转义过滤（用真实 Asset 模型与真实 DB）"""
-import asyncio, sys
+"""验证标签落库 + 转义过滤（用真实 Asset 模型与真实 SQLite，但库是临时的）"""
+import asyncio, sys, tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -17,8 +17,12 @@ def clean(s: str) -> str:
 
 async def main():
     print("=== 标签落库 + 过滤验证（真实模型）===")
-    DB = Path(__file__).resolve().parents[1] / "workbench.db"
-    engine = create_async_engine(f"sqlite+aiosqlite:///{DB}")
+    # 临时数据库：不碰真实 workbench.db —— 负向断言不受真实数据干扰，
+    # 中途崩溃也不留残留（旧版直写真实库，Ctrl+C 会留下 persist-1 测试行）
+    tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    tmp.close()
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp.name}")
+    print(f"临时数据库: {tmp.name}（不碰真实 workbench.db）")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     Session = async_sessionmaker(engine, expire_on_commit=False)
@@ -73,13 +77,15 @@ async def main():
 
     await engine.dispose()
 
-    # 7. 同时确认 async_session 用的 DB 文件
-    from app.database import async_session, engine as app_engine
-    url = str(app_engine.url)
-    ok_database = "workbench.db" in url
-    print(f"\n7. app.database 引擎 URL = {url}")
-    print(f"   {clean('✅' if ok_database else '❌')} 指向同一 DB")
-    return 0 if all((ok_persist, ok_match, ok_escape, ok_database)) else 1
+    # 7. 隔离确认：本脚本全程只用了临时库
+    ok_isolated = "workbench.db" not in str(engine.url)
+    print(f"\n7. 本脚本引擎 URL = {engine.url}")
+    print(f"   {clean('✅' if ok_isolated else '❌')} 使用临时数据库，未触碰真实库")
+    try:
+        Path(tmp.name).unlink()
+    except OSError:
+        pass
+    return 0 if all((ok_persist, ok_match, ok_escape, ok_isolated)) else 1
 
 
 sys.exit(asyncio.run(main()))

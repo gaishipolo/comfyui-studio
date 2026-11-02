@@ -10,6 +10,22 @@ from app.engines.base import GenerationProvider, GenerationResult, TaskStatus
 from app.engines.comfyui_progress import ProgressTracker, reachable_node_count
 
 
+def _submit_error_detail(response: httpx.Response) -> str:
+    """Keep ComfyUI's validation diagnostics without dumping an unbounded body."""
+    try:
+        data = response.json()
+    except ValueError:
+        return (response.text.strip() or "empty response body")[:2000]
+    if isinstance(data, dict):
+        selected = {
+            key: data[key]
+            for key in ("error", "node_errors")
+            if key in data
+        }
+        data = selected or data
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"))[:2000]
+
+
 class ComfyUIProvider(GenerationProvider):
 
     name = "comfyui"
@@ -134,7 +150,13 @@ class ComfyUIProvider(GenerationProvider):
             "client_id": self.client_id,
         }
         resp = await client.post("/prompt", json=payload)
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise RuntimeError(
+                f"ComfyUI submit failed (HTTP {resp.status_code}): "
+                f"{_submit_error_detail(resp)}"
+            ) from exc
         data = resp.json()
         prompt_id = data["prompt_id"]
         # 登记执行图规模，进度条的分母。要算「可达节点数」而不是 len(workflow)：

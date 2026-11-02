@@ -39,8 +39,9 @@ export default function UserManager({ user }: ModuleProps) {
 
   useEffect(reload, [reload])
 
-  /** 账号类操作的统一收尾：失败文案直接显示后端返回的（规则说明在里面） */
-  const run = async (id: string, action: () => Promise<unknown>, okMsg: string) => {
+  /** 账号类操作的统一收尾：失败文案直接显示后端返回的（规则说明在里面）。
+   *  返回是否成功 —— 调用方据此决定要不要收起表单/清空输入，别在失败时丢输入。 */
+  const run = async (id: string, action: () => Promise<unknown>, okMsg: string): Promise<boolean> => {
     setBusyId(id)
     setError('')
     setNotice('')
@@ -48,8 +49,10 @@ export default function UserManager({ user }: ModuleProps) {
       await action()
       setNotice(okMsg)
       reload()
+      return true
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
+      return false
     } finally {
       setBusyId('')
     }
@@ -61,13 +64,15 @@ export default function UserManager({ user }: ModuleProps) {
       setError('新密码至少 6 位')
       return
     }
-    await run(
+    const ok = await run(
       u.id,
       () => resetUserPassword(u.id, pwd),
       `已重置「${u.display_name || u.username}」的密码`,
     )
-    setResetFor('')
-    setNewPassword('')
+    if (ok) {
+      setResetFor('')
+      setNewPassword('')
+    }
   }
 
   const handleCreate = async (e: React.FormEvent) => {
@@ -81,7 +86,7 @@ export default function UserManager({ user }: ModuleProps) {
       setError('初始密码至少 6 位')
       return
     }
-    await run(
+    const ok = await run(
       username,
       () =>
         registerUser({
@@ -92,22 +97,24 @@ export default function UserManager({ user }: ModuleProps) {
         }),
       `已创建账号「${username}」`,
     )
-    setShowCreate(false)
-    setDraft({ username: '', display_name: '', password: '', role: 'member' })
+    if (ok) {
+      setShowCreate(false)
+      setDraft({ username: '', display_name: '', password: '', role: 'member' })
+    }
   }
 
   return (
     <div>
       <div className="flex flex-wrap items-baseline justify-between gap-sm">
         <div>
-          <h2 className="font-display text-headline">用户管理</h2>
+          <h2 className="font-display text-section">用户管理</h2>
           <p className="text-sm text-muted">
             建号、调整账号角色与启用状态、为忘记密码的成员重置密码。
           </p>
         </div>
         <div className="flex gap-sm">
           <button
-            className={showCreate ? 'btn-quiet' : 'btn-primary'}
+            className={showCreate ? 'btn btn-quiet' : 'btn btn-primary'}
             onClick={() => {
               setShowCreate(!showCreate)
               setError('')
@@ -177,7 +184,7 @@ export default function UserManager({ user }: ModuleProps) {
               <option value="admin">管理员</option>
             </select>
           </div>
-          <button type="submit" className="btn-primary" disabled={busyId !== ''}>
+          <button type="submit" className="btn btn-primary" disabled={busyId !== ''}>
             创建
           </button>
         </form>
@@ -267,7 +274,7 @@ export default function UserManager({ user }: ModuleProps) {
                             autoFocus
                           />
                           <button
-                            className="btn-primary"
+                            className="btn btn-primary"
                             disabled={busy}
                             onClick={() => handleReset(u)}
                           >

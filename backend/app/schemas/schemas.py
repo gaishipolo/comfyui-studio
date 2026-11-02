@@ -85,7 +85,7 @@ def normalize_input_schema(value: Any) -> dict:
 # ── 模板 ──────────────────────────────────────────
 
 class TemplateBase(BaseModel):
-    name: str
+    name: str = Field(..., max_length=128)
     description: str = ""
     category: str = "image"
     icon: str = ""

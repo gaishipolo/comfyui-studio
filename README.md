@@ -106,6 +106,8 @@ npm run build                  # 产物在 frontend/dist
 | `ADMIN_INITIAL_PASSWORD` | 首次启动的管理员密码 | 空（随机生成打印一次） |
 | `DATABASE_URL` | 数据库连接串 | SQLite 本地文件 |
 | `COMFYUI_BASE_URL` | ComfyUI 服务地址 | `http://127.0.0.1:8188` |
+| `GENERIC_API_TIMEOUT` | 通用 HTTP API 提交/轮询超时（秒） | `300` |
+| `GENERIC_API_DOWNLOAD_TIMEOUT` | 通用 HTTP API 产物下载超时（秒） | `60` |
 | `STORAGE_BACKEND` | `local` 或 `minio` | `local` |
 | `MINIO_*` | MinIO 端点/密钥/桶（`minio` 时生效） | — |
 | `MAX_CONCURRENT_TASKS` | 全局生成并发上限 | `2` |
@@ -134,20 +136,37 @@ npm run build                  # 产物在 frontend/dist
 
 ## 测试
 
-后端当前有 **36 个** `backend/tests/verify_*.py` 独立脚本，不依赖 pytest。以下是运行条件清单，不代表整套脚本已经在当前提交上全量通过；完整回归、UI 和真实生成证据由 Task 7 记录。
+所有命令从 `backend/` 运行。
+
+### 单元测试（离线一条命令跑完，不碰任何真实资源）
+
+`backend/tests/test_*.py`（35 个，不依赖 pytest）：鉴权吊销、请求准入、任务终态竞态、插件恢复守卫、输入校验、下载票据、登录限速、清理脚本守卫、live 脚本自检、端口匹配、整应用 ASGI 冒烟（登录→建模板→提交→列素材）等。逐个直接运行即可：
+
+```powershell
+Get-ChildItem tests\test_*.py | ForEach-Object { & .\.venv\Scripts\python.exe $_.FullName; if ($LASTEXITCODE -ne 0) { exit 1 } }
+```
+
+全部用临时 SQLite / 假 Provider / 假 HTTP，不连真实服务、不碰 `workbench.db`。
+
+### verify 脚本（37 个 `verify_*.py`）
+
+不依赖 pytest。以下是运行条件清单，不代表整套脚本已经在当前提交上全量通过；完整回归、UI 和真实生成证据由 Task 7 记录。
 
 | 类别 | 数量 | 脚本 |
 |---|---:|---|
-| 离线 / 进程内 | 8 | `verify_cancel.py`、`verify_from_asset_size_gate.py`、`verify_media_mime.py`、`verify_param_coercion.py`、`verify_progress.py`、`verify_provider_lifecycle.py`、`verify_schema_idempotent.py`、`verify_video_outputs.py` |
+| 离线 / 进程内 | 9 | `verify_cancel.py`、`verify_download_tickets.py`、`verify_from_asset_size_gate.py`、`verify_media_mime.py`、`verify_param_coercion.py`、`verify_progress.py`、`verify_provider_lifecycle.py`、`verify_schema_idempotent.py`、`verify_video_outputs.py` |
 | 临时或隔离资源，不起 FastAPI | 13 | `verify_batch_archive.py`、`verify_error_boundary.py`、`verify_filestore.py`、`verify_filestore_live.py`、`verify_grsai_plugins.py`、`verify_json_ascii.py`、`verify_json_migration.py`、`verify_json_migration_edge.py`、`verify_media_reliability.py`、`verify_multi_image.py`、`verify_queue_and_auth.py`、`verify_tag_json_each.py`、`verify_tag_persist.py` |
 | 隔离 FastAPI 服务 | 13 | `verify_asset_filters.py`、`verify_delete_assets_tasks.py`、`verify_delete_semantics.py`、`verify_frontend_contract.py`、`verify_multi_image_api.py`、`verify_p0_fixes.py`、`verify_plugin_loader.py`、`verify_prod_deploy.py`、`verify_schema_normalization.py`、`verify_template_export.py`、`verify_upload_kinds.py`、`verify_usage_stats.py`、`verify_user_isolation.py` |
 | 隔离服务 + 真实 ComfyUI | 2 | `verify_b5_b6.py`、`verify_from_asset_upload.py` |
-| 破坏性重启（不计入 36 个 verify 脚本） | - | `e2e_restart_recovery.py`（仅 Windows） |
+| 破坏性重启（不计入 37 个 verify 脚本） | - | `e2e_restart_recovery.py`（仅 Windows） |
 
-所有命令从 `backend/` 运行。服务脚本读取 `COMFYUI_STUDIO_TEST_BASE_URL`（值是服务 origin，不含 `/api`）；未设置时为兼容手工运行而默认使用 `http://127.0.0.1:8000`。例如：
+`verify_tag_persist.py` / `verify_tag_json_each.py` 使用**临时数据库**，不碰真实 `workbench.db`（负向断言不受真实数据干扰，崩溃不留残留）。
+
+**破坏性 / live 脚本必须带自检 flag**：会打真实实例、修改真实数据或杀进程的脚本（共 24 个，清单见 `tests/test_live_guard.py`）未显式设置 `COMFYUI_STUDIO_LIVE_TESTS_OK=1` 时**拒绝执行**——防止对「恰好还是默认密码」的在用实例误操作。服务脚本读取 `COMFYUI_STUDIO_TEST_BASE_URL`（值是服务 origin，不含 `/api`）；未设置时为兼容手工运行而默认使用 `http://127.0.0.1:8000`。例如：
 
 ```powershell
 $env:COMFYUI_STUDIO_TEST_BASE_URL = "http://127.0.0.1:8765"
+$env:COMFYUI_STUDIO_LIVE_TESTS_OK = "1"
 .\.venv\Scripts\python.exe tests\verify_p0_fixes.py
 ```
 
@@ -170,7 +189,7 @@ npm run test:ui
 - `verify_b5_b6.py`：B5 完全在进程内运行，使用临时 SQLite、真实 `TaskService.execute_task` 和假 `generic_api` Provider，不访问运行中服务、FileStore 或 generic/cloud HTTP。B6 才会真实提交生成任务；必须显式设置 `COMFYUI_STUDIO_B5_B6_TEMPLATE_ID` 为本轮预置模板的精确 ID。该模板必须是 `comfyui` 引擎、绑定 `image_flux2_klein_text_to_image.json`，参数映射必须精确为 `prompt -> 76.inputs.value`、`width -> 103.inputs.value`、`height -> 106.inputs.value`，输出节点必须仅为 `108`。
 - `e2e_upload_generate.py`：需要真实 ComfyUI，并在任何请求前校验 `COMFYUI_STUDIO_E2E_IMAGE_PATH` 和 `COMFYUI_STUDIO_E2E_TEMPLATE_ID`；可用 `COMFYUI_STUDIO_E2E_ENGINE` 覆盖默认 `comfyui`。模板必须接受 `ref_image`、`prompt`、`width`、`height` 参数，图片路径必须是隔离测试夹具。
 
-`verify_plugin_loader.py`、`verify_from_asset_upload.py`、`verify_usage_stats.py`、`verify_user_isolation.py`、`verify_tag_json_each.py` 和 `verify_tag_persist.py` 仍直接打开 `backend/workbench.db`；`e2e_restart_recovery.py` 和维护脚本 `backfill_video_thumbs.py` 也有同样约束。因此完整服务回归要在一次性 worktree 中使用该默认 SQLite 文件名。worktree 独占且数据库不受 Git 跟踪，测试后可删除，不会接触原工作区数据库。
+`verify_plugin_loader.py`、`verify_from_asset_upload.py`、`verify_usage_stats.py`、`verify_user_isolation.py` 仍直接打开 `backend/workbench.db`；`e2e_restart_recovery.py` 与维护脚本 `backfill_video_thumbs.py`、`cleanup_*.py`、`purge_test_residue.py`、`align_template_fields.py`、`fix_bool_select_options.py`、`smoke_fixes.py` 也有同样约束（这些脚本均已内置 `COMFYUI_STUDIO_LIVE_TESTS_OK` 自检，未设置即拒绝执行）。因此完整服务回归要在一次性 worktree 中使用该默认 SQLite 文件名。worktree 独占且数据库不受 Git 跟踪，测试后可删除，不会接触原工作区数据库。
 
 `verify_filestore_live.py` 会先探测配置的 MinIO，再退回进程内 S3 线格式服务；不允许外连时不要运行它。`verify_multi_image.py` 会写配置的存储目录，也必须使用隔离 `STORAGE_DIR`。
 
@@ -199,3 +218,10 @@ docs/             # 设计文档、开发规范（provider-dev-guide.md）
 - `backend/.env` 含密钥与初始密码，已在 `.gitignore` 中排除，**不要提交**
 - Provider 插件是服务端可执行的 Python，等同于代码部署权限，仅限管理员操作（上传有审计记录：上传者 + SHA-256）
 - 生产环境请配置独立的 `SECRET_KEY`，并把 `CORS_ORIGINS` 收紧
+
+### JWT 会话的已知取舍（有意识的设计决策，部署前请知悉）
+
+- **token 存 localStorage**：XSS 可读取 token。前端当前无 CSP，若部署到不可信网络，建议前置反向代理加 CSP 头。
+- **TTL 24 小时 + 登出不吊销**：登出只清本地，服务端旧 token 继续有效最多 24h。**改密码 / 管理员重置密码会立即吊销**该用户全部旧 token（`token_version` 机制，见 `app/auth.py`）。
+- **登录限速**：同一「用户名 + 客户端 IP」连续 5 次失败锁定 15 分钟（`app/login_guard.py`，429 返回）。内存计数，进程重启清零。
+- 如需「登出即失效」，可加服务端吊销表或缩短 `ACCESS_TOKEN_EXPIRE_HOURS`；当前按内部工具取舍，未实现。

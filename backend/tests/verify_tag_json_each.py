@@ -1,5 +1,5 @@
-"""验证 json_each 标签过滤能正确解码 \\uXXXX 转义的 JSON 列"""
-import asyncio, sys, uuid
+"""验证 json_each 标签过滤能正确解码 \\uXXXX 转义的 JSON 列（临时库）"""
+import asyncio, sys, tempfile, uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -16,8 +16,12 @@ def clean(s: str) -> str:
 
 async def main():
     print("=== json_each 标签过滤验证 ===")
-    DB = Path(__file__).resolve().parents[1] / "workbench.db"
-    engine = create_async_engine(f"sqlite+aiosqlite:///{DB}")
+    # 临时数据库：不碰真实 workbench.db —— 负向断言（期望命中 0 条）不受
+    # 真实数据干扰，中途崩溃也不留 je-1 测试行
+    tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    tmp.close()
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp.name}")
+    print(f"临时数据库: {tmp.name}（不碰真实 workbench.db）")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     Session = async_sessionmaker(engine, expire_on_commit=False)
@@ -93,6 +97,10 @@ async def main():
         print(f"6. 已清理\n\n结果: {clean('✅ 全部通过' if ok_all else '❌ 存在失败')}")
 
     await engine.dispose()
+    try:
+        Path(tmp.name).unlink()
+    except OSError:
+        pass
     return 0 if ok_all else 1
 
 

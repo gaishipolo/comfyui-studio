@@ -12,6 +12,7 @@ import { useCallback, useEffect, useState } from 'react'
 import type { UsageResponse } from '../../types'
 import { getUsage } from '../../api/client'
 import type { ModuleProps } from '../../modules/registry'
+import { localMonthStart } from '../uiBehavior'
 
 const formatSize = (bytes: number) =>
   bytes > 1024 * 1024 * 1024
@@ -27,14 +28,6 @@ const formatDuration = (s: number | null) => {
   const m = Math.floor(s / 60)
   const rest = Math.round(s % 60)
   return `${m} 分 ${rest} 秒`
-}
-
-/** 本月第一天 / 上月第一天，给快捷按钮用 */
-const monthStart = (offset: number) => {
-  const d = new Date()
-  d.setDate(1)
-  d.setMonth(d.getMonth() + offset)
-  return d.toISOString().slice(0, 10)
 }
 
 export default function UsagePanel({ user }: ModuleProps) {
@@ -58,8 +51,9 @@ export default function UsagePanel({ user }: ModuleProps) {
   }, [dateFrom, dateTo])
 
   useEffect(() => {
+    if (user.role !== 'admin') return
     load()
-  }, [load])
+  }, [load, user.role])
 
   // 普通用户点进来（理论上 Tab 都看不见，双保险）—— 后端也会 403
   if (user.role !== 'admin') {
@@ -91,7 +85,7 @@ export default function UsagePanel({ user }: ModuleProps) {
           <button
             className="btn-quiet"
             onClick={() => {
-              setDateFrom(monthStart(0))
+              setDateFrom(localMonthStart(0))
               setDateTo('')
             }}
           >
@@ -100,8 +94,8 @@ export default function UsagePanel({ user }: ModuleProps) {
           <button
             className="btn-quiet"
             onClick={() => {
-              setDateFrom(monthStart(-1))
-              setDateTo(monthStart(0))
+              setDateFrom(localMonthStart(-1))
+              setDateTo(localMonthStart(0))
             }}
           >
             上月

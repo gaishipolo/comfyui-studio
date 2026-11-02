@@ -18,6 +18,9 @@
 只有「连上了却跑挂」才算失败。
 """
 from __future__ import annotations
+import live_guard
+live_guard.require_live_ok()
+
 
 import io
 import re

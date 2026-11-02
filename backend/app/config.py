@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     # 应用
     APP_NAME: str = "ComfyUI Workbench"
     APP_VERSION: str = "0.1.0"
-    DEBUG: bool = True
+    APP_TIMEZONE: str = "Asia/Shanghai"  # 用户输入的纯日期按此时区解释，数据库仍存 naive UTC
 
     # 安全
     SECRET_KEY: str = ""  # JWT 签名密钥，生产环境必须配置；留空则启动时临时生成（重启后 token 失效）
@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     GENERIC_API_STATUS_PATH: str = "/tasks/{task_id}"
     GENERIC_API_KEY_HEADER: str = "Authorization"
     GENERIC_API_KEY_PREFIX: str = "Bearer"
+    GENERIC_API_TIMEOUT: float = 300.0
+    GENERIC_API_DOWNLOAD_TIMEOUT: float = 60.0
 
     # 文件存储
     # 后端可切换：local = 本机目录（默认）| minio = MinIO / S3 兼容对象存储。
@@ -59,6 +61,8 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
+        # 允许旧 .env 保留已删除键（如 DEBUG），避免升级后仅因废弃配置无法启动。
+        extra = "ignore"
 
 
 settings = Settings()

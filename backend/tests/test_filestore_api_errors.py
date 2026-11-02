@@ -34,6 +34,12 @@ class ScalarResult:
     def scalar_one_or_none(self):
         return self.value
 
+    def scalars(self):
+        return self
+
+    def first(self):
+        return self.value
+
 
 class AssetDB:
     def __init__(self, asset):
@@ -54,6 +60,16 @@ class BlockingStatClient:
             raise RuntimeError("test stat release timed out")
         error = RuntimeError("invalid credentials")
         error.code = "AccessDenied"
+        raise error
+
+
+class ErrorStatClient:
+    def __init__(self, code: str):
+        self.code = code
+
+    def stat_object(self, _bucket: str, _key: str):
+        error = RuntimeError(self.code)
+        error.code = self.code
         raise error
 
 
@@ -139,10 +155,24 @@ async def test_thumbnail_operational_failure_is_503_not_404() -> None:
     assert error.detail == "文件存储服务暂时不可用", error.detail
 
 
+async def test_minio_exists_distinguishes_missing_from_outage() -> None:
+    missing = MinioFileStore(client=ErrorStatClient("NoSuchKey"))
+    assert missing.exists("task/file.png") is False
+
+    unavailable = MinioFileStore(client=ErrorStatClient("AccessDenied"))
+    try:
+        unavailable.exists("task/file.png")
+    except FileStoreUnavailableError:
+        pass
+    else:
+        raise AssertionError("AccessDenied was incorrectly reported as missing")
+
+
 async def main() -> int:
     tests = [
         test_slow_minio_stat_stays_off_loop_and_maps_auth_failure_to_503,
         test_thumbnail_operational_failure_is_503_not_404,
+        test_minio_exists_distinguishes_missing_from_outage,
     ]
     failures: list[str] = []
     for test in tests:

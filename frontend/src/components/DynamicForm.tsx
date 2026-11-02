@@ -3,6 +3,7 @@ import { useState, useEffect, useRef } from 'react'
 import type { Asset, Template, TemplateField } from '../types'
 import { getAssetThumbUrl, getAssetUrl, uploadFromAsset, uploadInput } from '../api/client'
 import AssetPickerModal from './AssetPickerModal'
+import { missingRequiredList, missingRequiredUpload, normalizeBatchCount } from './uiBehavior'
 import AuthMedia from './AuthMedia'
 import { completeUpload } from './uploadTransaction'
 
@@ -567,6 +568,18 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     if (submitting || hasPendingFileOperation()) return
+    const missingUpload = missingRequiredUpload(fields, values)
+    if (missingUpload) {
+      const field = fields.find((item) => item.name === missingUpload)
+      alert(`请先上传${field?.label || '必填文件'}`)
+      return
+    }
+    const missingList = missingRequiredList(fields, values)
+    if (missingList) {
+      const field = fields.find((item) => item.name === missingList)
+      alert(`请先填写${field?.label || '必填列表'}`)
+      return
+    }
     // 过滤掉空值（多图字段的 [] 也算空）
     const params: Record<string, unknown> = {}
     for (const [k, v] of Object.entries(values)) {
@@ -580,7 +593,7 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
       }
       params[k] = v
     }
-    onSubmit(params, batchCount)
+    onSubmit(params, normalizeBatchCount(batchCount))
   }
 
   const renderField = (field: TemplateField) => {
@@ -891,7 +904,7 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
             max={32}
             className="field w-20"
             value={batchCount}
-            onChange={(e) => setBatchCount(Math.max(1, Math.min(32, Number(e.target.value))))}
+            onChange={(e) => setBatchCount(normalizeBatchCount(Number(e.target.value)))}
           />
         </div>
         <button

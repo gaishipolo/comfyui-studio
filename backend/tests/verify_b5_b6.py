@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """B5/B6/B11 verification with real ComfyUI and deterministic cleanup."""
 
+import live_guard
+
 import asyncio
 import io
 import json
@@ -268,6 +270,13 @@ def main() -> int:
 
     if not asyncio.run(verify_b5_in_process(check)):
         return 1
+
+    # B5 全程 in-process / 离线，不碰服务，无需自检。
+    # B6 会打真实服务：默认指向生产 127.0.0.1:8000，必须先过「目标可丢弃」自检；
+    # 仅当 COMFYUI_STUDIO_TEST_BASE_URL 已显式指向可丢弃目标（fake / 一次性实例）时，
+    # 目标已被调用方确认，才跳过。
+    if "COMFYUI_STUDIO_TEST_BASE_URL" not in os.environ:
+        live_guard.require_live_ok()
 
     try:
         expected_template_id = required_template_id()

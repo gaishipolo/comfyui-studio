@@ -2,14 +2,13 @@
 import asyncio
 import logging
 import uuid
-from datetime import datetime
 from pathlib import Path
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import get_db, async_session
+from app.database import get_db
 from app.models.models import Task, Template, Asset, User
 from app.schemas.schemas import TaskCreate, TaskResponse, AssetResponse
 from app.services.task_service import (
@@ -27,6 +26,7 @@ from app.filestore import (
     save_asset_file,
 )
 from app.media import guess_mime
+from app.disposition import attachment_disposition
 from app.thumbs import (
     cleanup_asset_files,
     make_image_thumb,
@@ -35,6 +35,7 @@ from app.thumbs import (
     thumbnail_lifecycle,
     wait_for_task_completion,
 )
+from app.timeutils import utcnow
 from app.access import (
     can_modify_task,
     can_view_asset,
@@ -143,8 +144,8 @@ async def submit_tasks(
 async def list_tasks(
     status: str | None = None,
     batch_id: str | None = None,
-    limit: int = 50,
-    offset: int = 0,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -258,7 +259,9 @@ async def download_asset(
         media_type=media_type,
         headers={
             "Content-Length": str(handle.size),
-            "Content-Disposition": f'attachment; filename="{safe_name}"',
+            # 文件名用户可控（中文前缀常见）：必须走 RFC 5987 编码，
+            # 裸拼会让非 latin-1 字符在 header 编码时抛错 → 500
+            "Content-Disposition": attachment_disposition(safe_name),
         },
     )
 
@@ -457,7 +460,7 @@ async def retry_task(
                 if not spawned:
                     task.status = "error"
                     task.error_msg = "Retry could not start; please retry again"
-                    task.finished_at = datetime.utcnow()
+                    task.finished_at = utcnow()
                     await db.commit()
                     await db.refresh(task)
                     raise HTTPException(

@@ -3,6 +3,9 @@ r"""用新的删除接口清理测试残留模板（顺带真实数据冒烟验�
 只清理名字以「验证用-B5-generic-」开头的模板 —— 这些是 verify_b5_b6 反复跑出来的纯测试垃圾。
 不动「测试模板-M5」（产品界面里的演示场景），也不动任何真实生成图。
 """
+import live_guard
+live_guard.require_live_ok()
+
 import json
 import sys
 import urllib.error

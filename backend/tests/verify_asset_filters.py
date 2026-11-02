@@ -9,6 +9,9 @@
 测试数据全部自建（deltest- 前缀 + uuid），跑完自清理，不碰库里真实数据。
 需要 COMFYUI_STUDIO_TEST_BASE_URL 指向正在运行的隔离后端。
 """
+import live_guard
+live_guard.require_live_ok()
+
 import asyncio
 import json
 import sys

@@ -3,7 +3,7 @@
  * 用户隔离（默认隔离 + 手动共享）：列表只会出现「自己的 + 共享给团队的」
  * （admin 多见一份全部）。共享的素材别人只能看/下载，打标签、删除、
  * 共享开关仍是作者或管理员的权利 —— 界面上直接把没有权限的操作藏掉。 */
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import type { Asset, Template, AssetTag, User } from '../types'
 import {
   listAssets, listAssetTags, addAssetTag, removeAssetTag, shareAsset,
@@ -11,6 +11,9 @@ import {
 } from '../api/client'
 import { subscribeAssetsChanged } from '../notify'
 import AuthMedia from './AuthMedia'
+import { assetListViewState, createLatestRequestGate } from './listViewState'
+import { useModalKeyboard } from './useModalKeyboard'
+
 
 interface Props {
   templates: Template[]
@@ -46,6 +49,7 @@ const formatLabel = (mime: string): string | null => {
 
 export default function AssetGallery({ templates, user }: Props) {
   const [assets, setAssets] = useState<Asset[]>([])
+  const assetRequests = useRef(createLatestRequestGate())
 
   // 归属判定：素材归属走 task.created_by（后端回填），显示名走 creator_name
   const isMine = (a: Asset) => !!a.created_by && a.created_by === user.id
@@ -64,9 +68,16 @@ export default function AssetGallery({ templates, user }: Props) {
   const [allUsers, setAllUsers] = useState<User[]>([])
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [detail, setDetail] = useState<Asset | null>(null)
+  const [tagDraft, setTagDraft] = useState('')
+  const detailDialogRef = useRef<HTMLDivElement>(null)
+  const closeDetail = useCallback(() => setDetail(null), [])
+  useModalKeyboard(Boolean(detail), detailDialogRef, closeDetail)
   const [loading, setLoading] = useState(false)
+  /** 加载失败标记：与「真的没有素材」区分开，别把网络错误渲染成空态 */
+  const [loadFailed, setLoadFailed] = useState(false)
   /** 服务端准备批量归档需要时间；忙碌态同时阻止重复提交。 */
   const [downloading, setDownloading] = useState(false)
+  const [deleting, setDeleting] = useState(false)
 
   // 搜索防抖 300ms
   useEffect(() => {
@@ -79,6 +90,11 @@ export default function AssetGallery({ templates, user }: Props) {
     setSelected(new Set())
   }, [debouncedKeyword, activeTag, activeTemplate, createdFrom, createdTo, creatorFilter, kindFilter])
 
+  useEffect(() => {
+    setTagDraft('')
+  }, [detail?.id])
+
+
   // 创建人下拉的数据源（admin 才有 —— 普通用户只见自己的，选人没意义）
   useEffect(() => {
     if (user.role !== 'admin') return
@@ -88,6 +104,7 @@ export default function AssetGallery({ templates, user }: Props) {
   }, [user.role])
 
   const fetchAssets = useCallback(async () => {
+    const request = assetRequests.current.start()
     setLoading(true)
     try {
       const params: Record<string, string> = { limit: '100' }
@@ -100,11 +117,15 @@ export default function AssetGallery({ templates, user }: Props) {
       if (kindFilter) params.kind = kindFilter
 
       const data = await listAssets(params)
+      if (!assetRequests.current.isLatest(request)) return
       setAssets(Array.isArray(data) ? data : [])
+      setLoadFailed(false)
     } catch {
+      if (!assetRequests.current.isLatest(request)) return
       setAssets([])
+      setLoadFailed(true)
     } finally {
-      setLoading(false)
+      if (assetRequests.current.isLatest(request)) setLoading(false)
     }
   }, [debouncedKeyword, activeTag, activeTemplate, createdFrom, createdTo, creatorFilter, kindFilter])
 
@@ -121,7 +142,6 @@ export default function AssetGallery({ templates, user }: Props) {
     fetchAssets()
     fetchTags()
   }, [fetchAssets, fetchTags])
-
   // 任务跑完后素材库自动刷新 —— App 层全局任务轮询发的事件，不用切页面才看得见新素材
   useEffect(() => {
     return subscribeAssetsChanged(() => {
@@ -196,39 +216,41 @@ export default function AssetGallery({ templates, user }: Props) {
 
   /** 批量删除已选素材。不可逆，会连磁盘文件一起删 */
   const handleBatchDelete = async () => {
-    if (selected.size === 0) return
+    if (selected.size === 0 || deleting) return
     if (
       !confirm(
         `确定删除选中的 ${selected.size} 个素材？\n\n此操作不可撤销，文件会一并从磁盘删除。`,
       )
     )
       return
-    const ids = [...selected]
-    const failed: string[] = []
-    const fileLeft: string[] = []
-    for (const id of ids) {
-      try {
-        const res = await deleteAsset(id)
-        if (!res.file_removed) fileLeft.push(`${id.slice(0, 8)}: ${res.file_error || '未知'}`)
-      } catch (err) {
-        failed.push(err instanceof Error ? err.message : String(err))
+    setDeleting(true)
+    try {
+      const ids = [...selected]
+      const failed: string[] = []
+      const fileLeft: string[] = []
+      for (const id of ids) {
+        try {
+          const res = await deleteAsset(id)
+          if (!res.file_removed) fileLeft.push(`${id.slice(0, 8)}: ${res.file_error || '未知'}`)
+        } catch (err) {
+          failed.push(err instanceof Error ? err.message : String(err))
+        }
       }
+      setSelected(new Set())
+      setDetail(null)
+      fetchAssets()
+      fetchTags()
+      const lines: string[] = []
+      if (failed.length) {
+        lines.push(`有 ${failed.length} 个删除失败（多为非本人提交，需管理员操作）：\n${failed.join('\n')}`)
+      }
+      if (fileLeft.length) {
+        lines.push(`${fileLeft.length} 个记录已删除，但磁盘文件未能清理：\n${fileLeft.join('\n')}`)
+      }
+      if (lines.length) alert(lines.join('\n\n'))
+    } finally {
+      setDeleting(false)
     }
-    setSelected(new Set())
-    setDetail(null)
-    fetchAssets()
-    fetchTags()
-    // 记录删除失败 ≠ 文件没清掉，两种情况分开说，别混成一句"失败"
-    const lines: string[] = []
-    if (failed.length) {
-      lines.push(`有 ${failed.length} 个删除失败（多为非本人提交，需管理员操作）：\n${failed.join('\n')}`)
-    }
-    if (fileLeft.length) {
-      lines.push(
-        `${fileLeft.length} 个记录已删除，但磁盘文件未能清理：\n${fileLeft.join('\n')}`,
-      )
-    }
-    if (lines.length) alert(lines.join('\n\n'))
   }
 
   const handleAddTag = async (assetId: string, tag: string) => {
@@ -266,6 +288,12 @@ export default function AssetGallery({ templates, user }: Props) {
   }
 
   const assetUrl = (asset: Asset) => getAssetUrl(asset.task_id, asset.file_name)
+
+  const viewState = assetListViewState({
+    loading,
+    failed: loadFailed,
+    count: assets.length,
+  })
 
   return (
     <section>
@@ -342,8 +370,8 @@ export default function AssetGallery({ templates, user }: Props) {
               >
                 {downloading ? '打包中…' : `下载 (${selected.size})`}
               </button>
-              <button onClick={handleBatchDelete} className="btn btn-danger">
-                删除 ({selected.size})
+              <button onClick={handleBatchDelete} className="btn btn-danger" disabled={deleting}>
+                {deleting ? '删除中…' : `删除 (${selected.size})`}
               </button>
             </>
           )}
@@ -393,7 +421,7 @@ export default function AssetGallery({ templates, user }: Props) {
       </div>
 
       {/* 素材画廊 */}
-      {loading ? (
+      {viewState === 'loading' ? (
         <div
           className="mt-md grid grid-cols-2 gap-sm sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5"
           aria-hidden="true"
@@ -405,7 +433,14 @@ export default function AssetGallery({ templates, user }: Props) {
             </div>
           ))}
         </div>
-      ) : assets.length === 0 ? (
+      ) : viewState === 'error' ? (
+        <div className="mt-md flex min-h-[10rem] flex-col items-center justify-center gap-sm border border-dashed border-error text-base text-error">
+          <span>素材加载失败，请检查网络后重试</span>
+          <button onClick={() => fetchAssets()} className="btn">
+            重试
+          </button>
+        </div>
+      ) : viewState === 'empty' ? (
         <p className="mt-md flex min-h-[10rem] items-center justify-center border border-dashed border-rule text-base text-muted">
           暂无素材，去生成页面创建内容吧
         </p>
@@ -499,6 +534,11 @@ export default function AssetGallery({ templates, user }: Props) {
           onClick={() => setDetail(null)}
         >
           <div
+            ref={detailDialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="asset-detail-title"
+            tabIndex={-1}
             className="flex max-h-[90dvh] w-full max-w-3xl overflow-hidden border border-rule bg-paper"
             onClick={(e) => e.stopPropagation()}
           >
@@ -516,7 +556,7 @@ export default function AssetGallery({ templates, user }: Props) {
             {/* 右侧信息 */}
             <div className="w-72 overflow-y-auto p-lg">
               <div className="flex items-center justify-between gap-xs">
-                <h3 className="font-display text-title">素材详情</h3>
+                <h3 id="asset-detail-title" className="font-display text-title">素材详情</h3>
                 <button
                   onClick={() => setDetail(null)}
                   className="x-btn"
@@ -602,10 +642,12 @@ export default function AssetGallery({ templates, user }: Props) {
                     placeholder="+ 添加标签，回车确认"
                     aria-label="添加标签"
                     className="field mt-xs text-sm"
+                    value={tagDraft}
+                    onChange={(e) => setTagDraft(e.target.value)}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter') {
-                        handleAddTag(detail.id, (e.target as HTMLInputElement).value)
-                        ;(e.target as HTMLInputElement).value = ''
+                        handleAddTag(detail.id, tagDraft)
+                        setTagDraft('')
                       }
                     }}
                   />

@@ -86,6 +86,16 @@ class FakeProvider(GenerationProvider):
         return True
 
 
+class _EmptyScalars:
+    def all(self):
+        return []
+
+
+class _EmptyResult:
+    def scalars(self):
+        return _EmptyScalars()
+
+
 class FakeAssetDb:
     def __init__(self):
         self.added = []
@@ -95,6 +105,10 @@ class FakeAssetDb:
 
     async def flush(self):
         return None
+
+    async def execute(self, stmt):
+        # M7 同任务素材名去重查询：测试夹具里恒返回「无同名素材」
+        return _EmptyResult()
 
 
 class FakeUploadDb:
@@ -389,7 +403,15 @@ async def main():
             lambda engine_name: FakeProvider(status_error=resume_raw)
         )
         handler.records.clear()
-        await TaskService.resume_task("resume-failure")
+        # 该场景只验证错误边界契约（脱敏持久化 + 原始 traceback 进日志），
+        # 把轮询失败宽限窗口压到 0，避免真等 60 秒
+        original_grace = getattr(ts, "_POLL_FAIL_GRACE_SECONDS", None)
+        ts._POLL_FAIL_GRACE_SECONDS = 0.0
+        try:
+            await TaskService.resume_task("resume-failure")
+        finally:
+            if original_grace is not None:
+                ts._POLL_FAIL_GRACE_SECONDS = original_grace
         task = await load_task(session_factory, "resume-failure")
         report("resume_task stores only safe_detail", task.status == "error"
                and task.error_msg.startswith("RuntimeError:")

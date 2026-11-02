@@ -43,6 +43,26 @@ async def create_default_admin():
                 print("[Auth] Default admin created with ADMIN_INITIAL_PASSWORD from config")
 
 
+async def shutdown_task_runtime(
+    *,
+    background_timeout: float = 5.0,
+    lease_timeout: float = 5.0,
+) -> None:
+    """先停后台任务释放 lease，再有限等待 Provider 清理。"""
+    from app.services.task_service import cancel_background_tasks
+    from app.engines.factory import close_all_providers
+
+    await cancel_background_tasks(timeout=background_timeout)
+    await close_all_providers(lease_timeout=lease_timeout)
+
+
+def _cors_options(raw_origins: str) -> tuple[list[str], bool]:
+    origins = [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
+    # Authorization header auth does not need credentialed CORS. Browsers reject
+    # wildcard + credentials as an invalid combination, so never emit both.
+    return origins, "*" not in origins
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
@@ -74,10 +94,8 @@ async def lifespan(app: FastAPI):
         print(f"[{settings.APP_NAME}] v{settings.APP_VERSION} started", flush=True)
         yield
     finally:
-        # Provider 持有 httpx 连接池和 WS 重连协程，启动失败时也必须清理
-        from app.engines.factory import close_all_providers
-
-        await close_all_providers()
+        # 先取消持有 Provider lease 的任务；反过来会等任务超时（最长 30 分钟）
+        await shutdown_task_runtime()
         # 收掉未消费的一次性下载票据并删除其 ZIP
         from app.download_tickets import registry as download_ticket_registry
 
@@ -97,10 +115,11 @@ app = FastAPI(
 app.add_middleware(ProtectedBodyLimitMiddleware)
 
 # CORS — 允许前端开发服务器访问（生产环境通过 CORS_ORIGINS 收紧）
+_CORS_ORIGINS, _CORS_ALLOW_CREDENTIALS = _cors_options(settings.CORS_ORIGINS)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[o.strip() for o in settings.CORS_ORIGINS.split(",") if o.strip()],
-    allow_credentials=True,
+    allow_origins=_CORS_ORIGINS,
+    allow_credentials=_CORS_ALLOW_CREDENTIALS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -143,8 +162,14 @@ async def spa(full_path: str):
             status_code=503,
             detail=f"前端未构建：找不到 {_DIST}，请先在 frontend/ 执行 npm run build",
         )
+    index = _DIST / "index.html"
+    if not index.is_file():
+        raise HTTPException(
+            status_code=503,
+            detail=f"前端构建不完整：找不到 {index}，请重新执行 npm run build",
+        )
     candidate = (_DIST / full_path).resolve()
     # 防目录穿越：确保解析后仍在 dist 目录内
     if full_path and candidate.is_file() and candidate.is_relative_to(_DIST):
         return FileResponse(candidate)
-    return FileResponse(_DIST / "index.html")
+    return FileResponse(index)

@@ -29,7 +29,7 @@ from app.thumbs import (
     thumbnail_lifecycle,
     wait_for_task_completion,
 )
-from app.timeutils import parse_day as _parse_day
+from app.timeutils import parse_day_or_400 as _parse_day
 from app.access import (
     can_modify_asset,
     can_modify_asset_identity,
@@ -187,7 +187,7 @@ ASSET_KINDS = ("image", "video", "audio")
 @router.get("", response_model=list[AssetResponse])
 async def list_assets(
     keyword: str | None = Query(None, description="搜索关键词（文件名/提示词）"),
-    tag: str | None = Query(None, description="按标签筛选"),
+    tag: str | None = Query(None, max_length=64, description="按标签筛选"),
     kind: str | None = Query(None, description="按文件类型筛选：image / video / audio"),
     template_id: str | None = Query(None, description="按场景筛选"),
     task_id: str | None = Query(None, description="按任务筛选"),
@@ -275,11 +275,23 @@ async def list_tags(
     all_tags = result.scalars().all()
 
     counter: dict[str, int] = {}
+    display_names: dict[str, str] = {}
     for tags in all_tags:
         for tag in (tags or []):
-            counter[tag] = counter.get(tag, 0) + 1
+            normalized = str(tag).strip()
+            if not normalized:
+                continue
+            key = normalized.casefold()
+            display_names.setdefault(key, normalized)
+            counter[key] = counter.get(key, 0) + 1
 
-    return [{"name": k, "count": v} for k, v in sorted(counter.items(), key=lambda x: -x[1])]
+    return [
+        {"name": display_names[key], "count": count}
+        for key, count in sorted(
+            counter.items(),
+            key=lambda item: (-item[1], display_names[item[0]].casefold()),
+        )
+    ]
 
 
 @router.get("/{asset_id}", response_model=AssetResponse)
@@ -301,7 +313,7 @@ async def get_asset(
 @router.post("/{asset_id}/tags")
 async def add_tag(
     asset_id: str,
-    tag: str = Query(..., description="要添加的标签"),
+    tag: str = Query(..., max_length=64, description="要添加的标签"),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -314,9 +326,13 @@ async def add_tag(
             status_code=403, detail="只能修改自己提交的素材（或联系管理员）"
         )
 
+    tag = tag.strip()
+    if not tag:
+        raise HTTPException(status_code=400, detail="标签不能为空")
+
     # 注意：JSON 列必须整体赋新列表，原地 append 后赋回同一对象不会被 SQLAlchemy 检测到变更
     tags = list(asset.tags or [])
-    if tag not in tags:
+    if not any(str(existing).strip().casefold() == tag.casefold() for existing in tags):
         tags.append(tag)
         asset.tags = tags
         flag_modified(asset, "tags")
@@ -341,10 +357,21 @@ async def remove_tag(
             status_code=403, detail="只能修改自己提交的素材（或联系管理员）"
         )
 
+    tag = tag.strip()
+    if not tag:
+        raise HTTPException(status_code=400, detail="标签不能为空")
+    if len(tag) > 64:
+        raise HTTPException(status_code=400, detail="标签不能超过 64 个字符")
+
     tags = list(asset.tags or [])
-    if tag in tags:
-        tags.remove(tag)
-        asset.tags = tags
+    key = tag.casefold()
+    remaining = [
+        existing
+        for existing in tags
+        if str(existing).strip().casefold() != key
+    ]
+    if len(remaining) != len(tags):
+        asset.tags = remaining
         flag_modified(asset, "tags")
         await db.commit()
 
@@ -558,8 +585,10 @@ async def download_batch_file(
             ticket.archive_path,
             filename="assets.zip",
             media_type="application/zip",
-            background=BackgroundTask(lambda p=ticket.archive_path: download_ticket_registry._unlink(p)),
+            background=BackgroundTask(
+                lambda p=ticket.archive_path: download_ticket_registry.discard_archive(p)
+            ),
         )
     except BaseException:
-        download_ticket_registry._unlink(ticket.archive_path)
+        download_ticket_registry.discard_archive(ticket.archive_path)
         raise

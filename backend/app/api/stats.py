@@ -10,7 +10,7 @@ from app.database import get_db
 from app.models.models import Asset, Task, User
 from app.schemas.schemas import UsageByUser, UsageResponse
 from app.auth import get_current_user
-from app.timeutils import parse_day
+from app.timeutils import parse_day_or_400 as parse_day
 from app.access import is_admin
 
 router = APIRouter(prefix="/api/stats", tags=["stats"])

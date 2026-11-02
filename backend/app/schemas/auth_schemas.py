@@ -7,13 +7,13 @@ from pydantic import BaseModel, Field
 class RegisterRequest(BaseModel):
     username: str = Field(..., min_length=2, max_length=64)
     password: str = Field(..., min_length=6, max_length=128)
-    display_name: str = ""
+    display_name: str = Field("", max_length=64)
     role: Literal["admin", "member"] = "member"
 
 
 class LoginRequest(BaseModel):
-    username: str
-    password: str
+    username: str = Field(..., max_length=64)
+    password: str = Field(..., max_length=128)
 
 
 class ChangePasswordRequest(BaseModel):
@@ -31,7 +31,7 @@ class UserUpdateRequest(BaseModel):
     """管理员调整账号：角色 / 启用停用 / 显示名。留空的字段不改"""
     role: Literal["admin", "member"] | None = None
     is_active: bool | None = None
-    display_name: str | None = None
+    display_name: str | None = Field(None, max_length=64)
 
 
 class TokenResponse(BaseModel):

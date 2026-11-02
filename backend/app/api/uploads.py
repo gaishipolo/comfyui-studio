@@ -54,6 +54,15 @@ FILE_KINDS: dict[str, dict] = {
     },
 }
 
+
+def _fallback_filename(kind: str) -> str:
+    """缺失 filename 时使用该种类允许的保守扩展名，避免兜底路径自拒。"""
+    return {
+        "image": "input.png",
+        "audio": "input.mp3",
+        "video": "input.mp4",
+    }.get((kind or "image").strip().lower(), "input.bin")
+
 # 从素材库选材时放行的 mime 前缀（三类都放行，具体能不能用由插件决定）
 ALLOWED_MIME_PREFIXES = tuple(p for k in FILE_KINDS.values() for p in k["prefixes"])
 
@@ -108,7 +117,7 @@ async def upload_file(
 ):
     """上传参考文件（图片 / 音频 / 视频），返回引擎侧文件名。"""
     rules = _kind_rules(kind)
-    name = Path(file.filename or f"input.{kind}").name
+    name = Path(file.filename or _fallback_filename(kind)).name
     if Path(name).suffix.lower() not in rules["ext"]:
         raise HTTPException(
             status_code=400,

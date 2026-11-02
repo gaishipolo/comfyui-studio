@@ -69,7 +69,3 @@ export function getVisibleModules(user: User): ModuleDefinition[] {
     .filter((m) => !m.roles || m.roles.includes(user.role))
     .sort((a, b) => (a.order ?? 99) - (b.order ?? 99))
 }
-
-export function getModule(key: string): ModuleDefinition | undefined {
-  return modules.get(key)
-}
