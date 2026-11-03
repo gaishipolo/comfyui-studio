@@ -294,10 +294,18 @@ test('界面往返：改加工链不会把条件弄丢', () => {
   const p = parseParamSource(
     '{{ input.style == "写实" ? input.prompt_a : input.prompt_b }}',
   )
+  // 有条件时，界面上的「加工链」属于**否则分支** —— 不是条件整体。
+  // 否则会重复应用两遍（顶层一遍、否则分支一遍）。
   p.transforms = [{ fn: 'trim' }]
   const back = formatParsedParam(p)
-  assert.ok(back.includes('input.style =='))
-  assert.ok(back.includes('| trim'))
+  assert.ok(back.includes('input.style =='), back)
+  assert.ok(back.includes('| trim'), back)
+  // 加工只出现一次（否则分支），不套在条件整体外面
+  assert.equal(back.match(/\| trim/g)?.length, 1, back)
+  // 往返后加工链还在「否则分支」上
+  const again = parseParamSource(back)
+  assert.equal(again.condition?.otherwise.transforms.length, 1)
+  assert.equal(again.transforms.length, 1)
 })
 
 // ── 描述（给人看的说法）────────────────────────────────

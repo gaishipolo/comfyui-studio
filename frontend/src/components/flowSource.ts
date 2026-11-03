@@ -45,9 +45,16 @@ export type ParamSource =
 
 /** 解析出来的取值 */
 export interface ParsedParam {
-  /** 基础来源 */
+  /**
+   * 基础来源。
+   *
+   * **有条件时它代表「否则分支」的来源** —— 条件开启后，界面上的
+   * 「取值来自」和「取到之后再处理」编辑的就是否则分支（条件不成立时
+   * 用什么）。这样只有一处要编辑，不会出现「顶层一套、条件里又一套」
+   * 的重复。
+   */
   source: ParamSource
-  /** 再加工链 */
+  /** 再加工链（同上，有条件时属于否则分支） */
   transforms: ExprTransform[]
   /** 按条件取值（没有则 undefined） */
   condition?: {
@@ -112,28 +119,35 @@ export function parseParamSource(raw: string): ParsedParam {
       isCustom: true,
     }
   }
-  const parsed: ParsedParam = {
+  if (value.condition) {
+    // 条件存在时，界面上的「来源 / 加工」编辑的是**否则分支**
+    // —— 条件不成立时用什么。这样只有一处要编辑，不会重复。
+    return {
+      source: toSource(value.condition.otherwise.base),
+      transforms: value.condition.otherwise.transforms,
+      raw: text,
+      isCustom: false,
+      condition: {
+        field: value.condition.field,
+        op: value.condition.op,
+        value: value.condition.value,
+        then: {
+          source: toSource(value.condition.then.base),
+          transforms: value.condition.then.transforms,
+        },
+        otherwise: {
+          source: toSource(value.condition.otherwise.base),
+          transforms: value.condition.otherwise.transforms,
+        },
+      },
+    }
+  }
+  return {
     source: toSource(value.base),
     transforms: value.transforms,
     raw: text,
     isCustom: false,
   }
-  if (value.condition) {
-    parsed.condition = {
-      field: value.condition.field,
-      op: value.condition.op,
-      value: value.condition.value,
-      then: {
-        source: toSource(value.condition.then.base),
-        transforms: value.condition.then.transforms,
-      },
-      otherwise: {
-        source: toSource(value.condition.otherwise.base),
-        transforms: value.condition.otherwise.transforms,
-      },
-    }
-  }
-  return parsed
 }
 
 /**
@@ -144,18 +158,32 @@ export function parseParamSource(raw: string): ParsedParam {
  * 只关心基础来源的调用方（它会丢掉加工链，所以只在明确知道没有加工时用）。
  */
 export function formatParsedParam(parsed: ParsedParam): string {
+  if (parsed.condition) {
+    // 条件存在：整体由条件决定。
+    //
+    // **顶层的 source/transforms 就是「否则分支」的**（parseParamSource
+    // 读回来时就是这样映射的）—— 界面上的「取值来自」「再加工」编辑的
+    // 是否则分支。所以这里用顶层的值写否则分支，不另外套一层加工
+    // （套两层就会重复应用两遍）。
+    const value: ExprValue = {
+      base: { kind: 'literal', value: '' },
+      transforms: [],
+      condition: {
+        field: parsed.condition.field,
+        op: parsed.condition.op,
+        value: parsed.condition.value,
+        then: branchValue(parsed.condition.then),
+        otherwise: {
+          base: fromSource(parsed.source),
+          transforms: parsed.transforms,
+        },
+      },
+    }
+    return formatValue(value)
+  }
   const value: ExprValue = {
     base: fromSource(parsed.source),
     transforms: parsed.transforms,
-  }
-  if (parsed.condition) {
-    value.condition = {
-      field: parsed.condition.field,
-      op: parsed.condition.op,
-      value: parsed.condition.value,
-      then: branchValue(parsed.condition.then),
-      otherwise: branchValue(parsed.condition.otherwise),
-    }
   }
   return formatValue(value)
 }

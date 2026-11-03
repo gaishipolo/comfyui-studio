@@ -24,7 +24,6 @@ import {
 } from './flowExpr'
 import {
   buildSourceOptions,
-  describeParam,
   formatParsedParam,
   optionPick,
   optionToSource,
@@ -32,6 +31,8 @@ import {
   sourceToOption,
   stepTitle,
   upstreamOptionValue,
+  type ParamSource,
+  type SourceOption,
 } from './flowSource'
 
 interface Props {
@@ -193,6 +194,17 @@ export default function StepEditorDialog({
     const setCondition = (next: NonNullable<typeof cond>) => write({ condition: next })
     const clearCondition = () => write({ condition: undefined })
 
+    // 条件的两个分支也用来源下拉 —— 和主区一样的选法，
+    // 内容同事不用学第二套语法。
+    // 直接算不用 useMemo：ParamControl 是内联组件（每次渲染新实例），
+    // 在里面用 hook 是坏味道；选项列表也就十几个，重算无妨。
+    const branchOptions = buildSourceOptions(
+      { source: { kind: 'literal', value: '' }, transforms: [], raw: '', isCustom: false },
+      inputFields,
+      canTakeOutput ? upstreams : [],
+      upstreams.map((u) => stepTitles[u.id] ?? ''),
+    )
+
     return (
       <div className="flex flex-col gap-2xs">
         <div className="flex flex-wrap items-end gap-xs">
@@ -343,7 +355,14 @@ export default function StepEditorDialog({
                   className="btn-quiet text-xs"
                   onClick={() =>
                     setCondition({
-                      field: inputFields[0]?.name ?? '',
+                      // 判断依据默认挑一个**不同于当前取值来源**的输入 ——
+                      // 默认选自己会变成「X 等于 X」，条件永远成立，没意义。
+                      field:
+                        inputFields.find(
+                          (f) => !(parsed.source.kind === 'input' && f.name === parsed.source.field),
+                        )?.name ??
+                        inputFields[0]?.name ??
+                        '',
                       op: '==',
                       value: '',
                       then: {
@@ -360,101 +379,105 @@ export default function StepEditorDialog({
                   ＋ 加一个条件
                 </button>
               ) : (
-                <span className="flex flex-wrap items-center gap-xs text-xs">
-                  <span>当流程输入「</span>
-                  <select
-                    className="field h-7 w-32 py-0 text-xs"
-                    value={cond.field}
-                    aria-label="条件判断的流程输入"
-                    onChange={(e) => setCondition({ ...cond, field: e.target.value })}
-                  >
-                    {inputFields.map((f) => (
-                      <option key={f.name} value={f.name}>
-                        {f.label || f.name}
-                      </option>
-                    ))}
-                  </select>
-                  <span>」</span>
-                  <select
-                    className="field h-7 w-24 py-0 text-xs"
-                    value={cond.op}
-                    aria-label="条件的运算符"
-                    onChange={(e) =>
-                      setCondition({ ...cond, op: e.target.value as CondOp })
-                    }
-                  >
-                    {COND_OPS.map((o) => (
-                      <option key={o.op} value={o.op}>
-                        {o.label}
-                      </option>
-                    ))}
-                  </select>
-                  <input
-                    className="field h-7 w-28 py-0 text-xs"
-                    value={cond.value}
-                    placeholder="比较的值"
-                    aria-label="条件的比较值"
-                    onChange={(e) => setCondition({ ...cond, value: e.target.value })}
-                  />
-                  <span>」时用</span>
-                  <input
-                    className="field h-7 w-40 py-0 text-xs"
-                    value={
-                      cond.then.source.kind === 'literal'
-                        ? cond.then.source.value
-                        : describeParam(
-                            { ...parsed, source: cond.then.source, transforms: cond.then.transforms },
-                            inputFields,
-                            stepTitles,
-                          )
-                    }
-                    placeholder="固定值"
-                    aria-label="条件成立时用的值"
-                    onChange={(e) =>
-                      setCondition({
-                        ...cond,
-                        then: {
-                          ...cond.then,
-                          source: { kind: 'literal', value: e.target.value },
-                        },
-                      })
-                    }
-                  />
-                  <span>，否则用</span>
-                  <input
-                    className="field h-7 w-40 py-0 text-xs"
-                    value={
-                      cond.otherwise.source.kind === 'literal'
-                        ? cond.otherwise.source.value
-                        : describeParam(
-                            {
-                              ...parsed,
-                              source: cond.otherwise.source,
-                              transforms: cond.otherwise.transforms,
-                            },
-                            inputFields,
-                            stepTitles,
-                          )
-                    }
-                    placeholder="固定值"
-                    aria-label="条件不成立时用的值"
-                    onChange={(e) =>
-                      setCondition({
-                        ...cond,
-                        otherwise: {
-                          ...cond.otherwise,
-                          source: { kind: 'literal', value: e.target.value },
-                        },
-                      })
-                    }
-                  />
-                  <button
-                    type="button"
-                    className="text-xs text-muted hover:text-danger"
-                    onClick={clearCondition}
-                  >
-                    ✕
-                  </button>
+                <span className="flex flex-col gap-2xs text-xs">
+                  <span className="flex flex-wrap items-center gap-xs">
+                    <span>当流程输入「</span>
+                    <select
+                      className="field h-7 w-32 py-0 text-xs"
+                      value={cond.field}
+                      aria-label="条件判断的流程输入"
+                      onChange={(e) => setCondition({ ...cond, field: e.target.value })}
+                    >
+                      {inputFields.map((f) => (
+                        <option key={f.name} value={f.name}>
+                          {f.label || f.name}
+                        </option>
+                      ))}
+                    </select>
+                    <span>」</span>
+                    <select
+                      className="field h-7 w-24 py-0 text-xs"
+                      value={cond.op}
+                      aria-label="条件的运算符"
+                      onChange={(e) =>
+                        setCondition({ ...cond, op: e.target.value as CondOp })
+                      }
+                    >
+                      {COND_OPS.map((o) => (
+                        <option key={o.op} value={o.op}>
+                          {o.label}
+                        </option>
+                      ))}
+                    </select>
+                    <span>「</span>
+                    <input
+                      className="field h-7 w-28 py-0 text-xs"
+                      value={cond.value}
+                      placeholder="比较的值"
+                      aria-label="条件的比较值"
+                      onChange={(e) => setCondition({ ...cond, value: e.target.value })}
+                    />
+                    <span>」时用</span>
+                  </span>
+                  <span className="flex flex-wrap items-center gap-xs">
+                    <span className="text-muted">成立时</span>
+                    <BranchSourcePicker
+                      label="条件成立时用的值"
+                      source={cond.then.source}
+                      options={branchOptions}
+                      literalValue={
+                        cond.then.source.kind === 'literal' ? cond.then.source.value : ''
+                      }
+                      onChange={(src) =>
+                        setCondition({
+                          ...cond,
+                          then: { ...cond.then, source: src },
+                        })
+                      }
+                      onLiteral={(v) =>
+                        setCondition({
+                          ...cond,
+                          then: {
+                            ...cond.then,
+                            source: { kind: 'literal', value: v },
+                          },
+                        })
+                      }
+                    />
+                    <span className="text-muted">否则时</span>
+                    <BranchSourcePicker
+                      label="条件不成立时用的值"
+                      source={cond.otherwise.source}
+                      options={branchOptions}
+                      literalValue={
+                        cond.otherwise.source.kind === 'literal'
+                          ? cond.otherwise.source.value
+                          : ''
+                      }
+                      onChange={(src) =>
+                        setCondition({
+                          ...cond,
+                          otherwise: { ...cond.otherwise, source: src },
+                        })
+                      }
+                      onLiteral={(v) =>
+                        setCondition({
+                          ...cond,
+                          otherwise: {
+                            ...cond.otherwise,
+                            source: { kind: 'literal', value: v },
+                          },
+                        })
+                      }
+                    />
+                    <button
+                      type="button"
+                      className="text-xs text-muted hover:text-danger"
+                      onClick={clearCondition}
+                    >
+                      ✕
+                    </button>
+                  </span>
                 </span>
               )}
             </div>
@@ -653,6 +676,58 @@ export default function StepEditorDialog({
         </div>
       </div>
     </div>
+  )
+}
+
+/**
+ * 条件的分支取值 —— 一个来源下拉 + 固定值输入框。
+ *
+ * 和主区的「取值来自」是同一套选法 —— 内容同事不用学第二套语法。
+ */
+function BranchSourcePicker({
+  label,
+  source,
+  options,
+  literalValue,
+  onChange,
+  onLiteral,
+}: {
+  label: string
+  source: ParamSource
+  options: SourceOption[]
+  literalValue: string
+  onChange: (s: ParamSource) => void
+  onLiteral: (v: string) => void
+}) {
+  const isLiteral = source.kind === 'literal'
+  const current = isLiteral ? 'literal' : sourceToOption(source, false)
+  return (
+    <span className="inline-flex items-center gap-2xs">
+      <select
+        className="field h-7 w-40 py-0 text-xs"
+        value={current}
+        aria-label={label}
+        onChange={(e) => {
+          const picked = optionToSource(e.target.value, literalValue)
+          if (picked !== 'custom') onChange(picked)
+        }}
+      >
+        {options.map((o) => (
+          <option key={o.value} value={o.value}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+      {isLiteral && (
+        <input
+          className="field h-7 w-32 py-0 text-xs"
+          value={literalValue}
+          placeholder="固定值"
+          aria-label={`${label}的内容`}
+          onChange={(e) => onLiteral(e.target.value)}
+        />
+      )}
+    </span>
   )
 }
 
