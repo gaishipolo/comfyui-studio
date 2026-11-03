@@ -66,7 +66,7 @@ export default function ChangePasswordModal({ onClose, onSuccess }: Props) {
         aria-modal="true"
         aria-labelledby="change-password-title"
         tabIndex={-1}
-        className="flex w-full max-w-md flex-col border border-rule bg-paper"
+        className="flex w-full max-w-md flex-col overflow-hidden rounded-lg border border-rule bg-paper shadow-lg"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between gap-xs border-b border-rule p-md">

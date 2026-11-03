@@ -110,14 +110,14 @@ export default function AssetPickerModal({
         aria-modal="true"
         aria-labelledby="asset-picker-title"
         tabIndex={-1}
-        className="flex max-h-[85dvh] w-full max-w-3xl flex-col overflow-hidden border border-rule bg-paper"
+        className="flex max-h-[85dvh] w-full max-w-3xl flex-col overflow-hidden rounded-lg border border-rule bg-paper shadow-lg"
         onClick={(e) => e.stopPropagation()}
       >
         {/* 头部 */}
         <div className="flex items-center justify-between gap-xs border-b border-rule p-md">
           <div className="flex items-baseline gap-xs">
             <h3 id="asset-picker-title" className="font-display text-title">从素材库选择</h3>
-            <span className="border border-rule bg-paper-2 px-2xs text-xs text-ink-2">
+            <span className="chip">
               只看{KIND_LABEL[kind]}
             </span>
           </div>
@@ -151,8 +151,8 @@ export default function AssetPickerModal({
             >
               {Array.from({ length: 8 }).map((_, i) => (
                 <div key={i}>
-                  <div className="skeleton aspect-square" />
-                  <div className="skeleton mt-2xs h-sm" />
+                  <div className="skeleton aspect-square rounded-sm" />
+                  <div className="skeleton mt-xs h-2xs w-2/3" />
                 </div>
               ))}
             </div>
@@ -161,18 +161,34 @@ export default function AssetPickerModal({
               <p className="text-sm text-error">{error}</p>
               <button
                 type="button"
-                className="btn-quiet mt-sm"
+                className="btn mt-sm"
                 onClick={() => setReloadKey((k) => k + 1)}
               >
                 重试
               </button>
             </div>
           ) : assets.length === 0 ? (
-            <p className="flex min-h-[10rem] items-center justify-center border border-dashed border-rule text-base text-muted">
-              {debounced
-                ? `没有匹配「${debounced}」的${KIND_LABEL[kind]}`
-                : `素材库还没有可用的${KIND_LABEL[kind]}`}
-            </p>
+            <div className="empty empty-plain min-h-[10rem]">
+              <span className="empty-icon" aria-hidden="true">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+                  <path
+                    d="M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16M21 21l-4.3-4.3"
+                    stroke="currentColor"
+                    strokeWidth="1.7"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </span>
+              <p className="empty-title">
+                {debounced
+                  ? `没有匹配「${debounced}」的${KIND_LABEL[kind]}`
+                  : `素材库还没有可用的${KIND_LABEL[kind]}`}
+              </p>
+              <p className="empty-hint">
+                {debounced ? '换个关键词或清空搜索试试' : '先到生成页或素材库创建一个'}
+              </p>
+            </div>
           ) : (
             <div className="grid grid-cols-2 gap-sm sm:grid-cols-3 md:grid-cols-4">
               {assets.map((asset) => {
@@ -187,8 +203,8 @@ export default function AssetPickerModal({
                     className="block w-full text-left"
                   >
                     <span
-                      className={`relative block aspect-square overflow-hidden border bg-paper-2 ${
-                        on ? 'border-accent ring-2 ring-accent' : 'border-rule'
+                      className={`relative block aspect-square overflow-hidden rounded-sm border bg-paper-2 transition-shadow duration-micro ${
+                        on ? 'border-accent ring-2 ring-accent' : 'border-rule hover:shadow-md'
                       }`}
                     >
                       {kind === 'audio' ? (
@@ -198,8 +214,8 @@ export default function AssetPickerModal({
                         </span>
                       ) : (
                         <AuthMedia
-                          src={getAssetUrl(asset.task_id, asset.file_name)}
-                          posterSrc={getAssetThumbUrl(asset.task_id, asset.file_name)}
+                          src={getAssetUrl(asset.id)}
+                          posterSrc={getAssetThumbUrl(asset.id)}
                           alt={asset.file_name}
                           mime={asset.mime_type}
                           className="h-full w-full object-cover"
@@ -207,14 +223,14 @@ export default function AssetPickerModal({
                         />
                       )}
                       {kind === 'video' && (
-                        <span className="absolute bottom-xs left-xs border border-rule bg-paper px-2xs text-xs text-ink-2">
+                        <span className="absolute bottom-xs left-xs rounded-pill border border-rule bg-[rgba(255,255,255,0.92)] px-xs py-2xs text-xs text-ink-2 backdrop-blur-sm">
                           视频
                         </span>
                       )}
                       {multiple && (
                         <span
-                          className={`absolute left-xs top-xs flex h-5 w-5 items-center justify-center border text-xs ${
-                            on ? 'border-accent bg-accent text-paper' : 'border-rule bg-paper text-transparent'
+                          className={`absolute left-xs top-xs flex h-5 w-5 items-center justify-center rounded-xs border text-xs shadow-xs ${
+                            on ? 'border-accent bg-accent text-accent-ink' : 'border-rule-strong bg-paper text-transparent'
                           }`}
                           aria-hidden="true"
                         >
@@ -222,7 +238,7 @@ export default function AssetPickerModal({
                         </span>
                       )}
                     </span>
-                    <span className="mt-2xs block truncate text-xs text-muted">
+                    <span className="mt-xs block truncate text-xs text-muted">
                       {asset.file_name}
                     </span>
                   </button>

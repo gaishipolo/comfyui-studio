@@ -7,8 +7,11 @@
 export interface Toast {
   id: number
   text: string
-  tone: 'success' | 'error'
+  tone: 'success' | 'error' | 'warning' | 'info'
 }
+
+/** 同时最多挂几条 —— 批量操作失败时别把屏幕糊满 */
+const MAX_TOASTS = 4
 
 let toasts: Toast[] = []
 let seq = 0
@@ -35,12 +38,21 @@ export function subscribeAssetsChanged(fn: () => void): () => void {
   }
 }
 
-/** 弹一条 toast，6 秒后自动消失（也可点击关掉） */
+/** 弹一条 toast，几秒后自动消失（也可点击关掉）。
+ *  错误停久一点：用户往往要先读完才知道下一步做什么。 */
 export function notify(text: string, tone: Toast['tone'] = 'success') {
   const id = ++seq
-  toasts = [...toasts, { id, text, tone }]
+  const next = [...toasts, { id, text, tone }]
+  // 超量时丢最早的那条，别让通知区无限长
+  toasts = next.length > MAX_TOASTS ? next.slice(next.length - MAX_TOASTS) : next
   emit()
-  setTimeout(() => dismiss(id), 6000)
+  setTimeout(() => dismiss(id), tone === 'error' || tone === 'warning' ? 8000 : 5000)
+}
+
+/** 失败提示的统一写法：`reportError('上传失败', err)` */
+export function reportError(prefix: string, err: unknown) {
+  const detail = err instanceof Error ? err.message : String(err)
+  notify(`${prefix}：${detail}`, 'error')
 }
 
 /** 按 key 只弹一次 —— 同一任务的同一终态不会被两个轮询器重复报 */

@@ -8,6 +8,7 @@ import FriendlyError from './FriendlyError'
 import TemplateGallery from './TemplateGallery'
 import DynamicForm from './DynamicForm'
 import AuthMedia from './AuthMedia'
+import { reportError } from '../notify'
 
 interface Props {
   templates: Template[]
@@ -148,7 +149,7 @@ export default function GenerateWorkspace({
         panelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }),
       )
     } catch (err) {
-      alert(`提交失败: ${err instanceof Error ? err.message : err}`)
+      reportError('提交失败', err)
     } finally {
       setSubmitting(false)
     }
@@ -157,24 +158,19 @@ export default function GenerateWorkspace({
   return (
     <div>
       <div className="grid grid-cols-1 gap-xl lg:grid-cols-2">
-        {/* 左侧：场景选择 */}
+        {/* 左侧：场景选择。列表自带高度上限，页面不会被场景数量撑长 */}
         <div>
           <TemplateGallery
             templates={templates}
             selected={selected}
             onSelect={setSelected}
           />
-          {templates.length > 0 && !selected && (
-            <p className="mt-md border border-rule bg-paper-2 px-sm py-xs text-sm text-ink-2">
-              选择一个生成场景，右侧会自动出现对应的输入表单
-            </p>
-          )}
         </div>
 
         {/* 右侧：动态表单 */}
         <div>
           {selected ? (
-            <div className="border border-rule bg-paper-2 p-lg">
+            <div className="panel p-lg">
               <h2 className="font-display text-section">{selected.name}</h2>
               <p className="mt-xs text-sm text-muted">{selected.description}</p>
               <DynamicForm
@@ -186,15 +182,27 @@ export default function GenerateWorkspace({
               />
             </div>
           ) : (
-            <div className="flex h-full items-center border border-rule bg-paper p-lg">
-              <p className="text-base text-muted">请先选择生成场景</p>
+            <div className="empty h-full min-h-[18rem]">
+              <span className="empty-icon" aria-hidden="true">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+                  <path
+                    d="M4 5h16v14H4zM4 15l4.5-4.5L13 15l3-3 4 4"
+                    stroke="currentColor"
+                    strokeWidth="1.7"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </span>
+              <p className="empty-title">请先选择生成场景</p>
+              <p className="empty-hint">左侧选中一个场景后，这里会出现对应的输入表单</p>
             </div>
           )}
         </div>
       </div>
 
       {/* 本会话任务：进度与结果就在表单下方，不用跳去任务页 */}
-      <section ref={panelRef} className="mt-xl border border-rule bg-paper-2">
+      <section ref={panelRef} className="panel mt-xl">
         <div className="flex flex-wrap items-center justify-between gap-md px-md py-sm">
           <button
             type="button"
@@ -255,7 +263,7 @@ export default function GenerateWorkspace({
 
                       {/* 进度：一条细线，不用色块堆视觉重量 */}
                       <div
-                        className="mt-2xs h-1 w-full bg-paper-3"
+                        className="mt-xs h-1 w-full overflow-hidden rounded-pill bg-paper-3"
                         role="progressbar"
                         aria-label="生成进度"
                         aria-valuenow={Math.round(task.progress)}
@@ -263,7 +271,7 @@ export default function GenerateWorkspace({
                         aria-valuemax={100}
                       >
                         <div
-                          className="h-full bg-ink"
+                          className="h-full rounded-pill bg-accent transition-[width] duration-short ease-out"
                           style={{ width: `${task.progress}%` }}
                         />
                       </div>
@@ -278,18 +286,18 @@ export default function GenerateWorkspace({
                               type="button"
                               title="点开看大图"
                               onClick={() =>
-                                openAssetInNewTab(getAssetUrl(task.id, asset.file_name)).catch(
+                                openAssetInNewTab(getAssetUrl(asset.id)).catch(
                                   (err) => {
-                                    alert(`打开素材失败: ${err instanceof Error ? err.message : err}`)
+                                    reportError('打开素材失败', err)
                                   },
                                 )
                               }
                               className="block w-full"
                             >
-                              <div className="aspect-square overflow-hidden border border-rule bg-paper">
+                              <div className="aspect-square overflow-hidden rounded-sm border border-rule bg-paper-2 transition-shadow duration-micro hover:shadow-md">
                                 <AuthMedia
-                                  src={getAssetUrl(task.id, asset.file_name)}
-                                  posterSrc={getAssetThumbUrl(task.id, asset.file_name)}
+                                  src={getAssetUrl(asset.id)}
+                                  posterSrc={getAssetThumbUrl(asset.id)}
                                   alt={asset.file_name}
                                   mime={asset.mime_type}
                                   className="h-full w-full object-cover"

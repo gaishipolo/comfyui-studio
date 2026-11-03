@@ -1,38 +1,133 @@
+/* ───────────────────────────────────────────────────────────────
+   设计令牌 · 现代控制台（2026-11-02 改版）
+   浅色中性灰底 + 白色表面 + 单一靛蓝强调 + 8/12/16 圆角 + 两级柔和阴影。
+
+   约定：
+   · `--color-canvas` 是页面底色，`--color-paper` 是**表面**（卡片/控件/弹窗）。
+     两者分开，按钮才不会跟着页面一起变灰。
+   · `--color-danger` / `--color-warning` 存的是 oklch 通道三元组
+     （`L% C H`），因为 tailwind.config 用 `<alpha-value>` 生成
+     `bg-warning/10` 这类透明度修饰。别改成 hex。
+   ─────────────────────────────────────────────────────────────── */
 :root {
   color-scheme: light;
-  --space-3xs: 2px; --space-2xs: 4px; --space-xs: 8px; --space-sm: 12px; --space-md: 16px; --space-lg: 24px; --space-xl: 40px; --space-2xl: 64px; --space-3xl: 96px; --space-4xl: 144px;
-  --text-xs: 0.75rem; --text-sm: 0.875rem; --text-md: 1rem; --text-lg: 1.2rem; --text-xl: 1.44rem; --text-2xl: 1.728rem; --text-3xl: 2.074rem;
-  --text-display-s: 1.44rem; --text-display: 1.728rem; --text-section: 1.2rem; --text-title: 1rem; --text-lead: 1rem;
-  --ease-out: cubic-bezier(0.16, 1, 0.3, 1); --ease-in: cubic-bezier(0.7, 0, 0.84, 0); --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
-  --dur-micro: 120ms; --dur-short: 220ms; --dur-long: 420ms;
-  --color-error: oklch(52% 0.19 27); --color-success: oklch(50% 0.12 150);
-  /* 警示/次要层级（admin 页横幅与插件卡片用）。warning / danger 存 oklch 通道三元组，
-     这样 text-warning 与 bg-warning/10 这类透明度修饰都能生成（Tailwind 3 要求
-     var 颜色配合 <alpha-value>）。danger 与 error 同色，是语义别名。 */
-  --color-warning: 52% 0.12 70;
-  --color-danger: 52% 0.19 27;
-  /* secondary 拆成底色 + 前景：浅色做面板/徽章底，深色做可读文字 */
-  --color-secondary: oklch(94.2% 0.006 90); --color-secondary-ink: oklch(31% 0.02 266);
-  --color-tertiary: oklch(87.5% 0.008 90);
-  --container: 1440px; --gutter: 64px; --gap-columns: 32px; --section-gap-s: 120px; --section-gap: 144px; --section-gap-l: 176px;
-  --z-base: 1; --z-raised: 10; --z-dropdown: 100; --z-sticky: 200; --z-sticky-nav: 300; --z-modal: 400; --z-toast: 500; --z-tooltip: 600;
-  --color-paper: oklch(97.5% 0.005 90); --color-paper-2: oklch(94.2% 0.006 90); --color-paper-3: oklch(90.5% 0.008 90);
-  --color-ink: oklch(19% 0.022 266); --color-ink-2: oklch(31% 0.02 266); --color-muted: oklch(47% 0.016 266);
-  --color-rule: oklch(87.5% 0.008 90);
-  --color-accent: oklch(44% 0.2 266); --color-accent-ink: oklch(97.5% 0.005 90); --color-focus: oklch(46% 0.2 266);
-  --color-field: oklch(44% 0.2 266); --color-field-ink: oklch(97.5% 0.005 90);
-  --color-mark: oklch(57% 0.215 29); --color-mark-ink: oklch(97.5% 0.005 90);
-  --font-display: "Radio Canada Big", ui-sans-serif, system-ui, sans-serif; --font-body: "Radio Canada", ui-sans-serif, system-ui, sans-serif;
-  --font-outlier: var(--font-display);
-  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  --radius-card: 0; --radius-pill: 0; --rule-hair: 1px; --shadow-card: none;
-  --tracking-display: -0.035em; --display-weight: 700;
-}
 
-/* App screen: the control scale. Density is the design —
-   36px controls inside a 44px hit target (craft.md § 9). */
-:root {
-  --control-h: 36px; --control-h-sm: 32px; --hit: 44px; --row-h: 40px; --row-h-lg: 52px;
-  /* the modal backdrop: ink at rest, never a black */
-  --color-scrim: oklch(19% 0.022 266 / 0.72);
+  /* 间距刻度（组件按这些变量排布，别随意增删） */
+  --space-3xs: 2px; --space-2xs: 4px; --space-xs: 8px; --space-sm: 12px;
+  --space-md: 16px; --space-lg: 24px; --space-xl: 40px; --space-2xl: 64px;
+  --space-3xl: 96px; --space-4xl: 144px;
+
+  /* 字号 */
+  --text-xs: 0.75rem; --text-sm: 0.8125rem; --text-md: 0.9375rem;
+  --text-lg: 1.0625rem; --text-xl: 1.25rem; --text-2xl: 1.5rem; --text-3xl: 1.875rem;
+  --text-display-s: 1.375rem; --text-display: 1.5rem; --text-section: 1.125rem;
+  --text-title: 0.9375rem; --text-lead: 1rem;
+
+  /* 动效 */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in: cubic-bezier(0.7, 0, 0.84, 0);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-micro: 120ms; --dur-short: 180ms; --dur-long: 320ms;
+
+  /* ── 表面 ─────────────────────────────────────────────────────
+     canvas 是页面，paper 是表面。paper-2/3 是表面上的两级下沉。 */
+  --color-canvas: #f5f6f8;
+  --color-paper: #ffffff;
+  --color-paper-2: #f4f5f7;
+  --color-paper-3: #e9ebf0;
+
+  /* ── 文字 ─────────────────────────────────────────────────── */
+  --color-ink: #101828;
+  --color-ink-2: #344054;
+  --color-muted: #667085;
+
+  /* ── 线 ───────────────────────────────────────────────────── */
+  --color-rule: #e4e7ec;
+  --color-rule-strong: #d0d5dd;
+
+  /* ── 强调色（唯一的彩色支出点）─────────────────────────────── */
+  --color-accent: #5b5bd6;
+  --color-accent-hover: #4a4ac4;
+  --color-accent-ink: #ffffff;
+  --color-accent-soft: #eeeefc;
+  --color-accent-line: #c9c9f5;
+  --color-focus: #6366f1;
+
+  /* ── 语义色 ───────────────────────────────────────────────── */
+  --color-success: #067647;
+  --color-success-soft: #ecfdf3;
+  --color-success-line: #abefc6;
+  --color-error: #b42318;
+  --color-error-soft: #fef3f2;
+  --color-error-line: #fecdca;
+  /* 通道三元组：tailwind 的 <alpha-value> 依赖这个形态 */
+  --color-warning: 58% 0.13 65;
+  --color-danger: 45% 0.19 27;
+  --color-warning-soft: #fffaeb;
+  --color-warning-line: #fedf89;
+
+  /* secondary / tertiary 是中性底与前景的语义别名 */
+  --color-secondary: #f4f5f7;
+  --color-secondary-ink: #344054;
+  --color-tertiary: #e9ebf0;
+
+  /* 选中高亮（::selection） */
+  --color-mark: #c7d2fe;
+  --color-mark-ink: #1e1b4b;
+
+  /* ── 圆角 ─────────────────────────────────────────────────── */
+  --radius-xs: 6px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-card: 12px;
+  --radius-pill: 999px;
+
+  /* ── 阴影（两级 + 浮层）─────────────────────────────────────
+     每级都是「近距离贴边 + 远距离扩散」两层：只留一层会显得脏，
+     两层叠起来才有真正的浮起感。 */
+  --shadow-xs: 0 1px 2px rgba(16, 24, 40, 0.06);
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.05), 0 2px 6px -1px rgba(16, 24, 40, 0.07);
+  --shadow-md: 0 2px 4px -1px rgba(16, 24, 40, 0.05), 0 8px 20px -6px rgba(16, 24, 40, 0.12);
+  --shadow-lg: 0 4px 8px -2px rgba(16, 24, 40, 0.06), 0 20px 44px -12px rgba(16, 24, 40, 0.20);
+  --shadow-card: var(--shadow-sm);
+
+  /* 页面底：极淡的紫/蓝光晕叠在中性灰上。
+     纯色大面积会发闷，两团几乎看不见的光晕就能让页面「透气」。 */
+  --gradient-canvas:
+    radial-gradient(1100px 520px at 12% -8%, #eeefff 0%, rgba(238, 239, 255, 0) 62%),
+    radial-gradient(900px 480px at 92% -6%, #eef6ff 0%, rgba(238, 246, 255, 0) 58%),
+    var(--color-canvas);
+
+  /* ── 字体 ─────────────────────────────────────────────────────
+     走系统栈：Google Fonts 在内网/离线环境会拖慢首屏，而且 Radio Canada
+     没有中文字形，中文一路回退反而更不统一。 */
+  --font-body: system-ui, -apple-system, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  --font-display: var(--font-body);
+  --font-outlier: var(--font-body);
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "Consolas", monospace;
+
+  --rule-hair: 1px;
+  --tracking-display: -0.015em;
+  --display-weight: 700;
+
+  /* 容器 */
+  --container: 1440px; --gutter: 40px; --gap-columns: 20px;
+  --section-gap-s: 64px; --section-gap: 80px; --section-gap-l: 96px;
+
+  /* 层级 */
+  --z-base: 1; --z-raised: 10; --z-dropdown: 100; --z-sticky: 200;
+  --z-sticky-nav: 300; --z-modal: 400; --z-toast: 500; --z-tooltip: 600;
+
+  /* 控件尺度：密度不变，只是换了壳 */
+  --control-h: 36px; --control-h-sm: 30px; --hit: 44px;
+  --row-h: 40px; --row-h-lg: 52px;
+
+  /* 弹窗遮罩：冷调墨，不要纯黑 */
+  --color-scrim: rgba(16, 24, 40, 0.5);
+
+  /* 兼容旧名：历史组件里仍有 bg-field / border-field 的引用 */
+  --color-field: #5b5bd6;
+  --color-field-ink: #ffffff;
 }

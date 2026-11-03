@@ -6,6 +6,8 @@ import AssetPickerModal from './AssetPickerModal'
 import { missingRequiredList, missingRequiredUpload, normalizeBatchCount } from './uiBehavior'
 import AuthMedia from './AuthMedia'
 import { completeUpload } from './uploadTransaction'
+import { alertDialog } from './dialog'
+import { notify, reportError } from '../notify'
 
 interface Props {
   template: Template
@@ -221,13 +223,14 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
     const files = incoming.filter((f) => matchesKind(f, kind))
     if (files.length < incoming.length) {
       const label = kind === 'audio' ? '音频' : kind === 'video' ? '视频' : '图片'
-      alert(
-        `已忽略 ${incoming.length - files.length} 个非${label}文件：\n` +
-          incoming
-            .filter((f) => !matchesKind(f, kind))
-            .map((f) => f.name)
-            .join('\n'),
-      )
+      await alertDialog({
+        title: `已忽略 ${incoming.length - files.length} 个非${label}文件`,
+        message: incoming
+          .filter((f) => !matchesKind(f, kind))
+          .map((f) => f.name)
+          .join('\n'),
+        tone: 'warning',
+      })
     }
     if (files.length === 0) return
 
@@ -246,7 +249,7 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
         setSinglePreview(field.name, completed.preview)
       } catch (err) {
         if (isCurrentFieldOperation(field.name, generation)) {
-          alert(`上传失败: ${err instanceof Error ? err.message : err}`)
+          reportError('上传失败', err)
         }
       } finally {
         finishFieldOperation(field.name)
@@ -272,7 +275,7 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
           appendPreview(field.name, completed.preview)
         } catch (err) {
           if (!isCurrentFieldOperation(field.name, generation)) break
-          alert(`上传失败: ${err instanceof Error ? err.message : err}`)
+          reportError('上传失败', err)
         }
       }
     } finally {
@@ -327,10 +330,11 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
       const sizeMsg = failReasons.some((r) => /超过.*MB/.test(r))
         ? '（部分素材超出可用大小上限，无法提交给生成引擎）'
         : '常见原因：素材文件已从磁盘删除，或引擎不可达。'
-      alert(
-        `${failed} 个素材选用失败（其余 ${picked.length - failed} 个已加入）${sizeMsg}\n\n` +
-          failReasons.join('\n'),
-      )
+      await alertDialog({
+        title: `${failed} 个素材选用失败`,
+        message: `其余 ${picked.length - failed} 个已加入。${sizeMsg}\n\n${failReasons.join('\n')}`,
+        tone: 'error',
+      })
     }
   }
 
@@ -375,7 +379,7 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
 
     if (field.type === 'select') {
       return (
-        <div className="flex flex-wrap gap-sm border border-rule bg-paper p-sm">
+        <div className="flex flex-wrap gap-sm rounded-sm border border-rule bg-paper p-sm">
           {field.options?.map((opt) => (
             <label key={String(opt)} className="check-row">
               <input
@@ -439,7 +443,7 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
     const rows = (isMulti ? items : items.slice(0, 1)).map((item, i) => ({ item, i }))
 
     return (
-      <div className="border border-rule bg-paper">
+      <div className="overflow-hidden rounded-sm border border-rule bg-paper">
         <input
           type="file"
           accept={`${kind}/*`}
@@ -455,7 +459,7 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
         />
         <div className="p-sm">
           {rows.length === 0 ? (
-            <div className="border border-dashed border-muted px-md py-lg text-center text-sm text-ink-2">
+            <div className="rounded-sm border border-dashed border-rule-strong bg-paper-2 px-md py-lg text-center text-sm text-muted">
               {busy ? '上传中…' : `还没有选择${unit}`}
             </div>
           ) : (
@@ -468,7 +472,7 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
                   <div className="min-w-0 flex-1">
                     {item.asset ? (
                       <AuthMedia
-                        src={getAssetUrl(item.asset.task_id, item.asset.file_name)}
+                        src={getAssetUrl(item.asset.id)}
                         alt={item.name}
                         mime={item.asset.mime_type}
                         controls
@@ -541,8 +545,8 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
     if (preview.asset) {
       return (
         <AuthMedia
-          src={getAssetUrl(preview.asset.task_id, preview.asset.file_name)}
-          posterSrc={getAssetThumbUrl(preview.asset.task_id, preview.asset.file_name)}
+          src={getAssetUrl(preview.asset.id)}
+          posterSrc={getAssetThumbUrl(preview.asset.id)}
           alt={preview.name}
           mime={preview.asset.mime_type}
           className={className}
@@ -571,13 +575,13 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
     const missingUpload = missingRequiredUpload(fields, values)
     if (missingUpload) {
       const field = fields.find((item) => item.name === missingUpload)
-      alert(`请先上传${field?.label || '必填文件'}`)
+      notify(`请先上传${field?.label || '必填文件'}`, 'warning')
       return
     }
     const missingList = missingRequiredList(fields, values)
     if (missingList) {
       const field = fields.find((item) => item.name === missingList)
-      alert(`请先填写${field?.label || '必填列表'}`)
+      notify(`请先填写${field?.label || '必填列表'}`, 'warning')
       return
     }
     // 过滤掉空值（多图字段的 [] 也算空）
@@ -666,7 +670,7 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
         const preview = items[0]
         const busy = !!uploading[field.name]
         return (
-          <div className="border border-rule bg-paper">
+          <div className="overflow-hidden rounded-sm border border-rule bg-paper">
             <input
               type="file"
               accept="image/*"
@@ -687,12 +691,12 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
                     {items.map((item, i) => (
                       <div
                         key={`${item.objectUrl ?? item.asset?.id ?? item.name}-${i}`}
-                        className="relative h-20 w-20 overflow-hidden border border-rule bg-paper-2"
+                        className="relative h-20 w-20 overflow-hidden rounded-sm border border-rule bg-paper-2"
                       >
                         {renderImagePreview(item, 'h-full w-full object-cover')}
                         <button
                           type="button"
-                          className="absolute right-0 top-0 h-5 w-5 border border-rule bg-paper text-xs leading-none text-ink disabled:opacity-40"
+                          className="absolute right-0 top-0 h-5 w-5 rounded-bl-sm border-b border-l border-rule bg-paper text-xs leading-none text-ink transition-colors hover:bg-error-soft hover:text-error disabled:opacity-40"
                           aria-label={`移除第 ${i + 1} 张`}
                           // 上传中禁止删：删掉会让后面追加的图与预览位置错位
                           disabled={busy}
@@ -704,7 +708,7 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
                     ))}
                   </div>
                 ) : (
-                  <div className="border border-dashed border-muted px-md py-lg text-center text-sm text-ink-2">
+                  <div className="rounded-sm border border-dashed border-rule-strong bg-paper-2 px-md py-lg text-center text-sm text-muted">
                     {busy ? '上传中…' : `还没有选择${field.label}`}
                   </div>
                 )}
@@ -713,7 +717,7 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
                   <label
                     htmlFor={`upload-${field.name}`}
                     aria-disabled={busy}
-                    className={`btn-quiet cursor-pointer ${busy ? 'pointer-events-none opacity-50' : ''}`}
+                    className={`btn cursor-pointer ${busy ? 'pointer-events-none opacity-50' : ''}`}
                   >
                     添加图片
                   </label>
@@ -736,7 +740,7 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
               </div>
             ) : preview ? (
               <div className="flex items-start gap-sm p-sm">
-                <div className="h-24 w-24 shrink-0 overflow-hidden border border-rule bg-paper-2">
+                <div className="h-24 w-24 shrink-0 overflow-hidden rounded-sm border border-rule bg-paper-2">
                   {renderImagePreview(preview, 'h-full w-full object-cover')}
                 </div>
                 <div className="min-w-0 flex-1">
@@ -752,13 +756,13 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
                     <label
                       htmlFor={`upload-${field.name}`}
                       aria-disabled={busy}
-                      className={`btn-quiet cursor-pointer ${busy ? 'pointer-events-none opacity-50' : ''}`}
+                      className={`btn cursor-pointer ${busy ? 'pointer-events-none opacity-50' : ''}`}
                     >
                       更换
                     </label>
                     <button
                       type="button"
-                      className="btn-quiet"
+                      className="btn"
                       disabled={busy}
                       onClick={() => setPickerFor(field)}
                     >
@@ -806,21 +810,21 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
                 </button>
               </div>
             ) : (
-              <div className="border border-dashed border-muted px-md py-lg text-center text-sm text-ink-2">
+              <div className="rounded-sm border border-dashed border-rule-strong bg-paper-2 px-md py-lg text-center text-sm text-muted">
                 {busy ? (
                   <span className="text-accent">上传中…</span>
                 ) : (
-                  <div className="flex flex-wrap items-center justify-center gap-sm">
+                  <div className="flex flex-wrap items-center justify-center gap-xs">
                     <label
                       htmlFor={`upload-${field.name}`}
                       aria-disabled={busy}
-                      className={`btn-quiet cursor-pointer ${busy ? 'pointer-events-none opacity-50' : ''}`}
+                      className={`btn-primary cursor-pointer ${busy ? 'pointer-events-none opacity-50' : ''}`}
                     >
                       点击上传{field.label}
                     </label>
                     <button
                       type="button"
-                      className="btn-quiet"
+                      className="btn"
                       disabled={busy}
                       onClick={() => setPickerFor(field)}
                     >
@@ -878,7 +882,7 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
             {showAdvanced ? '▾ 收起高级选项' : '▸ 展开高级选项'}
           </button>
           {showAdvanced && (
-            <div className="mt-sm border border-rule bg-paper p-md">
+            <div className="mt-sm rounded-sm border border-rule bg-paper-2 p-md">
               {advancedFields.map((field) => (
                 <div key={field.name} className="mt-md first:mt-0">
                   <label className="field-label" htmlFor={`field-${field.name}`}>
@@ -892,7 +896,7 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
         </div>
       )}
 
-      <div className="mt-lg flex flex-wrap items-end gap-sm border-t border-rule pt-md">
+      <div className="mt-lg flex flex-wrap items-end justify-between gap-sm border-t border-rule pt-md">
         <div>
           <label className="field-label" htmlFor="batchCount">
             生成数量
@@ -910,7 +914,7 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
         <button
           type="submit"
           disabled={submitting || anyFileUploading}
-          className="btn btn-primary flex-1 justify-center"
+          className="btn btn-primary justify-center px-xl"
         >
           {submitting ? '提交中…' : anyFileUploading ? '文件上传中…' : '开始生成'}
         </button>

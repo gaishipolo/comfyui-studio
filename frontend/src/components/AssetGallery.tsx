@@ -4,12 +4,15 @@
  * （admin 多见一份全部）。共享的素材别人只能看/下载，打标签、删除、
  * 共享开关仍是作者或管理员的权利 —— 界面上直接把没有权限的操作藏掉。 */
 import { useState, useEffect, useCallback, useRef } from 'react'
+import type { ChangeEvent } from 'react'
 import type { Asset, Template, AssetTag, User } from '../types'
 import {
   listAssets, listAssetTags, addAssetTag, removeAssetTag, shareAsset,
   prepareBatchDownload, getAssetUrl, getAssetThumbUrl, downloadAsset, deleteAsset, listUsers,
+  uploadAssets,
 } from '../api/client'
-import { subscribeAssetsChanged } from '../notify'
+import { reportError, subscribeAssetsChanged } from '../notify'
+import { alertDialog, confirmDialog } from './dialog'
 import AuthMedia from './AuthMedia'
 import { assetListViewState, createLatestRequestGate } from './listViewState'
 import { useModalKeyboard } from './useModalKeyboard'
@@ -78,6 +81,12 @@ export default function AssetGallery({ templates, user }: Props) {
   /** 服务端准备批量归档需要时间；忙碌态同时阻止重复提交。 */
   const [downloading, setDownloading] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  /** 异步确认框期间的同步重入守卫（state 要等下一次渲染才生效） */
+  const batchDeleteBusy = useRef(false)
+  /** 上传态：百分比来自 XHR 的 upload.onprogress（视频可达 200MB，必须给反馈） */
+  const [uploading, setUploading] = useState(false)
+  const [uploadPercent, setUploadPercent] = useState(0)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   // 搜索防抖 300ms
   useEffect(() => {
@@ -164,8 +173,27 @@ export default function AssetGallery({ templates, user }: Props) {
     setSelected(allVisibleSelected ? new Set() : new Set(assets.map((a) => a.id)))
   }
 
-  const handleBatchDownload = async () => {
-    if (selected.size === 0 || downloading) return
+  /** 把本地文件直接存进素材库。上传完刷新列表与标签（新素材可能带新标签）。 */
+  const handleUpload = async (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? [])
+    // 清空 input：否则连续选同一个文件不会触发 change
+    event.target.value = ''
+    if (files.length === 0 || uploading) return
+
+    setUploading(true)
+    setUploadPercent(0)
+    try {
+      await uploadAssets(files, setUploadPercent)
+      await Promise.all([fetchAssets(), fetchTags()])
+    } catch (err) {
+      reportError('上传失败', err)
+    } finally {
+      setUploading(false)
+      setUploadPercent(0)
+    }
+  }
+
+  const handleBatchDownload = async () => {    if (selected.size === 0 || downloading) return
     setDownloading(true)
     try {
       const url = await prepareBatchDownload([...selected])
@@ -177,7 +205,7 @@ export default function AssetGallery({ templates, user }: Props) {
       a.click()
       a.remove()
     } catch (err) {
-      alert(`下载失败: ${err instanceof Error ? err.message : err}`)
+      reportError('下载失败', err)
     } finally {
       setDownloading(false)
     }
@@ -185,12 +213,13 @@ export default function AssetGallery({ templates, user }: Props) {
 
   /** 删除单个素材（详情面板）。不可逆，会连磁盘文件一起删 */
   const handleDeleteAsset = async (asset: Asset) => {
-    if (
-      !confirm(
-        `确定删除素材「${asset.file_name}」？\n\n此操作不可撤销，文件会一并从磁盘删除。`,
-      )
-    )
-      return
+    const ok = await confirmDialog({
+      title: '删除这个素材？',
+      message: `文件：${asset.file_name}\n\n此操作不可撤销，文件会一并从磁盘删除。`,
+      tone: 'danger',
+      confirmText: '删除',
+    })
+    if (!ok) return
     try {
       const res = await deleteAsset(asset.id)
       setDetail(null)
@@ -205,26 +234,32 @@ export default function AssetGallery({ templates, user }: Props) {
       fetchTags()
       // 记录一定已删，但磁盘文件可能没清掉 —— 如实告知，别笼统说"已删除"
       if (!res.file_removed) {
-        alert(
-          `记录已删除，但磁盘文件未能清理（不影响素材库）。\n原因：${res.file_error || '未知'}\n\n如需释放磁盘空间，请联系管理员处理。`,
-        )
+        await alertDialog({
+          title: '记录已删除，但磁盘文件未能清理',
+          message: `不影响素材库的正常使用。\n原因：${res.file_error || '未知'}\n\n如需释放磁盘空间，请联系管理员处理。`,
+          tone: 'error',
+        })
       }
     } catch (err) {
-      alert(`删除失败: ${err instanceof Error ? err.message : err}`)
+      reportError('删除失败', err)
     }
   }
 
   /** 批量删除已选素材。不可逆，会连磁盘文件一起删 */
   const handleBatchDelete = async () => {
-    if (selected.size === 0 || deleting) return
-    if (
-      !confirm(
-        `确定删除选中的 ${selected.size} 个素材？\n\n此操作不可撤销，文件会一并从磁盘删除。`,
-      )
-    )
-      return
-    setDeleting(true)
+    // 确认框是异步的，弹着的时候按钮还没禁用 —— 没有这道同步守卫，
+    // 连点两次会排两个确认框，用户各确认一次就把同一批删了两遍。
+    if (selected.size === 0 || batchDeleteBusy.current) return
+    batchDeleteBusy.current = true
     try {
+      const ok = await confirmDialog({
+        title: `删除选中的 ${selected.size} 个素材？`,
+        message: '此操作不可撤销，文件会一并从磁盘删除。',
+        tone: 'danger',
+        confirmText: `删除 ${selected.size} 个`,
+      })
+      if (!ok) return
+      setDeleting(true)
       const ids = [...selected]
       const failed: string[] = []
       const fileLeft: string[] = []
@@ -247,8 +282,15 @@ export default function AssetGallery({ templates, user }: Props) {
       if (fileLeft.length) {
         lines.push(`${fileLeft.length} 个记录已删除，但磁盘文件未能清理：\n${fileLeft.join('\n')}`)
       }
-      if (lines.length) alert(lines.join('\n\n'))
+      if (lines.length) {
+        await alertDialog({
+          title: '部分素材未能完全删除',
+          message: lines.join('\n\n'),
+          tone: 'error',
+        })
+      }
     } finally {
+      batchDeleteBusy.current = false
       setDeleting(false)
     }
   }
@@ -260,7 +302,7 @@ export default function AssetGallery({ templates, user }: Props) {
       fetchAssets()
       fetchTags()
     } catch (err) {
-      alert(`添加标签失败: ${err instanceof Error ? err.message : err}`)
+      reportError('添加标签失败', err)
     }
   }
 
@@ -270,7 +312,7 @@ export default function AssetGallery({ templates, user }: Props) {
       fetchAssets()
       fetchTags()
     } catch (err) {
-      alert(`移除标签失败: ${err instanceof Error ? err.message : err}`)
+      reportError('移除标签失败', err)
     }
   }
 
@@ -283,11 +325,11 @@ export default function AssetGallery({ templates, user }: Props) {
         prev && prev.id === asset.id ? { ...prev, is_shared: !asset.is_shared } : prev,
       )
     } catch (err) {
-      alert(`操作失败: ${err instanceof Error ? err.message : err}`)
+      reportError('操作失败', err)
     }
   }
 
-  const assetUrl = (asset: Asset) => getAssetUrl(asset.task_id, asset.file_name)
+  const assetUrl = (asset: Asset) => getAssetUrl(asset.id)
 
   const viewState = assetListViewState({
     loading,
@@ -297,19 +339,54 @@ export default function AssetGallery({ templates, user }: Props) {
 
   return (
     <section>
-      {/* 搜索 + 筛选栏 */}
-      <div className="rule-b pb-md">
+      {/* 页头：标题 + 主操作。上传是这一页的主动作，放右上角与其他页对齐 */}
+      <div className="page-head">
+        <div>
+          <h2 className="page-title">素材库</h2>
+          <p className="page-sub">
+            {assets.length === 0
+              ? '生成产物与上传的文件都会收在这里'
+              : `共 ${assets.length} 个素材`}
+          </p>
+        </div>
+        <div className="flex items-center gap-xs">
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            className="btn-primary"
+            disabled={uploading}
+          >
+            {uploading ? `上传中 ${uploadPercent}%` : '上传素材'}
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            accept="image/*,audio/*,video/*"
+            className="hidden"
+            onChange={handleUpload}
+          />
+          {assets.length > 0 && (
+            <button onClick={toggleSelectAll} className="btn">
+              {allVisibleSelected ? '取消全选' : `全选 (${assets.length})`}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* 筛选栏：第一行是搜索与范围，第二行是分类 chips —— 控件不再挤成一长条 */}
+      <div className="panel mb-md p-md">
         <div className="flex flex-wrap items-center gap-xs">
           <input
             type="text"
             placeholder="搜索素材（文件名/参数）"
             aria-label="搜索素材"
-            className="field min-w-[12rem] flex-1"
+            className="field min-w-[12rem] max-w-[22rem] flex-1"
             value={keyword}
             onChange={(e) => setKeyword(e.target.value)}
           />
           <select
-            className="field w-auto"
+            className="field w-[9.5rem]"
             aria-label="按生成场景筛选"
             value={activeTemplate ?? ''}
             onChange={(e) => setActiveTemplate(e.target.value || null)}
@@ -321,26 +398,9 @@ export default function AssetGallery({ templates, user }: Props) {
               </option>
             ))}
           </select>
-          <input
-            type="date"
-            className="field w-auto"
-            aria-label="创建时间起"
-            title="创建时间起（含当天）"
-            value={createdFrom}
-            onChange={(e) => setCreatedFrom(e.target.value)}
-          />
-          <span className="text-sm text-muted">至</span>
-          <input
-            type="date"
-            className="field w-auto"
-            aria-label="创建时间止"
-            title="创建时间止（含当天）"
-            value={createdTo}
-            onChange={(e) => setCreatedTo(e.target.value)}
-          />
           {user.role === 'admin' && (
             <select
-              className="field w-auto"
+              className="field w-[8.5rem]"
               aria-label="按创建人筛选"
               value={creatorFilter}
               onChange={(e) => setCreatorFilter(e.target.value)}
@@ -353,101 +413,135 @@ export default function AssetGallery({ templates, user }: Props) {
               ))}
             </select>
           )}
-          {assets.length > 0 && (
-            <button onClick={toggleSelectAll} className="btn-quiet">
-              {allVisibleSelected ? '取消全选' : `全选 (${assets.length})`}
-            </button>
-          )}
-          {selected.size > 0 && (
-            <>
-              <button onClick={() => setSelected(new Set())} className="btn-quiet">
-                清除选择
-              </button>
-              <button
-                onClick={handleBatchDownload}
-                className="btn btn-primary"
-                disabled={downloading}
-              >
-                {downloading ? '打包中…' : `下载 (${selected.size})`}
-              </button>
-              <button onClick={handleBatchDelete} className="btn btn-danger" disabled={deleting}>
-                {deleting ? '删除中…' : `删除 (${selected.size})`}
-              </button>
-            </>
-          )}
+          <span className="ml-2xs flex items-center gap-xs">
+            <input
+              type="date"
+              className="field w-[9.5rem]"
+              aria-label="创建时间起"
+              title="创建时间起（含当天）"
+              value={createdFrom}
+              onChange={(e) => setCreatedFrom(e.target.value)}
+            />
+            <span className="text-sm text-muted">至</span>
+            <input
+              type="date"
+              className="field w-[9.5rem]"
+              aria-label="创建时间止"
+              title="创建时间止（含当天）"
+              value={createdTo}
+              onChange={(e) => setCreatedTo(e.target.value)}
+            />
+          </span>
         </div>
 
-        {/* 类型分栏：图片 / 视频 / 音频。放在标签栏之前 —— 先分大类，再按标签细分 */}
-        <div className="mt-sm flex flex-wrap items-center gap-sm">
+        {/* 分类行：先按类型（真实 MIME）分大类，再按标签细分，同一行并排 —— 
+            两行各占 40px 纯属浪费，中间用竖线隔开就够区分。
+            标签里过滤掉 image/video/audio 这类「文件种类」值，它们由类型栏统一管。 */}
+        <div className="mt-sm flex flex-wrap items-center gap-xs border-t border-rule pt-sm">
+          <span className="mr-2xs text-xs font-medium text-muted">类型</span>
           {KIND_TABS.map((tab) => (
             <button
               key={tab.value || 'all'}
               type="button"
               onClick={() => setKindFilter(tab.value)}
-              className="chip"
+              className="chip cursor-pointer"
               data-state={kindFilter === tab.value ? 'on' : undefined}
               aria-pressed={kindFilter === tab.value}
             >
               {tab.label}
             </button>
           ))}
+          {tags.filter((t) => !FILE_KIND_TAGS.has(t.name)).length > 0 && (
+            <>
+              <span aria-hidden="true" className="mx-2xs h-4 w-px bg-rule" />
+              <span className="mr-2xs text-xs font-medium text-muted">标签</span>
+              <button
+                onClick={() => setActiveTag(null)}
+                className="chip cursor-pointer"
+                data-state={!activeTag ? 'on' : undefined}
+              >
+                全部
+              </button>
+              {tags
+                .filter((t) => !FILE_KIND_TAGS.has(t.name))
+                .map((tag) => (
+                  <button
+                    key={tag.name}
+                    onClick={() => setActiveTag(activeTag === tag.name ? null : tag.name)}
+                    className="chip cursor-pointer"
+                    data-state={activeTag === tag.name ? 'on' : undefined}
+                  >
+                    {tag.name} ({tag.count})
+                  </button>
+                ))}
+            </>
+          )}
         </div>
-
-        {/* 标签栏：按模板分类筛选。过滤掉 image/video/audio 这类「文件种类」值，
-            它们由上面的类型分栏（按真实 MIME 过滤）统一管，留在这里会撞脸。 */}
-        {tags.filter((t) => !FILE_KIND_TAGS.has(t.name)).length > 0 && (
-          <div className="mt-sm flex flex-wrap gap-sm">
-            <button
-              onClick={() => setActiveTag(null)}
-              className="chip"
-              data-state={!activeTag ? 'on' : undefined}
-            >
-              全部
-            </button>
-            {tags
-              .filter((t) => !FILE_KIND_TAGS.has(t.name))
-              .map((tag) => (
-                <button
-                  key={tag.name}
-                  onClick={() => setActiveTag(activeTag === tag.name ? null : tag.name)}
-                  className="chip"
-                  data-state={activeTag === tag.name ? 'on' : undefined}
-                >
-                  {tag.name} ({tag.count})
-                </button>
-              ))}
-          </div>
-        )}
       </div>
+
+      {/* 批量操作条：独立成条，避免勾选时整行筛选控件重排 */}
+      {selected.size > 0 && (
+        <div className="bulk-bar">
+          <span className="bulk-bar-count">已选 {selected.size} 项</span>
+          <button
+            onClick={handleBatchDownload}
+            className="btn btn-primary"
+            disabled={downloading}
+          >
+            {downloading ? '打包中…' : `下载 (${selected.size})`}
+          </button>
+          <button onClick={handleBatchDelete} className="btn btn-danger" disabled={deleting}>
+            {deleting ? '删除中…' : `删除 (${selected.size})`}
+          </button>
+          <button onClick={() => setSelected(new Set())} className="btn-quiet">
+            清除选择
+          </button>
+        </div>
+      )}
 
       {/* 素材画廊 */}
       {viewState === 'loading' ? (
         <div
-          className="mt-md grid grid-cols-2 gap-sm sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5"
+          className="grid grid-cols-2 gap-md sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5"
           aria-hidden="true"
         >
           {Array.from({ length: 10 }).map((_, i) => (
-            <div key={i}>
+            <div key={i} className="card">
               <div className="skeleton aspect-square" />
-              <div className="skeleton mt-2xs h-sm" />
+              <div className="p-sm">
+                <div className="skeleton h-2xs w-2/3" />
+                <div className="skeleton mt-xs h-2xs w-1/3" />
+              </div>
             </div>
           ))}
         </div>
       ) : viewState === 'error' ? (
-        <div className="mt-md flex min-h-[10rem] flex-col items-center justify-center gap-sm border border-dashed border-error text-base text-error">
+        <div className="flex min-h-[12rem] flex-col items-center justify-center gap-sm rounded-md border border-dashed border-error-line bg-error-soft text-base text-error">
           <span>素材加载失败，请检查网络后重试</span>
           <button onClick={() => fetchAssets()} className="btn">
             重试
           </button>
         </div>
       ) : viewState === 'empty' ? (
-        <p className="mt-md flex min-h-[10rem] items-center justify-center border border-dashed border-rule text-base text-muted">
-          暂无素材，去生成页面创建内容吧
-        </p>
+        <div className="empty">
+          <span className="empty-icon" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+              <path
+                d="M4 5h16v14H4zM9.5 10.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3M20 16l-4.5-4.5L7 20"
+                stroke="currentColor"
+                strokeWidth="1.7"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </span>
+          <p className="empty-title">暂无素材</p>
+          <p className="empty-hint">去生成页面创建内容，或点「上传素材」直接导入</p>
+        </div>
       ) : (
-        <div className="mt-md grid grid-cols-2 gap-sm sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
+        <div className="grid grid-cols-2 gap-md sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
           {assets.map((asset) => (
-            <div key={asset.id} className="relative">
+            <div key={asset.id} className="card card-hover group relative">
               <button
                 type="button"
                 aria-pressed={selected.has(asset.id)}
@@ -464,7 +558,7 @@ export default function AssetGallery({ templates, user }: Props) {
               {/* 归属/共享角标：别人的共享素材标来源，自己的共享标状态；
                   admin 看别人的私有素材也标来源 */}
               {((asset.is_shared && asset.creator_name) || (!isMine(asset) && asset.creator_name)) && (
-                <span className="absolute right-xs top-xs border border-rule bg-paper px-2xs text-xs text-ink-2">
+                <span className="pointer-events-none absolute right-xs top-xs z-raised rounded-pill border border-rule bg-[rgba(255,255,255,0.92)] px-xs py-2xs text-xs text-ink-2 shadow-xs backdrop-blur-sm">
                   {asset.is_shared && isMine(asset)
                     ? '共享中'
                     : asset.is_shared
@@ -473,20 +567,12 @@ export default function AssetGallery({ templates, user }: Props) {
                 </span>
               )}
 
-              {/* 格式角标：图片/视频/音频统一一枚小角标，按 MIME 判定。
-                  标签里的 image/video/audio 已过滤，这里补一个统一的格式标识，三类一致、不重复。 */}
-              {formatLabel(asset.mime_type || '') && (
-                <span className="pointer-events-none absolute bottom-6 left-xs border border-rule bg-paper px-2xs text-xs text-ink-2">
-                  {formatLabel(asset.mime_type || '')}
-                </span>
-              )}
-
               <button
                 type="button"
                 onClick={() => setDetail(asset)}
                 className="block w-full text-left"
               >
-                <span className="block aspect-square overflow-hidden border border-rule bg-paper-2">
+                <span className="relative block aspect-square overflow-hidden bg-paper-2">
                   {(asset.mime_type || '').startsWith('audio/') ? (
                     // 音频没有画面，也不值得为了一个格子把整段音频拉下来
                     <span className="flex h-full w-full items-center justify-center px-xs text-center text-xs text-muted">
@@ -495,15 +581,23 @@ export default function AssetGallery({ templates, user }: Props) {
                   ) : (
                     <AuthMedia
                       src={assetUrl(asset)}
-                      posterSrc={getAssetThumbUrl(asset.task_id, asset.file_name)}
+                      posterSrc={getAssetThumbUrl(asset.id)}
                       alt={asset.file_name}
                       mime={asset.mime_type}
-                      className="h-full w-full object-cover"
+                      className="h-full w-full object-cover transition-transform duration-short ease-out group-hover:scale-[1.02]"
                       loading="lazy"
                     />
                   )}
+
+                  {/* 格式角标：图片/视频/音频统一一枚小角标，按 MIME 判定。
+                      标签里的 image/video/audio 已过滤，这里补一个统一的格式标识，三类一致、不重复。 */}
+                  {formatLabel(asset.mime_type || '') && (
+                    <span className="pointer-events-none absolute bottom-xs left-xs rounded-pill border border-rule bg-[rgba(255,255,255,0.92)] px-xs py-2xs text-xs text-ink-2 shadow-xs backdrop-blur-sm">
+                      {formatLabel(asset.mime_type || '')}
+                    </span>
+                  )}
                 </span>
-                <span className="mt-2xs block">
+                <span className="block p-sm">
                   <span className="flex flex-wrap gap-2xs">
                     {(asset.tags || [])
                       .filter((tag) => !FILE_KIND_TAGS.has(tag))
@@ -511,14 +605,21 @@ export default function AssetGallery({ templates, user }: Props) {
                       .map((tag) => (
                       <span
                         key={tag}
-                        className="border border-rule bg-paper-2 px-2xs text-xs text-ink-2"
+                        className="rounded-pill border border-rule bg-paper-2 px-xs text-xs leading-5 text-ink-2"
                       >
                         {tag}
                       </span>
                     ))}
                   </span>
-                  <span className="mt-2xs block text-xs text-muted">
+                  <span
+                    className="mt-2xs block truncate text-xs font-medium text-ink-2"
+                    title={asset.file_name}
+                  >
+                    {asset.file_name}
+                  </span>
+                  <span className="mt-2xs block truncate text-xs text-muted">
                     {new Date(asset.created_at).toLocaleDateString('zh-CN')}
+                    {asset.file_size ? ` · ${formatSize(asset.file_size)}` : ''}
                   </span>
                 </span>
               </button>
@@ -539,7 +640,7 @@ export default function AssetGallery({ templates, user }: Props) {
             aria-modal="true"
             aria-labelledby="asset-detail-title"
             tabIndex={-1}
-            className="flex max-h-[90dvh] w-full max-w-3xl overflow-hidden border border-rule bg-paper"
+            className="flex max-h-[90dvh] w-full max-w-4xl overflow-hidden rounded-lg border border-rule bg-paper shadow-lg"
             onClick={(e) => e.stopPropagation()}
           >
             {/* 左侧预览：图片/视频/音频按 MIME 分流 */}
@@ -554,7 +655,7 @@ export default function AssetGallery({ templates, user }: Props) {
             </div>
 
             {/* 右侧信息 */}
-            <div className="w-72 overflow-y-auto p-lg">
+            <div className="w-80 shrink-0 overflow-y-auto border-l border-rule p-lg">
               <div className="flex items-center justify-between gap-xs">
                 <h3 id="asset-detail-title" className="font-display text-title">素材详情</h3>
                 <button
@@ -567,27 +668,27 @@ export default function AssetGallery({ templates, user }: Props) {
               </div>
 
               <dl className="mt-md text-sm">
-                <div className="rule-t py-xs">
-                  <dt className="text-xs text-muted">文件</dt>
-                  <dd className="text-ink">{detail.file_name}</dd>
+                <div className="flex items-baseline justify-between gap-sm border-b border-rule py-xs">
+                  <dt className="shrink-0 text-xs text-muted">文件</dt>
+                  <dd className="min-w-0 break-all text-right text-ink">{detail.file_name}</dd>
                 </div>
-                <div className="rule-t py-xs">
-                  <dt className="text-xs text-muted">大小</dt>
-                  <dd className="num text-ink">{formatSize(detail.file_size)}</dd>
+                <div className="flex items-baseline justify-between gap-sm border-b border-rule py-xs">
+                  <dt className="shrink-0 text-xs text-muted">大小</dt>
+                  <dd className="num text-right text-ink">{formatSize(detail.file_size)}</dd>
                 </div>
-                <div className="rule-t py-xs">
-                  <dt className="text-xs text-muted">生成时间</dt>
-                  <dd className="text-ink">
+                <div className="flex items-baseline justify-between gap-sm border-b border-rule py-xs">
+                  <dt className="shrink-0 text-xs text-muted">生成时间</dt>
+                  <dd className="num text-right text-ink">
                     {new Date(detail.created_at).toLocaleString('zh-CN')}
                   </dd>
                 </div>
-                <div className="rule-t py-xs">
-                  <dt className="text-xs text-muted">归属</dt>
-                  <dd className="text-ink">
+                <div className="flex items-baseline justify-between gap-sm border-b border-rule py-xs">
+                  <dt className="shrink-0 text-xs text-muted">归属</dt>
+                  <dd className="flex flex-wrap items-center justify-end gap-2xs text-right text-ink">
                     {isMine(detail) ? '我' : detail.creator_name || '无主数据'}
                     {detail.is_shared && (
-                      <span className="ml-2xs border border-rule bg-paper-2 px-2xs text-xs text-ink-2">
-                        已共享给团队
+                      <span className="chip" data-tone="accent">
+                        已共享
                       </span>
                     )}
                   </dd>
@@ -596,8 +697,8 @@ export default function AssetGallery({ templates, user }: Props) {
 
               {/* 共享开关（仅本人/管理员）：共享的是「看」的权限，不是共同所有 */}
               {canModify(detail) && (
-                <div className="mt-md border border-rule bg-paper-2 p-sm">
-                  <div className="text-xs text-muted">
+                <div className="mt-md rounded-sm border border-rule bg-paper-2 p-sm">
+                  <div className="text-xs leading-relaxed text-muted">
                     {detail.is_shared
                       ? '当前共享给团队：队友可见可下载，但不能改'
                       : '当前仅自己可见（admin 不受此限制）'}
@@ -605,7 +706,7 @@ export default function AssetGallery({ templates, user }: Props) {
                   <button
                     type="button"
                     onClick={() => handleToggleShare(detail)}
-                    className="btn btn-quiet mt-xs"
+                    className="btn mt-xs"
                   >
                     {detail.is_shared ? '取消共享' : '共享给团队'}
                   </button>
@@ -619,15 +720,12 @@ export default function AssetGallery({ templates, user }: Props) {
                   {(detail.tags || [])
                     .filter((tag) => !FILE_KIND_TAGS.has(tag))
                     .map((tag) => (
-                    <span
-                      key={tag}
-                      className="chip"
-                    >
+                    <span key={tag} className="chip">
                       {tag}
                       {canModify(detail) && (
                         <button
                           onClick={() => handleRemoveTag(detail.id, tag)}
-                          className="btn-quiet"
+                          className="cursor-pointer text-muted transition-colors hover:text-error"
                           aria-label={`移除标签 ${tag}`}
                         >
                           ✕
@@ -658,7 +756,7 @@ export default function AssetGallery({ templates, user }: Props) {
               {detail.meta && Object.keys(detail.meta).length > 0 && (
                 <div className="mt-md">
                   <div className="text-xs text-muted">生成参数</div>
-                  <dl className="mt-2xs border border-rule bg-paper-2 p-sm">
+                  <dl className="mt-2xs rounded-sm border border-rule bg-paper-2 p-sm">
                     {Object.entries(detail.meta).map(([key, value]) => (
                       <div key={key} className="text-xs">
                         <dt className="inline text-muted">{key}: </dt>
@@ -675,7 +773,7 @@ export default function AssetGallery({ templates, user }: Props) {
                   type="button"
                   onClick={() => {
                     downloadAsset(assetUrl(detail), detail.file_name).catch((err) =>
-                      alert(`下载失败: ${err instanceof Error ? err.message : err}`),
+                      reportError('下载失败', err),
                     )
                   }}
                   className="btn btn-primary flex-1 justify-center"

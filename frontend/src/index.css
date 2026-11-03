@@ -1,7 +1,6 @@
-/* Hallmark · shape: app screen · genre: editorial · theme: Grid (deal 3/3, seed prompt-827b·467e00de·2026-10-28·r0) · redesign: full
- * nav: top bar with module tabs · signature: the queue · states: loading, empty, error, full
- * axes: light/grotesk-sans/cool · posture: full-palette · contrast: pass · v2.0.0 */
-/* Hallmark · pre-emit critique: P4 H5 E4 S4 R5 V4 · weakest: E, the state chip's success/error ink sat at 5.1:1 on paper; set the state word in ink-2 and kept the token for borders */
+/* Hallmark · shape: app screen · genre: product console · theme: Grid · redesign: v3 console
+ * nav: top bar with pill tabs · signature: the queue · states: loading, empty, error, full
+ * axes: light/system-sans/indigo · posture: single-accent · contrast: pass · v3.0.0 */
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -48,122 +47,149 @@
     position: absolute;
     inset: -4px;
   }
-  button.chip::after,
+  /* 胶囊只有 24px 高，命中区扩 4px 而不是 6px：行内 gap 是 8px，
+     两侧各扩 4px 正好贴合，再大就会盖住相邻胶囊抢走它的点击。 */
+  button.chip::after { inset: -4px; }
   .x-btn::after { inset: -6px; }
 
+  /* ── Buttons ────────────────────────────────────────────────────
+     Every button is a surface: white fill, hairline edge, 8px radius,
+     one step of shadow. Shadow is a *depth* signal, not decoration —
+     the primary action is the only one allowed to sit on the accent. */
+
   .btn {
-    @apply control cursor-pointer select-none border border-rule bg-paper text-ink
+    @apply control cursor-pointer select-none rounded-sm border border-rule-strong bg-paper text-ink
            transition-colors duration-micro ease-out;
     padding-inline: var(--space-md);
+    box-shadow: var(--shadow-xs);
   }
-  .btn:hover { @apply bg-paper-2; }
+  .btn:hover { @apply border-ink-2 bg-paper-2; }
   .btn:active,
-  .btn.is-active { @apply bg-paper-3; transform: translateY(1px); }
+  .btn.is-active { @apply bg-paper-3; transform: translateY(1px); box-shadow: none; }
   .btn:disabled,
-  .btn[aria-disabled='true'] { @apply cursor-not-allowed border-rule bg-paper-2 text-muted opacity-60; }
+  .btn[aria-disabled='true'] {
+    @apply cursor-not-allowed border-rule bg-paper-2 text-muted opacity-70;
+    box-shadow: none;
+  }
   .btn:disabled:active { transform: none; }
 
   /* the primary action — the one place the accent is spent */
   .btn-primary {
-    @apply border-accent bg-accent text-accent-ink;
+    @apply control cursor-pointer select-none rounded-sm border border-accent bg-accent text-accent-ink
+           transition-colors duration-micro ease-out;
+    padding-inline: var(--space-md);
+    box-shadow: var(--shadow-xs);
   }
-  .btn-primary:hover { @apply border-ink bg-ink; }
+  .btn-primary:hover { @apply border-accent-hover bg-accent-hover; }
   .btn-primary:active,
-  .btn-primary.is-active { @apply border-ink bg-ink; }
+  .btn-primary.is-active { @apply border-accent-hover bg-accent-hover; transform: translateY(1px); box-shadow: none; }
   .btn-primary:disabled,
   .btn-primary[aria-disabled='true'] {
-    @apply border-rule bg-paper-2 text-muted opacity-60;
+    @apply cursor-not-allowed border-rule bg-paper-2 text-muted opacity-70;
+    box-shadow: none;
   }
 
   /* the destructive action — confirmed, never the accent */
   .btn-danger {
-    @apply border-error text-error;
+    @apply control cursor-pointer select-none rounded-sm border border-error-line bg-error-soft text-error
+           transition-colors duration-micro ease-out;
+    padding-inline: var(--space-md);
   }
   .btn-danger:hover,
   .btn-danger:active { @apply border-error bg-error text-accent-ink; }
-  .btn-danger:disabled { @apply border-rule text-muted opacity-60; }
+  .btn-danger:disabled { @apply cursor-not-allowed border-rule bg-paper-2 text-muted opacity-70; }
 
   /* quiet: a bare control that reads as type until it is used */
   .btn-quiet {
-    @apply control cursor-pointer select-none border border-transparent bg-transparent text-ink-2;
+    @apply control cursor-pointer select-none rounded-sm border border-transparent bg-transparent text-ink-2
+           transition-colors duration-micro ease-out;
     padding-inline: var(--space-md);
   }
-  .btn-quiet:hover { @apply border-rule bg-paper-2 text-ink; }
+  .btn-quiet:hover { @apply border-rule-strong bg-paper text-ink; }
   .btn-quiet:active,
   .btn-quiet.is-active { @apply bg-paper-3; transform: translateY(1px); }
   .btn-quiet:disabled,
-  .btn-quiet[aria-disabled='true'] { @apply cursor-not-allowed border-rule text-muted opacity-60; }
+  .btn-quiet[aria-disabled='true'] { @apply cursor-not-allowed border-transparent text-muted opacity-70; }
 
   /* a bare glyph control: 32px square, 44px hit target */
   .x-btn {
-    @apply relative inline-flex cursor-pointer select-none items-center justify-center border border-transparent
+    @apply relative inline-flex cursor-pointer select-none items-center justify-center rounded-xs border border-transparent
            bg-transparent font-body text-sm text-muted transition-colors duration-micro ease-out;
     width: var(--control-h-sm);
     height: var(--control-h-sm);
   }
-  .x-btn:hover { @apply border-rule bg-paper-2 text-error; }
+  .x-btn:hover { @apply border-error-line bg-error-soft text-error; }
   .x-btn:active { @apply bg-paper-3; }
   .x-btn:disabled,
   .x-btn[aria-disabled='true'] { @apply cursor-not-allowed opacity-60; }
 
   /* ── Module tabs ───────────────────────────────────────────────
-     The accent marks the current selection and nothing else. */
+     Pills, not underlines: the rail reads as a segmented control and
+     the selected module is a soft accent plate. Still one accent. */
 
   .tab {
-    @apply inline-flex cursor-pointer select-none items-center gap-2xs border-b-2 border-transparent
-           font-body text-base text-ink-2 transition-colors duration-micro ease-out;
-    min-height: var(--control-h);
-    padding-inline: var(--space-2xs);
+    @apply inline-flex cursor-pointer select-none items-center gap-xs rounded-xs border border-transparent
+           bg-transparent font-body text-base text-ink-2 transition-colors duration-micro ease-out;
+    min-height: var(--control-h-sm);
+    padding-inline: var(--space-sm);
   }
-  .tab:hover { @apply bg-paper-2 text-ink; }
+  .tab:hover { @apply bg-paper text-ink; }
   .tab:active,
   .tab.is-active { @apply bg-paper-3; }
   .tab[aria-current='page'] {
-    @apply border-accent font-medium text-accent;
+    @apply border-accent-line bg-paper font-medium text-accent;
+    box-shadow: var(--shadow-xs);
   }
   .tab:disabled,
   .tab[aria-disabled='true'] { @apply cursor-not-allowed text-muted opacity-60; }
+  /* 模块图标默认压暗一档，悬停/选中才亮起来 —— 一整排高对比图标会抢标题 */
+  .tab svg { opacity: 0.55; transition: opacity var(--dur-micro) var(--ease-out); }
+  .tab:hover svg,
+  .tab[aria-current='page'] svg { opacity: 1; }
 
   /* ── A selectable row (scene picker, list choices) ──────────────
      The accent marks the current selection and nothing else. */
 
   .select-row {
-    @apply block w-full cursor-pointer select-none border-b border-rule bg-paper text-left
+    @apply block w-full cursor-pointer select-none rounded-xs border border-transparent bg-paper text-left
            font-body transition-colors duration-micro ease-out;
     padding: var(--space-sm) var(--space-xs);
   }
   .select-row:hover { @apply bg-paper-2; }
   .select-row:active,
   .select-row.is-active { @apply bg-paper-3; }
-  .select-row[aria-pressed='true'] { @apply bg-paper-2; }
+  .select-row[aria-pressed='true'] { @apply border-accent-line bg-accent-soft; }
   .select-row:disabled,
   .select-row[aria-disabled='true'] { @apply cursor-not-allowed opacity-60; }
 
   /* ── Fields ─────────────────────────────────────────────────────
-     Constant border width in every state; the focus ring is an
-     outline, never a border (39a). A field edge takes --color-muted. */
+     Constant border width in every state; the focus ring is a soft
+     halo (box-shadow), never a border — a border would shift layout. */
 
   .field {
-    @apply block w-full border border-muted bg-paper font-body text-base text-ink;
+    @apply block w-full rounded-sm border border-rule-strong bg-paper font-body text-base text-ink
+           transition-shadow duration-micro ease-out;
     min-height: var(--control-h);
     padding: var(--space-2xs) var(--space-sm);
   }
   .field::placeholder { @apply text-muted; }
-  .field:hover { @apply border-ink-2; }
+  .field:hover { @apply border-muted; }
+  .field:focus,
   .field:focus-visible {
-    outline: 2px solid var(--color-focus);
-    outline-offset: 2px;
-    @apply border-ink;
+    outline: none;
+    @apply border-accent;
+    box-shadow: 0 0 0 3px rgba(91, 91, 214, 0.16);
   }
   .field:disabled,
   .field[aria-disabled='true'] {
-    @apply cursor-not-allowed border-rule bg-paper-2 text-muted opacity-60;
+    @apply cursor-not-allowed border-rule bg-paper-2 text-muted opacity-70;
   }
   .field[aria-invalid='true'] { @apply border-error; }
+  .field[aria-invalid='true']:focus { box-shadow: 0 0 0 3px rgba(180, 35, 24, 0.14); }
 
   /* the label above a field: the body face, one step down, untracked (67) */
   .field-label {
-    @apply block font-body text-sm text-ink-2;
+    @apply block font-body text-sm font-medium text-ink-2;
     margin-block-end: var(--space-2xs);
   }
 
@@ -185,42 +211,77 @@
 
   /* inline code: a boxed token, the mono face, no colour story */
   .code {
-    @apply font-mono text-sm text-ink;
+    @apply rounded-xs font-mono text-sm text-ink;
     background: var(--color-paper-2);
     border: var(--rule-hair) solid var(--color-rule);
     padding: 0 var(--space-2xs);
     word-break: break-all;
   }
 
-  /* ── Chips and tags ───────────────────────────────────────────── */
+  /* ── Chips and tags ─────────────────────────────────────────────
+     A chip is a **single line**: `nowrap` + a fixed pill height. The
+     task table used to squeeze 「已完成」 onto two lines because the
+     cell was narrower than the word; a chip must never wrap. */
 
   .chip {
-    @apply inline-flex items-center gap-2xs border border-rule bg-paper-2 px-xs font-body text-sm text-ink-2;
-    min-height: var(--control-h-sm);
-    padding-block: var(--space-3xs);
+    @apply inline-flex shrink-0 items-center gap-2xs whitespace-nowrap rounded-pill border border-rule
+           bg-paper-2 px-xs font-body text-sm text-ink-2;
+    height: 24px;
+    padding-block: 0;
+    line-height: 1;
   }
   .chip[data-state='on'] {
     @apply border-accent bg-accent text-accent-ink;
   }
-  .chip[data-tone='accent'] { @apply border-accent text-accent; }
-  .chip[data-tone='error'] { @apply border-error text-error; }
-  .chip[data-tone='success'] { @apply border-success text-success; }
+  .chip[data-tone='accent'] { @apply border-accent-line bg-accent-soft text-accent; }
+  .chip[data-tone='error'] { @apply border-error-line bg-error-soft text-error; }
+  .chip[data-tone='success'] { @apply border-success-line bg-success-soft text-success; }
+  .chip[data-tone='warning'] { @apply border-warning-line bg-warning-soft; color: oklch(var(--color-warning)); }
 
   /* the destructive action kept quiet until it is reached */
   .btn-danger-quiet {
-    @apply border-transparent bg-transparent text-error;
+    @apply control cursor-pointer select-none rounded-sm border border-transparent bg-transparent text-error
+           transition-colors duration-micro ease-out;
+    padding-inline: var(--space-md);
   }
   .btn-danger-quiet:hover,
   .btn-danger-quiet:active { @apply border-error bg-error text-accent-ink; }
-  .btn-danger-quiet:disabled { @apply text-muted opacity-60; }
+  .btn-danger-quiet:disabled { @apply cursor-not-allowed text-muted opacity-60; }
+
+  /* 实心危险按钮：只给「确认删除」这类一步到位的动作。
+     表格行里的删除仍用 soft 的 .btn-danger —— 那里不该抢视觉。 */
+  .btn-danger-solid {
+    @apply control cursor-pointer select-none rounded-sm border border-error bg-error text-accent-ink
+           transition-colors duration-micro ease-out;
+    padding-inline: var(--space-md);
+    box-shadow: var(--shadow-xs);
+  }
+  .btn-danger-solid:hover,
+  .btn-danger-solid:active { @apply border-danger bg-danger; transform: translateY(1px); box-shadow: none; }
+  .btn-danger-solid:disabled { @apply cursor-not-allowed border-rule bg-paper-2 text-muted opacity-70; }
+
+  /* 按钮与胶囊一律不换行：表格操作列一挤，文字会被拆成「导/出」两行。
+     放在所有按钮规则之后，同特异性靠源序覆盖 @apply 出来的声明。 */
+  .btn,
+  .btn-primary,
+  .btn-danger,
+  .btn-danger-solid,
+  .btn-quiet,
+  .btn-danger-quiet,
+  .x-btn,
+  .tab,
+  .chip {
+    white-space: nowrap;
+  }
 
   /* ── The selection toggle on a thumbnail ─────────────────────── */
 
   .select-toggle {
-    @apply absolute flex cursor-pointer select-none items-center justify-center border border-rule
+    @apply absolute flex cursor-pointer select-none items-center justify-center rounded-xs border border-rule-strong
            bg-paper font-body text-sm text-accent-ink transition-colors duration-micro ease-out;
     width: var(--control-h-sm);
     height: var(--control-h-sm);
+    box-shadow: var(--shadow-sm);
     z-index: var(--z-raised);
   }
   .select-toggle::after { content: ""; position: absolute; inset: -4px; }
@@ -229,29 +290,148 @@
   .select-toggle[aria-pressed='true'] { @apply border-accent bg-accent; }
   .select-toggle:disabled { @apply cursor-not-allowed opacity-60; }
 
-  /* ── Tables before cards ────────────────────────────────────────
-     Hairline rules, no zebra, no shadow. Numbers are tabular (F6). */
+  /* ── Surfaces ───────────────────────────────────────────────────
+     Two levels only: `panel` for a region that groups controls,
+     `card` for a discrete object (a thumbnail, a template row).
+     Cards may lift on hover; panels never do. */
+
+  .panel {
+    @apply rounded-md border border-rule bg-paper;
+    box-shadow: var(--shadow-xs);
+  }
+  .card {
+    @apply overflow-hidden rounded-md border border-rule bg-paper;
+    box-shadow: var(--shadow-xs);
+  }
+  .card-hover {
+    transition: box-shadow var(--dur-short) var(--ease-out),
+      transform var(--dur-short) var(--ease-out),
+      border-color var(--dur-short) var(--ease-out);
+  }
+  .card-hover:hover {
+    @apply border-rule-strong;
+    box-shadow: var(--shadow-md);
+    transform: translateY(-2px);
+  }
+
+  /* ── 层级：页面标题 > 区块标题 > 说明文字 ────────────────────
+     三级必须拉开差距，否则整页所有标题一样重，读起来找不到入口。
+     20px(顶栏 h1) / 17px(page-title) / 15px(section-title) / 13px(sub)。 */
+  .page-head {
+    @apply mb-lg flex flex-wrap items-end justify-between gap-md;
+  }
+  .page-title {
+    @apply font-display text-lg font-semibold text-ink;
+    letter-spacing: -0.01em;
+  }
+  .page-sub {
+    @apply mt-2xs font-body text-sm text-muted;
+  }
+
+  .section-title {
+    @apply font-display text-title font-semibold text-ink;
+  }
+  .section-hint {
+    @apply font-body text-sm text-muted;
+  }
+
+  /* ── 数字摘要卡（用量统计顶部）───────────────────────────── */
+  .stat {
+    @apply rounded-md border border-rule bg-paper p-md;
+    box-shadow: var(--shadow-xs);
+  }
+  .stat-label {
+    @apply flex items-center gap-2xs text-xs font-medium text-muted;
+  }
+  .stat-value {
+    @apply mt-xs font-display text-2xl font-semibold text-ink;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+    line-height: 1.1;
+  }
+  .stat-sub { @apply mt-2xs text-xs text-muted; }
+
+  /* ── 空状态 ────────────────────────────────────────────────
+     一个圆底图标 + 主文案 + 一句解释。比一条光秃秃的虚线框更像「设计过的空白」。 */
+  .empty {
+    @apply flex flex-col items-center justify-center gap-xs rounded-md border border-rule bg-paper px-lg py-2xl text-center;
+    box-shadow: var(--shadow-xs);
+  }
+  .empty-icon {
+    @apply mb-2xs grid h-11 w-11 place-items-center rounded-pill bg-paper-2 text-muted;
+  }
+  .empty-title {
+    @apply max-w-[42ch] font-display text-title font-semibold text-ink;
+  }
+  .empty-hint { @apply max-w-[38ch] text-sm text-muted; }
+  /* 已经待在卡片/弹窗里时用这个 —— 免得双层边框套娃 */
+  .empty-plain {
+    @apply border-0 bg-transparent px-lg py-xl;
+    box-shadow: none;
+  }
+
+  /* ── 批量选择条 ────────────────────────────────────────────────
+     选中后才出现，独立成条而不是挤进筛选行：否则每勾一个素材，
+     整行控件都会重排，点第二个框就点偏了。 */
+  .bulk-bar {
+    @apply mb-md flex flex-wrap items-center gap-sm rounded-md border border-accent-line bg-accent-soft px-md py-xs;
+  }
+  .bulk-bar-count {
+    @apply font-display text-sm font-semibold text-accent;
+  }
+
+  /* 细滚动条：只在内容区内部滚动时用（场景列表），别套在整页上 */
+  .scroll-thin {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-rule-strong) transparent;
+  }
+  .scroll-thin::-webkit-scrollbar { width: 8px; }
+  .scroll-thin::-webkit-scrollbar-thumb {
+    background: var(--color-rule-strong);
+    border-radius: var(--radius-pill);
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  .scroll-thin::-webkit-scrollbar-track { background: transparent; }
+
+  /* ── Tables ─────────────────────────────────────────────────────
+     Header sits on a sunk plate with a rounded cap; rows are separated
+     by hairlines, no zebra. Numbers are tabular (F6). */
 
   .table {
-    @apply w-full border-collapse font-body text-base;
+    @apply w-full font-body text-base;
+    border-collapse: separate;
+    border-spacing: 0;
   }
   .table th {
-    @apply border-b border-ink py-xs text-left font-body text-sm font-medium text-ink-2;
+    @apply border-b border-rule bg-paper-2 py-xs text-left font-body text-sm font-medium text-muted;
     padding-inline: var(--space-sm);
     white-space: nowrap;
   }
+  .table th:first-child { border-top-left-radius: var(--radius-sm); }
+  .table th:last-child { border-top-right-radius: var(--radius-sm); }
   .table td {
-    @apply border-b border-rule py-xs align-middle;
+    @apply border-b border-rule align-middle;
+    padding-block: var(--space-xs);
     padding-inline: var(--space-sm);
   }
+  .table tbody tr { transition: background-color var(--dur-micro) var(--ease-out); }
   .table tbody tr:hover { @apply bg-paper-2; }
+  .table tbody tr:last-child td { border-bottom: 0; }
   .table td.num,
   .table th.num { @apply text-right; font-variant-numeric: tabular-nums; }
+  /* 表格里的复选框收成 16px：30px 的方块会把行高顶起来，一屏少看三条 */
+  .table .check-row { min-height: 0; padding-block: 0; }
+  .table .check-row input[type='checkbox'] { width: 16px; height: 16px; }
+  /* 行内操作按钮收紧内边距：一行放得下「导出 / 编辑 / 停用 / 删除」四个 */
+  .table .btn,
+  .table .btn-quiet,
+  .table .btn-danger-quiet { padding-inline: var(--space-xs); }
 
   /* ── The four states a data region owes ───────────────────────── */
 
   .skeleton {
-    @apply bg-paper-2;
+    @apply rounded-sm bg-paper-2;
     background-image: linear-gradient(90deg, var(--color-paper-2), var(--color-paper-3), var(--color-paper-2));
     background-size: 200% 100%;
     animation: hallmark-shimmer 1.2s linear infinite;

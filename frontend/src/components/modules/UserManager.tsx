@@ -105,16 +105,14 @@ export default function UserManager({ user }: ModuleProps) {
 
   return (
     <div>
-      <div className="flex flex-wrap items-baseline justify-between gap-sm">
+      <div className="page-head">
         <div>
-          <h2 className="font-display text-section">用户管理</h2>
-          <p className="text-sm text-muted">
-            建号、调整账号角色与启用状态、为忘记密码的成员重置密码。
-          </p>
+          <h2 className="page-title">用户管理</h2>
+          <p className="page-sub">建号、调整账号角色与启用状态、为忘记密码的成员重置密码。</p>
         </div>
-        <div className="flex gap-sm">
+        <div className="flex gap-xs">
           <button
-            className={showCreate ? 'btn btn-quiet' : 'btn btn-primary'}
+            className={showCreate ? 'btn' : 'btn-primary'}
             onClick={() => {
               setShowCreate(!showCreate)
               setError('')
@@ -122,7 +120,7 @@ export default function UserManager({ user }: ModuleProps) {
           >
             {showCreate ? '收起' : '新建用户'}
           </button>
-          <button className="btn-quiet" onClick={reload} disabled={loading}>
+          <button className="btn" onClick={reload} disabled={loading}>
             刷新
           </button>
         </div>
@@ -132,7 +130,7 @@ export default function UserManager({ user }: ModuleProps) {
       {showCreate && (
         <form
           onSubmit={handleCreate}
-          className="mt-md flex flex-wrap items-end gap-sm border border-rule bg-paper-2 p-md"
+          className="mb-md flex flex-wrap items-end gap-sm rounded-md border border-rule bg-paper p-md shadow-xs"
         >
           <div>
             <label className="field-label" htmlFor="new-username">
@@ -184,7 +182,7 @@ export default function UserManager({ user }: ModuleProps) {
               <option value="admin">管理员</option>
             </select>
           </div>
-          <button type="submit" className="btn btn-primary" disabled={busyId !== ''}>
+          <button type="submit" className="btn-primary" disabled={busyId !== ''}>
             创建
           </button>
         </form>
@@ -192,35 +190,55 @@ export default function UserManager({ user }: ModuleProps) {
 
       {/* 后端规则拒绝 / 操作成功 —— 都在表格上方给一句明确反馈 */}
       {error && (
-        <p className="mt-md border border-rule bg-paper-2 p-sm text-sm text-error" role="alert">
+        <p
+          className="mb-md rounded-sm border border-error-line bg-error-soft px-sm py-xs text-sm text-error"
+          role="alert"
+        >
           {error}
         </p>
       )}
       {notice && (
-        <p className="mt-md border border-rule bg-paper-2 p-sm text-sm text-ink" role="status">
+        <p
+          className="mb-md rounded-sm border border-success-line bg-success-soft px-sm py-xs text-sm text-success"
+          role="status"
+        >
           {notice}
         </p>
       )}
 
-      <div className="mt-md overflow-x-auto">
+      <div className="overflow-hidden rounded-md border border-rule bg-paper shadow-xs">
         {loading ? (
-          <div className="space-y-sm" aria-hidden="true">
+          <div className="space-y-sm p-md" aria-hidden="true">
             {Array.from({ length: 4 }).map((_, i) => (
               <div key={i} className="skeleton h-md" />
             ))}
           </div>
         ) : users.length === 0 ? (
-          <p className="py-lg text-center text-muted">还没有用户</p>
+          <div className="empty empty-plain">
+            <span className="empty-icon" aria-hidden="true">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+                <path
+                  d="M16 19v-1.5A3.5 3.5 0 0 0 12.5 14h-5A3.5 3.5 0 0 0 4 17.5V19M10 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7M20 19v-1.5a3.5 3.5 0 0 0-2.6-3.38M15.5 4.13a3.5 3.5 0 0 1 0 6.74"
+                  stroke="currentColor"
+                  strokeWidth="1.7"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </span>
+            <p className="empty-title">还没有用户</p>
+            <p className="empty-hint">点上方「新建用户」添加账号</p>
+          </div>
         ) : (
           <table className="table">
             <caption className="visually-hidden">系统用户</caption>
             <thead>
               <tr>
-                <th scope="col">用户名</th>
+                <th scope="col" className="w-[10rem]">用户名</th>
                 <th scope="col">显示名</th>
-                <th scope="col">角色</th>
-                <th scope="col">状态</th>
-                <th scope="col">创建时间</th>
+                <th scope="col" className="w-[7.5rem]">角色</th>
+                <th scope="col" className="w-[5.5rem]">状态</th>
+                <th scope="col" className="w-[7rem]">创建时间</th>
                 <th scope="col">操作</th>
               </tr>
             </thead>
@@ -238,7 +256,7 @@ export default function UserManager({ user }: ModuleProps) {
                     <td>
                       {/* 只有 admin 和 member 两种；对自己降级会被后端拒，索性置灰 */}
                       <select
-                        className="field"
+                        className="field w-[7rem]"
                         value={u.role}
                         disabled={busy || isSelf}
                         title={isSelf ? '不能取消自己的管理员身份' : undefined}

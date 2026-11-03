@@ -29,18 +29,32 @@ export default function Login({ onLogin }: Props) {
   }
 
   return (
-    <div className="flex min-h-screen flex-col bg-paper text-ink">
-      <header className="rule-b">
-        <div className="container py-sm">
-          <h1 className="font-display text-display">ComfyUI 工作台</h1>
-        </div>
-      </header>
-
-      <main className="container flex flex-1 items-start py-3xl">
+    <div className="flex min-h-screen flex-col text-ink">
+      <main className="flex flex-1 items-center justify-center px-md py-2xl">
         <div className="w-full max-w-form">
-          <p className="text-lead text-ink-2">登录以继续使用</p>
+          <div className="mb-lg flex flex-col items-center text-center">
+            <span
+              aria-hidden="true"
+              className="mb-md grid h-12 w-12 place-items-center rounded-lg bg-[linear-gradient(135deg,#6d6df0_0%,#5b5bd6_52%,#4646b8_100%)] text-accent-ink shadow-md"
+            >
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path
+                  d="M12 3.5 20 8v8l-8 4.5L4 16V8l8-4.5Z"
+                  stroke="currentColor"
+                  strokeWidth="1.6"
+                  strokeLinejoin="round"
+                />
+                <circle cx="12" cy="12" r="2.6" fill="currentColor" />
+              </svg>
+            </span>
+            <h1 className="font-display text-xl font-semibold">ComfyUI 工作台</h1>
+            <p className="mt-2xs text-sm text-muted">登录以继续使用</p>
+          </div>
 
-          <form onSubmit={handleSubmit} className="mt-lg border border-rule bg-paper-2 p-lg">
+          <form
+            onSubmit={handleSubmit}
+            className="rounded-lg border border-rule bg-paper p-lg shadow-md"
+          >
             <div>
               <label className="field-label" htmlFor="username">
                 用户名
@@ -75,7 +89,10 @@ export default function Login({ onLogin }: Props) {
             </div>
 
             {error && (
-              <div role="alert" className="mt-md border border-error bg-paper px-sm py-xs text-sm text-error">
+              <div
+                role="alert"
+                className="mt-md rounded-sm border border-error-line bg-error-soft px-sm py-xs text-sm text-error"
+              >
                 {error}
               </div>
             )}
@@ -83,7 +100,7 @@ export default function Login({ onLogin }: Props) {
             <button
               type="submit"
               disabled={loading}
-              className="btn btn-primary mt-lg w-full justify-center"
+              className="btn-primary mt-lg w-full justify-center"
             >
               {loading ? '登录中…' : '登 录'}
             </button>

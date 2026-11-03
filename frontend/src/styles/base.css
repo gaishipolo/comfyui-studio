@@ -3,8 +3,8 @@
  * axes: light/grotesk-sans/cool · posture: full-palette · contrast: pass · v2.0.0 */
 *, *::before, *::after { box-sizing: border-box; }
 html, body { overflow-x: clip; }
-html { scrollbar-color: var(--color-muted) var(--color-paper); scroll-padding-top: var(--space-3xl); }
-body { margin: 0; background: var(--color-paper); color: var(--color-ink); font-family: var(--font-body); font-size: var(--text-md); line-height: 1.55; -webkit-font-smoothing: antialiased; caret-color: var(--color-accent); }
+html { scrollbar-color: var(--color-rule-strong) transparent; scroll-padding-top: 96px; }
+body { margin: 0; background: var(--gradient-canvas); background-attachment: fixed; color: var(--color-ink); font-family: var(--font-body); font-size: var(--text-md); line-height: 1.55; -webkit-font-smoothing: antialiased; caret-color: var(--color-accent); }
 ::selection { background: var(--color-mark); color: var(--color-mark-ink); }
 :focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 a { color: inherit; text-decoration-thickness: 1px; text-underline-offset: 0.16em; }

@@ -6,6 +6,8 @@ export default {
   theme: {
     extend: {
       colors: {
+        // 页面底与表面分离：canvas 是底，paper 是卡片/控件/弹窗
+        canvas: 'var(--color-canvas)',
         paper: 'var(--color-paper)',
         'paper-2': 'var(--color-paper-2)',
         'paper-3': 'var(--color-paper-3)',
@@ -13,15 +15,25 @@ export default {
         'ink-2': 'var(--color-ink-2)',
         muted: 'var(--color-muted)',
         rule: 'var(--color-rule)',
+        'rule-strong': 'var(--color-rule-strong)',
         accent: 'var(--color-accent)',
+        'accent-hover': 'var(--color-accent-hover)',
         'accent-ink': 'var(--color-accent-ink)',
+        'accent-soft': 'var(--color-accent-soft)',
+        'accent-line': 'var(--color-accent-line)',
         focus: 'var(--color-focus)',
         field: 'var(--color-field)',
         'field-ink': 'var(--color-field-ink)',
         mark: 'var(--color-mark)',
         'mark-ink': 'var(--color-mark-ink)',
         error: 'var(--color-error)',
+        'error-soft': 'var(--color-error-soft)',
+        'error-line': 'var(--color-error-line)',
         success: 'var(--color-success)',
+        'success-soft': 'var(--color-success-soft)',
+        'success-line': 'var(--color-success-line)',
+        'warning-soft': 'var(--color-warning-soft)',
+        'warning-line': 'var(--color-warning-line)',
         scrim: 'var(--color-scrim)',
         // admin 页（PluginManager / TemplateManager 警示横幅）用到的语义色。
         // danger 与 error 同色：语义别名，别再有未注册 token 导致样式静默失效。
@@ -69,8 +81,20 @@ export default {
         row: 'var(--row-h)',
       },
       borderRadius: {
+        // 覆盖默认刻度：xs=6 / sm=8 / md=12 / lg=16，与 tokens.css 对齐
+        xs: 'var(--radius-xs)',
+        sm: 'var(--radius-sm)',
+        md: 'var(--radius-md)',
+        lg: 'var(--radius-lg)',
         card: 'var(--radius-card)',
         pill: 'var(--radius-pill)',
+      },
+      boxShadow: {
+        xs: 'var(--shadow-xs)',
+        sm: 'var(--shadow-sm)',
+        md: 'var(--shadow-md)',
+        lg: 'var(--shadow-lg)',
+        card: 'var(--shadow-card)',
       },
       maxWidth: {
         container: 'var(--container)',

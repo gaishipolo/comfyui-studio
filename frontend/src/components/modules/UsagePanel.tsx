@@ -62,8 +62,11 @@ export default function UsagePanel({ user }: ModuleProps) {
 
   return (
     <section>
-      <div className="flex flex-wrap items-center justify-between gap-md">
-        <h2 className="font-display text-section">用量统计</h2>
+      <div className="page-head">
+        <div>
+          <h2 className="page-title">用量统计</h2>
+          <p className="page-sub">按用户汇总任务、素材与存储占用</p>
+        </div>
         <div className="flex flex-wrap items-center gap-xs">
           <input
             type="date"
@@ -83,7 +86,7 @@ export default function UsagePanel({ user }: ModuleProps) {
             onChange={(e) => setDateTo(e.target.value)}
           />
           <button
-            className="btn-quiet"
+            className="btn"
             onClick={() => {
               setDateFrom(localMonthStart(0))
               setDateTo('')
@@ -92,7 +95,7 @@ export default function UsagePanel({ user }: ModuleProps) {
             本月
           </button>
           <button
-            className="btn-quiet"
+            className="btn"
             onClick={() => {
               setDateFrom(localMonthStart(-1))
               setDateTo(localMonthStart(0))
@@ -101,7 +104,7 @@ export default function UsagePanel({ user }: ModuleProps) {
             上月
           </button>
           <button
-            className="btn-quiet"
+            className="btn"
             onClick={() => {
               setDateFrom('')
               setDateTo('')
@@ -113,13 +116,19 @@ export default function UsagePanel({ user }: ModuleProps) {
       </div>
 
       {error && (
-        <p className="mt-md border border-error bg-paper px-sm py-xs text-sm text-error">
+        <p className="mb-md rounded-sm border border-error-line bg-error-soft px-sm py-xs text-sm text-error">
           加载失败：{error}
         </p>
       )}
 
       {loading && !data ? (
-        <p className="mt-md py-xl text-center text-base text-muted">加载中…</p>
+        <div className="rounded-md border border-rule bg-paper p-md shadow-xs" aria-hidden="true">
+          <div className="space-y-sm">
+            {Array.from({ length: 5 }).map((_, i) => (
+              <div key={i} className="skeleton h-md" />
+            ))}
+          </div>
+        </div>
       ) : data ? (
         <>
           {/* 当前区间提示 —— 「全部」时不显示（默认就是不限） */}
@@ -130,75 +139,112 @@ export default function UsagePanel({ user }: ModuleProps) {
           )}
 
           {data.by_user.length === 0 ? (
-            <p className="mt-md border-t border-rule py-xl text-base text-muted">
-              该时间段内没有任务记录
-            </p>
-          ) : (
-            <div className="mt-md overflow-x-auto">
-              <table className="table">
-                <caption className="visually-hidden">用户用量统计</caption>
-                <thead>
-                  <tr>
-                    <th scope="col">用户</th>
-                    <th scope="col" className="num">任务数</th>
-                    <th scope="col" className="num">成功</th>
-                    <th scope="col" className="num">失败</th>
-                    <th scope="col" className="num">取消</th>
-                    <th scope="col" className="num">素材数</th>
-                    <th scope="col" className="num">存储占用</th>
-                    <th scope="col" className="num">平均耗时</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.by_user.map((u) => (
-                    <tr key={u.user_id || '__none__'}>
-                      <td>
-                        {u.display_name || u.username}
-                        {u.role === 'admin' && (
-                          <span className="ml-2xs border border-rule bg-paper-2 px-2xs text-xs text-ink-2">
-                            管理员
-                          </span>
-                        )}
-                      </td>
-                      <td className="num">{u.task_total}</td>
-                      <td className="num">{u.task_done}</td>
-                      <td className="num">{u.task_error}</td>
-                      <td className="num">{u.task_cancelled}</td>
-                      <td className="num">{u.asset_count}</td>
-                      <td className="num">{formatSize(u.storage_bytes)}</td>
-                      <td className="num">{formatDuration(u.avg_duration_seconds)}</td>
-                    </tr>
-                  ))}
-                  {/* 合计行：直接展示后端算好的总数，不做前端二次相加 */}
-                  <tr>
-                    <td>
-                      <strong>{data.totals.username}</strong>
-                    </td>
-                    <td className="num">
-                      <strong>{data.totals.task_total}</strong>
-                    </td>
-                    <td className="num">
-                      <strong>{data.totals.task_done}</strong>
-                    </td>
-                    <td className="num">
-                      <strong>{data.totals.task_error}</strong>
-                    </td>
-                    <td className="num">
-                      <strong>{data.totals.task_cancelled}</strong>
-                    </td>
-                    <td className="num">
-                      <strong>{data.totals.asset_count}</strong>
-                    </td>
-                    <td className="num">
-                      <strong>{formatSize(data.totals.storage_bytes)}</strong>
-                    </td>
-                    <td className="num">
-                      <strong>{formatDuration(data.totals.avg_duration_seconds)}</strong>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
+            <div className="empty">
+              <span className="empty-icon" aria-hidden="true">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+                  <path
+                    d="M4 19V9M10 19V5M16 19v-6M22 19H2"
+                    stroke="currentColor"
+                    strokeWidth="1.7"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </span>
+              <p className="empty-title">该时间段内没有任务记录</p>
+              <p className="empty-hint">换个时间区间再看看，或点「全部」查看历史累计</p>
             </div>
+          ) : (
+            <>
+              {/* 摘要卡：先给结论，再给明细表。数字一眼能读，明细留给需要核对的人 */}
+              <div className="mb-md grid gap-sm sm:grid-cols-2 xl:grid-cols-4">
+                <div className="stat">
+                  <p className="stat-label">任务总数</p>
+                  <p className="stat-value">{data.totals.task_total}</p>
+                  <p className="stat-sub">
+                    成功 {data.totals.task_done} · 失败 {data.totals.task_error} · 取消{' '}
+                    {data.totals.task_cancelled}
+                  </p>
+                </div>
+                <div className="stat">
+                  <p className="stat-label">参与用户</p>
+                  <p className="stat-value">{data.by_user.length}</p>
+                  <p className="stat-sub">该区间内提交过任务的账号</p>
+                </div>
+                <div className="stat">
+                  <p className="stat-label">素材与存储</p>
+                  <p className="stat-value">{data.totals.asset_count}</p>
+                  <p className="stat-sub">共占用 {formatSize(data.totals.storage_bytes)}</p>
+                </div>
+                <div className="stat">
+                  <p className="stat-label">平均耗时</p>
+                  <p className="stat-value">{formatDuration(data.totals.avg_duration_seconds)}</p>
+                  <p className="stat-sub">仅统计已完成的任务</p>
+                </div>
+              </div>
+
+              <div className="overflow-hidden rounded-md border border-rule bg-paper shadow-xs">
+                <table className="table">
+                  <caption className="visually-hidden">用户用量统计</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col" className="w-[13rem]">用户</th>
+                      <th scope="col" className="num">任务数</th>
+                      <th scope="col" className="num">成功</th>
+                      <th scope="col" className="num">失败</th>
+                      <th scope="col" className="num">取消</th>
+                      <th scope="col" className="num">素材数</th>
+                      <th scope="col" className="num">存储占用</th>
+                      <th scope="col" className="num">平均耗时</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.by_user.map((u) => (
+                      <tr key={u.user_id || '__none__'}>
+                        <td>
+                          {u.display_name || u.username}
+                          {u.role === 'admin' && <span className="ml-2xs chip">管理员</span>}
+                        </td>
+                        <td className="num">{u.task_total}</td>
+                        <td className="num">{u.task_done}</td>
+                        <td className="num">{u.task_error}</td>
+                        <td className="num">{u.task_cancelled}</td>
+                        <td className="num">{u.asset_count}</td>
+                        <td className="num">{formatSize(u.storage_bytes)}</td>
+                        <td className="num">{formatDuration(u.avg_duration_seconds)}</td>
+                      </tr>
+                    ))}
+                    {/* 合计行：直接展示后端算好的总数，不做前端二次相加 */}
+                    <tr className="bg-paper-2 hover:bg-paper-2">
+                      <td>
+                        <strong>{data.totals.username}</strong>
+                      </td>
+                      <td className="num">
+                        <strong>{data.totals.task_total}</strong>
+                      </td>
+                      <td className="num">
+                        <strong>{data.totals.task_done}</strong>
+                      </td>
+                      <td className="num">
+                        <strong>{data.totals.task_error}</strong>
+                      </td>
+                      <td className="num">
+                        <strong>{data.totals.task_cancelled}</strong>
+                      </td>
+                      <td className="num">
+                        <strong>{data.totals.asset_count}</strong>
+                      </td>
+                      <td className="num">
+                        <strong>{formatSize(data.totals.storage_bytes)}</strong>
+                      </td>
+                      <td className="num">
+                        <strong>{formatDuration(data.totals.avg_duration_seconds)}</strong>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </>
           )}
         </>
       ) : null}

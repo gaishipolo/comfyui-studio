@@ -71,7 +71,8 @@ export interface Task {
 
 export interface Asset {
   id: string
-  task_id: string
+  /** 来源任务：生成素材指向产出它的任务，用户上传的素材为 null */
+  task_id: string | null
   /** FileStore 相对键（不是服务器绝对磁盘路径）；保留给诊断/验证。 */
   file_path: string
   file_name: string
@@ -80,7 +81,7 @@ export interface Asset {
   tags: string[]
   meta: Record<string, unknown>
   is_shared?: boolean  // 已共享给团队（共享≠共同所有：别人只能看/下载）
-  created_by?: string  // 归属人 id（走 task.created_by）
+  created_by?: string  // 归属人 id（assets.owner_id）
   creator_name?: string  // 归属人显示名（展示「来自谁」）
   created_at: string
 }

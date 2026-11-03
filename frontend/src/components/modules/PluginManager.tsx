@@ -11,6 +11,7 @@ import {
   listPlugins, uploadPlugin, savePluginConfig, setPluginEnabled, deletePlugin, testPlugin,
 } from '../../api/client'
 import type { ModuleProps } from '../../modules/registry'
+import { confirmDialog } from '../dialog'
 
 /** 配置项名含 key/secret/token 的用密码框，别明文晃 */
 const isSecretField = (name: string) => /key|secret|token|password/i.test(name)
@@ -118,7 +119,13 @@ export default function PluginManager({ user }: ModuleProps) {
   }
 
   const handleDelete = async (p: EnginePluginInfo) => {
-    if (!window.confirm(`删除引擎「${p.label}」？代码文件会被删除，引用它的模板将无法提交。`)) return
+    const ok = await confirmDialog({
+      title: `删除引擎「${p.label}」？`,
+      message: '代码文件会被删除，引用它的模板将无法提交。',
+      tone: 'danger',
+      confirmText: '删除',
+    })
+    if (!ok) return
     setError('')
     try {
       await deletePlugin(p.name)
@@ -130,12 +137,12 @@ export default function PluginManager({ user }: ModuleProps) {
 
   return (
     <section>
-      <div className="flex flex-wrap items-center justify-between gap-md">
+      <div className="page-head">
         <div>
-          <h2 className="font-display text-section">引擎插件</h2>
-          <p className="text-sm text-muted">
-            上传 Provider 代码接入新供应商。开发规范见 <code>docs/provider-dev-guide.md</code>，
-            示例见 <code>backend/examples/provider_template.py</code>
+          <h2 className="page-title">引擎插件</h2>
+          <p className="page-sub">
+            上传 Provider 代码接入新供应商。开发规范见 <code className="code">docs/provider-dev-guide.md</code>，
+            示例见 <code className="code">backend/examples/provider_template.py</code>
           </p>
         </div>
         <div className="flex items-center gap-xs">
@@ -149,13 +156,13 @@ export default function PluginManager({ user }: ModuleProps) {
               if (f) handleUpload(f)
             }}
           />
-          <button className="btn btn-primary" disabled={uploading} onClick={() => fileInputRef.current?.click()}>
+          <button className="btn-primary" disabled={uploading} onClick={() => fileInputRef.current?.click()}>
             {uploading ? '上传中…' : '上传插件 (.py)'}
           </button>
         </div>
       </div>
 
-      <p className="mt-sm rounded-md bg-warning/10 px-md py-sm text-sm text-warning">
+      <p className="mt-sm rounded-md border border-warning-line bg-warning-soft px-md py-sm text-sm text-warning">
         上传的代码会在服务端执行，拥有系统全部权限 —— 仅限可信的管理员上传。密钥请填在「配置」里，不要写进代码。
       </p>
 
@@ -165,7 +172,22 @@ export default function PluginManager({ user }: ModuleProps) {
       <div className="mt-lg flex flex-col gap-md">
         {loading && <p className="text-sm text-muted">加载中…</p>}
         {!loading && plugins.length === 0 && (
-          <p className="py-xl text-center text-base text-muted">还没有引擎</p>
+          <div className="empty">
+            <span className="empty-icon" aria-hidden="true">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+                <path
+                  d="M12 3v4M12 17v4M3 12h4M17 12h4M6.3 6.3l2.8 2.8M14.9 14.9l2.8 2.8M17.7 6.3l-2.8 2.8M9.1 14.9l-2.8 2.8"
+                  stroke="currentColor"
+                  strokeWidth="1.7"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+                <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.7" />
+              </svg>
+            </span>
+            <p className="empty-title">还没有引擎</p>
+            <p className="empty-hint">上传引擎插件包后，这里会列出可用的生成引擎</p>
+          </div>
         )}
         {plugins.map((p) => (
           <article key={p.name} className="rounded-lg border border-tertiary p-md">

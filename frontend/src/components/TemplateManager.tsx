@@ -10,6 +10,8 @@ import {
   exportTemplate, importTemplate,
 } from '../api/client'
 import { applyTemplateEngine, normalizeTemplateEngineFields } from './templateFormState'
+import { alertDialog, confirmDialog } from './dialog'
+import { notify, reportError } from '../notify'
 
 interface Props {
   onTemplatesChange: () => void
@@ -79,7 +81,7 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
     try {
       await exportTemplate(template.id, template.name)
     } catch (err) {
-      alert(`导出失败: ${err instanceof Error ? err.message : err}`)
+      reportError('导出失败', err)
     }
   }
 
@@ -89,34 +91,42 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
     try {
       payload = JSON.parse(await file.text())
     } catch {
-      alert('这个文件不是合法的 JSON')
+      notify('这个文件不是合法的 JSON', 'error')
       return
     }
     // 先看格式，别把 zip、别家的 JSON 送上去再被拒（错误提示也没这里具体）
     const fmt = (payload as { format?: string })?.format
     if (fmt !== 'comfyui-workbench/template') {
-      alert(`不是本系统导出的模板文件${fmt ? `（format=${fmt}）` : ''}`)
+      notify(`不是本系统导出的模板文件${fmt ? `（format=${fmt}）` : ''}`, 'error')
       return
     }
     const name =
       (payload as { template?: { name?: string } })?.template?.name || file.name.replace(/\.json$/i, '')
     const exists = templates.some((t) => t.name === name)
-    const overwrite = exists
-      ? confirm(
-          `已存在同名模板「${name}」。\n\n` +
-            '点「确定」= 覆盖它（保留原 id，历史任务不受影响）\n' +
-            `点「取消」= 另存为「${name} (导入)」`,
-        )
-      : false
+    let overwrite = false
+    if (exists) {
+      overwrite = await confirmDialog({
+        title: `已存在同名模板「${name}」`,
+        message: '覆盖会保留原 id，历史任务不受影响；另存为会存成「' + name + ' (导入)」。',
+        confirmText: '覆盖',
+        cancelText: '另存为',
+      })
+    }
     try {
       const res = await importTemplate(payload, overwrite)
       await fetchTemplates()
       onTemplatesChange()
-      const lines = [`已导入「${res.template.name}」`]
-      if (res.warnings.length) lines.push('', ...res.warnings.map((w) => `· ${w}`))
-      alert(lines.join('\n'))
+      if (res.warnings.length) {
+        await alertDialog({
+          title: `已导入「${res.template.name}」`,
+          message: res.warnings.map((w) => `· ${w}`).join('\n'),
+          tone: 'warning',
+        })
+      } else {
+        notify(`已导入「${res.template.name}」`, 'success')
+      }
     } catch (err) {
-      alert(`导入失败: ${err instanceof Error ? err.message : err}`)
+      reportError('导入失败', err)
     }
   }
 
@@ -202,10 +212,14 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
   const handleSave = async () => {
     if (!editing) return
     const payload = normalizeTemplateEngineFields(editing)
-    if (!payload.name.trim()) return alert('请填写模板名称')
+    if (!payload.name.trim()) {
+      notify('请填写模板名称', 'warning')
+      return
+    }
     // 配了工作流就必须显式勾选出图节点 —— 后端会再校验一遍，这里先给即时反馈
     if (payload.workflow_file && (payload.output_config.nodes ?? []).length === 0) {
-      return alert('请至少勾选一个出图节点（决定任务保存哪些节点的结果）')
+      notify('请至少勾选一个出图节点（决定任务保存哪些节点的结果）', 'warning')
+      return
     }
     setSaving(true)
     try {
@@ -220,7 +234,7 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
       fetchTemplates()
       onTemplatesChange()
     } catch (err) {
-      alert(`保存失败: ${err instanceof Error ? err.message : '未知错误'}`)
+      reportError('保存失败', err)
     } finally {
       setSaving(false)
     }
@@ -234,18 +248,24 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
       fetchTemplates()
       onTemplatesChange()
     } catch (err) {
-      alert(`操作失败: ${err instanceof Error ? err.message : '未知错误'}`)
+      reportError('操作失败', err)
     }
   }
 
   const handleDelete = async (template: Template) => {
-    if (!confirm(`确定删除模板「${template.name}」？`)) return
+    const ok = await confirmDialog({
+      title: `删除模板「${template.name}」？`,
+      message: '模板本身会被移除，已经用它提交过的历史任务不受影响。',
+      tone: 'danger',
+      confirmText: '删除',
+    })
+    if (!ok) return
     try {
       await deleteTemplate(template.id)
       fetchTemplates()
       onTemplatesChange()
     } catch (err) {
-      alert(`删除失败: ${err instanceof Error ? err.message : '未知错误'}`)
+      reportError('删除失败', err)
     }
   }
 
@@ -313,13 +333,19 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
     })
 
   // 从当前选中的能力带入字段（替换现有字段，先确认防误点）
-  const importCapabilityFields = () => {
+  const importCapabilityFields = async () => {
     if (!editing) return
     const caps = plugins.find((p) => p.name === editing.engine)?.capabilities || {}
     const spec = caps[editing.capability]
     if (!spec) return
-    if (editing.input_schema.fields.length > 0 &&
-        !confirm('带入能力字段会替换当前已配置的字段，继续？')) return
+    if (editing.input_schema.fields.length > 0) {
+      const ok = await confirmDialog({
+        title: '带入能力字段？',
+        message: '当前已配置的字段会被替换掉。',
+        confirmText: '带入',
+      })
+      if (!ok) return
+    }
     setEditing({ ...editing, input_schema: { fields: capabilitiesToFields(spec.fields) } })
   }
 
@@ -432,8 +458,11 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
 
   return (
     <div>
-      <div className="rule-b flex items-center justify-between gap-md pb-sm">
-        <h2 className="font-display text-section">模板管理</h2>
+      <div className="page-head">
+        <div>
+          <h2 className="page-title">模板管理</h2>
+          <p className="page-sub">配置生成场景：工作流、参数映射、出图节点</p>
+        </div>
         <div className="flex items-center gap-xs">
           <label className="btn-quiet cursor-pointer">
             导入模板
@@ -469,8 +498,8 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
 
       {/* 编辑表单 */}
       {editing && (
-        <section className="mt-lg border border-rule bg-paper-2 p-lg">
-          <h3 className="font-display text-title">
+        <section className="panel mt-lg p-lg">
+          <h3 className="section-title">
             {editId ? '编辑模板' : '新建模板'}
           </h3>
 
@@ -509,14 +538,14 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
               >
                 {(plugins.length > 0
                   ? plugins.map((p) => p.name)
-                  : ['comfyui', 'generic_api']
+                  : ['comfyui']
                 ).map((name) => (
                   <option key={name} value={name}>
                     {plugins.find((p) => p.name === name)?.label || name}（{name}）
                   </option>
                 ))}
                 {!plugins.some((p) => p.name === editing.engine) &&
-                  !['comfyui', 'generic_api'].includes(editing.engine) && (
+                  editing.engine !== 'comfyui' && (
                     <option value={editing.engine}>{editing.engine}</option>
                   )}
               </select>
@@ -891,7 +920,7 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
 
       {/* 模板列表 */}
       <section className="mt-xl">
-        <h3 className="font-display text-section">已配置的模板</h3>
+        <h3 className="section-title">已配置的模板</h3>
 
         {loading ? (
           <div className="mt-md space-y-xs" aria-hidden="true">
@@ -904,24 +933,37 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
             ))}
           </div>
         ) : loadError ? (
-          <div className="mt-md border border-error px-md py-lg">
-            <p className="text-base text-error">模板列表加载失败</p>
+          <div className="mt-md rounded-md border border-error-line bg-error-soft px-md py-lg">
+            <p className="text-base font-medium text-error">模板列表加载失败</p>
             <p className="mt-2xs text-sm text-ink-2">{loadError}</p>
             <button onClick={fetchTemplates} className="btn mt-sm">重新加载</button>
           </div>
         ) : templates.length === 0 ? (
-          <p className="mt-md border border-dashed border-rule px-md py-xl text-center text-base text-muted">
-            还没有模板，点右上角「新建模板」创建第一个
-          </p>
+          <div className="empty mt-md">
+            <span className="empty-icon" aria-hidden="true">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+                <path
+                  d="M4 6h7v7H4zM13 6h7v4h-7zM13 13h7v5h-7zM4 16h7v2H4z"
+                  stroke="currentColor"
+                  strokeWidth="1.7"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </span>
+            <p className="empty-title">还没有模板</p>
+            <p className="empty-hint">点右上角「新建模板」创建第一个</p>
+          </div>
         ) : (
-          <table className="table mt-md">
+          <div className="mt-md overflow-x-auto rounded-md border border-rule bg-paper shadow-xs">
+          <table className="table">
             <caption className="visually-hidden">模板列表</caption>
             <thead>
               <tr>
                 <th scope="col">模板</th>
-                <th scope="col">工作流</th>
-                <th scope="col" className="num">参数映射</th>
-                <th scope="col">操作</th>
+                <th scope="col" className="w-[16rem]">工作流</th>
+                <th scope="col" className="num w-[6rem]">参数映射</th>
+                <th scope="col" className="w-[10rem]">操作</th>
               </tr>
             </thead>
             <tbody>
@@ -943,16 +985,20 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
                       <p className="mt-2xs text-sm text-muted">{template.description}</p>
                     )}
                   </td>
-                  <td className="text-sm">
+                  <td className="max-w-[16rem] text-sm">
                     {template.workflow_file ? (
-                      <code className="code">{template.workflow_file}</code>
+                      <code className="code block truncate" title={template.workflow_file}>
+                        {template.workflow_file}
+                      </code>
                     ) : (
                       <span className="text-muted">未配置工作流</span>
                     )}
                   </td>
-                  <td className="num">{Object.keys(template.param_mapping || {}).length}</td>
+                  <td className="num text-sm text-muted">
+                    {Object.keys(template.param_mapping || {}).length}
+                  </td>
                   <td>
-                    <div className="flex items-center gap-2xs">
+                    <div className="flex items-center justify-end gap-2xs">
                       <button onClick={() => handleExport(template)} className="btn-quiet">
                         导出
                       </button>
@@ -1002,6 +1048,7 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </section>
     </div>

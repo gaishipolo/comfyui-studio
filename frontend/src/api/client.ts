@@ -221,6 +221,57 @@ export const uploadFromAsset = async (assetId: string, engine = 'comfyui'): Prom
   return data.filename
 }
 
+/** 把文件直接存进素材库（不经过引擎）。
+ *
+ *  与 uploadInput 的区别：那个是「给这次生成提供参考文件」，传完即丢；
+ *  这里落的是素材库里的正式条目，之后能在「从素材库选择」里复用。
+ *  多文件一次提交，后端整体成功或整体拒绝。
+ *
+ *  用 XHR 而不是 fetch：视频能到 200MB，fetch 拿不到上传进度，用户只能干等。
+ */
+export const uploadAssets = (
+  files: File[],
+  onProgress?: (percent: number) => void,
+): Promise<Asset[]> =>
+  new Promise((resolve, reject) => {
+    const form = new FormData()
+    for (const file of files) form.append('files', file)
+
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', `${BASE}/assets/upload`)
+    const token = getToken()
+    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`)
+
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable && onProgress) {
+        onProgress(Math.round((event.loaded / event.total) * 100))
+      }
+    }
+    xhr.onload = () => {
+      let payload: unknown = null
+      try {
+        payload = JSON.parse(xhr.responseText)
+      } catch {
+        // 非 JSON（网关错误页等）→ 走下面的状态码分支
+      }
+      if (xhr.status === 401) {
+        clearToken()
+        window.location.reload()
+        reject(new Error('登录已过期，请重新登录'))
+        return
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(payload as Asset[])
+        return
+      }
+      const detail = (payload as { detail?: string } | null)?.detail
+      reject(new Error(detail || `上传失败（HTTP ${xhr.status}）`))
+    }
+    xhr.onerror = () => reject(new Error('网络中断，上传失败'))
+    xhr.onabort = () => reject(new Error('上传已取消'))
+    xhr.send(form)
+  })
+
 // ── 任务 ──────────────────────────────────
 
 export const submitTask = (templateId: string, params: Record<string, unknown>, batchCount = 1) =>
@@ -321,19 +372,20 @@ export const prepareBatchDownload = async (assetIds: string[]): Promise<string> 
 
 // ── 素材文件 URL ───────────────────────────
 
-export const getAssetUrl = (taskId: string, fileName: string) =>
-  `${BASE}/tasks/${encodeURIComponent(taskId)}/assets/${encodeURIComponent(fileName)}`
+/** 素材文件 URL。按 **asset_id** 定位 —— 素材可以没有来源任务（用户上传）。 */
+export const getAssetUrl = (assetId: string) =>
+  `${BASE}/assets/${encodeURIComponent(assetId)}/file`
 
-/** 视频缩略图 URL（落盘时抽的一帧）。老素材没有就是 404，AuthMedia 会自动退回原文件 */
-export const getAssetThumbUrl = (taskId: string, fileName: string) =>
-  `${getAssetUrl(taskId, fileName)}/thumb`
+/** 缩略图 URL（图片首访懒生成 / 视频落盘时抽帧）。生成失败时后端回退原图 */
+export const getAssetThumbUrl = (assetId: string) =>
+  `${BASE}/assets/${encodeURIComponent(assetId)}/thumb`
 
 // ⚠️ 素材接口需要 JWT，而 <img src> / <a href> **无法携带 Authorization 头**，
 // 直接把 getAssetUrl() 塞进 src 会全部 401（缩略图加载不出来）。
 // 因此带鉴权取文件必须走 fetch，再用 object URL 渲染。
 //
-// 入参约定：必须是 getAssetUrl() 的返回值（已含 BASE，形如 /api/tasks/{id}/assets/{f}）。
-// 这里**只做 fetch，不再拼 BASE** —— 否则会拼出 /api/api/tasks/... 直接 404。
+// 入参约定：必须是 getAssetUrl() 的返回值（已含 BASE，形如 /api/assets/{id}/file）。
+// 这里**只做 fetch，不再拼 BASE** —— 否则会拼出 /api/api/assets/... 直接 404。
 export class AssetFetchError extends Error {
   readonly status: number
 
