@@ -245,3 +245,95 @@ export interface EnginePluginInfo {
   config: Record<string, unknown>
   has_config: boolean
 }
+
+// ── 流程编排（第二层配置）─────────────────────────────
+//
+// 节点 = Template（上面那个）。流程 = 节点的有序编排。
+// 两层配置都是数据不是代码 —— 这是将来能接 Agent 的前提：Agent 只能写数据。
+//
+// 参数取值统一用表达式：
+//   "{{ input.xxx }}"          流程输入的字段
+//   "{{ steps.s1.outputs }}"   上游步骤的产物
+// 不用「同名自动取」是因为两个节点可能都有同名字段（Flux2 和 Agnes 都有
+// prompt），同名自动取会把同一个值喂给两步。
+
+export interface FlowStep {
+  /** 步骤别名 —— 绑定引用它，不引用数组下标 */
+  id: string
+  type: 'template' | 'flow' | 'repeat'
+  template_id: string
+  flow_id: string
+  count: number
+  /** 字段 → 字面量或 {{...}} 表达式 */
+  params: Record<string, string>
+}
+
+export interface FlowOutput {
+  name: string
+  from_step: string
+  pick: 'all' | 'first' | 'last'
+}
+
+export interface Flow {
+  id: string
+  name: string
+  description: string
+  category: string
+  icon: string
+  input_schema: { fields: TemplateField[] }
+  outputs: FlowOutput[]
+  steps: FlowStep[]
+  status: 'draft' | 'active' | 'archived'
+  version: number
+  created_by: string
+  created_at: string
+  updated_at: string
+}
+
+export interface FlowStepState {
+  step_id: string
+  task_id: string
+  status: string
+  outputs?: { asset_id: string; filename: string; mime_type: string }[]
+}
+
+export interface FlowRun {
+  id: string
+  flow_id: string
+  flow_name: string
+  status: 'running' | 'done' | 'error' | 'cancelled'
+  progress: number
+  params: Record<string, unknown>
+  steps: FlowStepState[]
+  error_msg: string
+  created_at: string
+  finished_at: string | null
+}
+
+/** 能力清单里的一项 —— 一个可用节点。从数据库自动生成，不写文档 */
+export interface NodeCapability {
+  id: string
+  name: string
+  description: string
+  category: string
+  engine: string
+  capability: string
+  fields: {
+    name: string
+    label: string
+    type: string
+    required: boolean
+    options?: (string | number | boolean)[]
+    default?: string | number | boolean
+    accept?: string
+    multiple: boolean
+  }[]
+}
+
+export interface FlowValidateResult {
+  ok: boolean
+  errors: string[]
+  warnings: string[]
+  /** 依赖分层，同层可并行 */
+  layers: string[][]
+}

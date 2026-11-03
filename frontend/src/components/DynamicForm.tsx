@@ -1,7 +1,7 @@
 /** 动态表单 — 根据模板 input_schema 自动渲染 */
 import { useState, useEffect, useRef } from 'react'
 import type { Asset, Template, TemplateField } from '../types'
-import { getAssetThumbUrl, getAssetUrl, uploadFromAsset, uploadInput } from '../api/client'
+import { getAssetThumbUrl, getAssetUrl, uploadAssets, uploadFromAsset, uploadInput } from '../api/client'
 import AssetPickerModal from './AssetPickerModal'
 import {
   DEFAULT_RANDOM_MAX,
@@ -25,6 +25,19 @@ interface Props {
   /** 预填值（「用这些参数再生成」草稿）。只在挂载时生效 ——
    *  调用方换 initialValues 时要换 key 强制重挂 */
   initialValues?: Record<string, unknown>
+  /**
+   * 上传目标：
+   *   engine（默认）—— 直接送进引擎，值是引擎侧文件名，传完即丢
+   *   asset          —— 存进素材库，值是素材 id
+   *
+   * 流程编排用 asset：流程跑的时候才知道这一步该送哪个引擎（上游可能是
+   * ComfyUI、下游是供应商 API），上传时就送引擎会把文件绑死在第一个引擎上。
+   */
+  uploadTarget?: 'engine' | 'asset'
+  /** 流程模式不显示「生成数量」—— 流程是一次运行，不是一次跑 N 份 */
+  showBatch?: boolean
+  /** 提交按钮文案。流程模式该叫「开始运行」而不是「开始生成」 */
+  submitLabel?: string
 }
 
 /** 文件种类 → 扩展名兜底表。
@@ -92,7 +105,15 @@ const matchesKind = (file: File, kind: string): boolean => {
   return (KIND_EXT[kind] ?? []).includes(ext)
 }
 
-export default function DynamicForm({ template, onSubmit, submitting, initialValues }: Props) {
+export default function DynamicForm({
+  template,
+  onSubmit,
+  submitting,
+  initialValues,
+  uploadTarget = 'engine',
+  showBatch = true,
+  submitLabel = '开始生成',
+}: Props) {
   const fields = template.input_schema?.fields ?? []
 
   // 初始化表单值：草稿预填 > 模板默认值 > 空
@@ -260,6 +281,15 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
       const file = files[0]
       const generation = beginFieldOperation(field.name)
       try {
+        if (uploadTarget === 'asset') {
+          // 流程模式：文件存进素材库，值是素材 id（执行时才送进目标引擎）
+          const assets = await uploadAssets([file])
+          const first = assets[0]
+          if (!first) throw new Error('上传失败')
+          setValue(field.name, first.id)
+          setSinglePreview(field.name, localPreview(file))
+          return
+        }
         const completed = await completeUpload(
           () => uploadInput(file, template.engine, kind),
           () => localPreview(file),
@@ -283,6 +313,17 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
     try {
       for (const file of files) {
         try {
+          if (uploadTarget === 'asset') {
+            const assets = await uploadAssets([file])
+            const first = assets[0]
+            if (!first) throw new Error('上传失败')
+            setValues((prev) => {
+              const cur = Array.isArray(prev[field.name]) ? (prev[field.name] as string[]) : []
+              return { ...prev, [field.name]: [...cur, first.id] }
+            })
+            appendPreview(field.name, localPreview(file))
+            continue
+          }
           const completed = await completeUpload(
             () => uploadInput(file, template.engine, kind),
             () => localPreview(file),
@@ -320,6 +361,20 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
     try {
       for (const item of picked) {
         try {
+          if (uploadTarget === 'asset') {
+            // 流程模式：素材已经在库里，值就是它的 id，不用再推进引擎
+            if (multi) {
+              setValues((prev) => {
+                const cur = Array.isArray(prev[field.name]) ? (prev[field.name] as string[]) : []
+                return { ...prev, [field.name]: [...cur, item.id] }
+              })
+              appendPreview(field.name, assetPreview(item))
+            } else {
+              setValue(field.name, item.id)
+              setSinglePreview(field.name, assetPreview(item))
+            }
+            continue
+          }
           const completed = await completeUpload(
             () => uploadFromAsset(item.id, template.engine),
             () => assetPreview(item),
@@ -960,25 +1015,29 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
 
       <div className="mt-lg flex flex-wrap items-end justify-between gap-sm border-t border-rule pt-md">
         <div>
-          <label className="field-label" htmlFor="batchCount">
-            生成数量
-          </label>
-          <input
-            id="batchCount"
-            type="number"
-            min={1}
-            max={32}
-            className="field w-20"
-            value={batchCount}
-            onChange={(e) => setBatchCount(normalizeBatchCount(Number(e.target.value)))}
-          />
+          {showBatch && (
+            <>
+              <label className="field-label" htmlFor="batchCount">
+                生成数量
+              </label>
+              <input
+                id="batchCount"
+                type="number"
+                min={1}
+                max={32}
+                className="field w-20"
+                value={batchCount}
+                onChange={(e) => setBatchCount(normalizeBatchCount(Number(e.target.value)))}
+              />
+            </>
+          )}
         </div>
         <button
           type="submit"
           disabled={submitting || anyFileUploading}
           className="btn btn-primary justify-center px-xl"
         >
-          {submitting ? '提交中…' : anyFileUploading ? '文件上传中…' : '开始生成'}
+          {submitting ? '提交中…' : anyFileUploading ? '文件上传中…' : submitLabel}
         </button>
       </div>
 

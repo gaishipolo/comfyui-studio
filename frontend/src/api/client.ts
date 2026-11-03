@@ -3,6 +3,8 @@ import type {
   Template, Task, Asset, User, LoginResponse,
   AssetTag, EngineInfo, WorkflowUploadResponse, WorkflowInventoryResponse,
   UsageResponse, EnginePluginInfo, TemplateImportResult, StorageQuota,
+  Flow, FlowRun, FlowStep, FlowOutput, FlowValidateResult, NodeCapability,
+  TemplateField,
 } from '../types'
 
 const BASE = '/api'
@@ -641,3 +643,39 @@ export const testPlugin = (name: string) =>
   request<{ ok: boolean; detail: string }>(`/plugins/${encodeURIComponent(name)}/test`, {
     method: 'POST',
   })
+
+// ── 流程编排 ──────────────────────────────────────
+
+export const listFlows = () => request<Flow[]>('/flows')
+
+export const getFlow = (id: string) => request<Flow>(`/flows/${id}`)
+
+export const createFlow = (data: Partial<Flow>) =>
+  request<Flow>('/flows', { method: 'POST', body: JSON.stringify(data) })
+
+export const updateFlow = (id: string, data: Partial<Flow>) =>
+  request<Flow>(`/flows/${id}`, { method: 'PUT', body: JSON.stringify(data) })
+
+export const deleteFlow = (id: string) =>
+  request<{ message: string; id: string }>(`/flows/${id}`, { method: 'DELETE' })
+
+/** 能力清单：可用的节点列表。从数据库自动生成 —— 同时是编排器的可选节点
+ *  下拉，和将来 Agent 编排时的输入（Agent 只看这份清单就知道能拼什么） */
+export const listNodeCapabilities = () => request<NodeCapability[]>('/flows/capabilities')
+
+/** 校验一份流程配置（不落库）。编排器保存前走这里 */
+export const validateFlow = (data: {
+  steps: FlowStep[]
+  input_schema?: { fields?: TemplateField[] }
+  outputs?: FlowOutput[]
+}) =>
+  request<FlowValidateResult>('/flows/validate', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  })
+
+/** 跑一条流程。返回运行记录，后台顺序执行 */
+export const runFlow = (id: string, params: Record<string, unknown>) =>
+  request<FlowRun>(`/flows/${id}/run`, { method: 'POST', body: JSON.stringify(params) })
+
+export const getFlowRun = (runId: string) => request<FlowRun>(`/flows/runs/${runId}`)

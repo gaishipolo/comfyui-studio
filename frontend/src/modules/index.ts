@@ -14,6 +14,7 @@ import DashboardModule from '../components/modules/DashboardModule'
 import UserManager from '../components/modules/UserManager'
 import UsagePanel from '../components/modules/UsagePanel'
 import PluginManager from '../components/modules/PluginManager'
+import FlowWorkspace from '../components/FlowWorkspace'
 
 // ── 核心模块 ────────────────────────────────
 // 组件按需接收 ModuleProps 的子集即可（结构化类型兼容，无需类型断言）
@@ -26,17 +27,24 @@ registerModule({
 })
 
 registerModule({
+  key: 'flows',
+  label: '流程',
+  component: FlowWorkspace,
+  order: 2,
+})
+
+registerModule({
   key: 'tasks',
   label: '任务',
   component: TaskPanel,
-  order: 2,
+  order: 3,
 })
 
 registerModule({
   key: 'assets',
   label: '素材库',
   component: AssetGallery,
-  order: 3,
+  order: 4,
 })
 
 registerModule({
@@ -44,7 +52,7 @@ registerModule({
   label: '管理',
   component: TemplateManager,
   roles: ['admin'], // 仅 admin 可见
-  order: 4,
+  order: 5,
 })
 
 registerModule({
@@ -52,7 +60,7 @@ registerModule({
   label: '用户',
   component: UserManager,
   roles: ['admin'], // 账号管理只给管理员
-  order: 5,
+  order: 6,
 })
 
 registerModule({
@@ -60,7 +68,7 @@ registerModule({
   label: '用量统计',
   component: UsagePanel,
   roles: ['admin'], // 只统计不拦截，仅 admin 看得到
-  order: 6,
+  order: 7,
 })
 
 registerModule({
@@ -68,7 +76,7 @@ registerModule({
   label: '引擎插件',
   component: PluginManager,
   roles: ['admin'], // 上传=执行代码，只给管理员（=开发）
-  order: 7,
+  order: 8,
 })
 
 // ── 预留模块（示例：审批流，当前禁用）────────
