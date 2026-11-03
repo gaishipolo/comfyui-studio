@@ -319,10 +319,13 @@ class FlowStep(BaseModel):
     # 显示名 —— 给内容同事看的。id 是内部标识（引用靠它），改名会断链，
     # 所以界面让人改 title，id 由系统生成且不可编辑。
     title: str = Field(default="", max_length=64, description="步骤显示名（给人看的）")
-    type: str = Field(default="template", description="步骤类型：template（第一刀只支持这个）")
+    type: str = Field(default="template", description="步骤类型：template / repeat（循环）")
     template_id: str = Field(default="", description="节点（Template）ID")
     flow_id: str = Field(default="", description="子流程 ID（type=flow 时用）")
-    count: int = Field(default=1, ge=1, le=999, description="循环次数（type=repeat 时用）")
+    # 循环次数。0 = 由列表输入的长度决定（列表输入优先）。
+    count: int = Field(default=1, ge=0, le=200, description="循环次数（type=repeat 时用）")
+    # 循环次数的表达式，如 {{ input.shot_count }}。填了就以它为准。
+    count_expr: str = Field(default="", max_length=200, description="循环次数表达式")
     params: dict = Field(default_factory=dict, description="参数取值：字面量或 {{...}} 表达式")
 
     @field_validator("id")

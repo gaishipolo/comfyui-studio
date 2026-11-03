@@ -160,7 +160,7 @@ cd ../deploy/windows && .\install-service.ps1
 
 ### 单元测试（离线一条命令跑完，不碰任何真实资源）
 
-`backend/tests/test_*.py`（49 个，不依赖 pytest）：鉴权吊销、请求准入、任务终态竞态、插件恢复守卫、输入校验、下载票据、登录限速、启动配置自检、清理脚本守卫、live 脚本自检、端口匹配、素材回收站、存储配额与默认配额、按引擎分组的并发闸门、重启后排队任务重排、图片缩略图预生成、随机数字段 schema 与 -1 哨兵展开、媒体 MIME 的跨平台一致性、整应用 ASGI 冒烟（登录→建模板→提交→列素材）等。逐个直接运行即可：
+`backend/tests/test_*.py`（50 个，不依赖 pytest）：鉴权吊销、请求准入、任务终态竞态、插件恢复守卫、输入校验、下载票据、登录限速、启动配置自检、清理脚本守卫、live 脚本自检、端口匹配、素材回收站、存储配额与默认配额、按引擎分组的并发闸门、重启后排队任务重排、图片缩略图预生成、随机数字段 schema 与 -1 哨兵展开、媒体 MIME 的跨平台一致性、整应用 ASGI 冒烟（登录→建模板→提交→列素材）等。逐个直接运行即可：
 
 ```powershell
 Get-ChildItem tests\test_*.py | ForEach-Object { & .\.venv\Scripts\python.exe $_.FullName; if ($LASTEXITCODE -ne 0) { exit 1 } }

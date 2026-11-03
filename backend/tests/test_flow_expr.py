@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.services.flow_expr import (  # noqa: E402
     FlowExprError,
+    collect_base_refs,
     collect_refs,
     resolve_value,
 )
@@ -32,6 +33,10 @@ CTX = {
             ]
         }
     },
+    # 循环上下文 —— 循环节点跑每一轮时注入
+    "index": 1,
+    "total": 3,
+    "item": "一只狗",
 }
 
 
@@ -157,6 +162,60 @@ def test_whole_reference_with_pick_keeps_type() -> None:
     assert value["asset_id"] == "a1"
 
 
+def test_bracket_index_takes_list_element() -> None:
+    """方括号下标按变量取值 —— 循环节点靠它把「第 i 条」喂给节点。"""
+    ctx = {**CTX, "input": {**CTX["input"], "prompts": ["猫", "狗", "鸟"]}}
+    assert resolve_value("{{ input.prompts[index] }}", ctx) == "狗"
+    assert resolve_value("{{ item }}", ctx) == "一只狗"
+
+
+def test_bracket_index_out_of_range() -> None:
+    """下标越界要报错，不能静默返回 None。"""
+    ctx = {**CTX, "input": {**CTX["input"], "prompts": ["猫"]}}
+    try:
+        resolve_value("{{ input.prompts[index] }}", ctx)
+    except FlowExprError as exc:
+        assert "越界" in str(exc), str(exc)
+    else:
+        raise AssertionError("越界应该报错")
+
+
+def test_bracket_index_must_be_integer() -> None:
+    """下标不是整数要报错 —— 不能拿字符串当下标。"""
+    ctx = {**CTX, "input": {**CTX["input"], "prompts": ["猫"]}}
+    try:
+        resolve_value("{{ input.prompts[item] }}", ctx)
+    except FlowExprError as exc:
+        assert "不是整数" in str(exc), str(exc)
+    else:
+        raise AssertionError("非整数下标应该报错")
+
+
+def test_bracket_index_literal_points_to_dot_form() -> None:
+    """[0] 这种固定下标要提示用点号形式 —— 点号才是文档里写的写法。"""
+    ctx = {**CTX, "input": {**CTX["input"], "prompts": ["猫"]}}
+    try:
+        resolve_value("{{ input.prompts[0] }}", ctx)
+    except FlowExprError as exc:
+        assert "点号" in str(exc), str(exc)
+    else:
+        raise AssertionError("固定下标应该报错并提示写法")
+
+
+def test_loop_vars_collect_as_base_refs() -> None:
+    """校验时 index 是循环变量，不能被当成流程输入去查。"""
+    refs = collect_base_refs("{{ input.prompts[index] }}")
+    assert "input.prompts" in refs
+    assert "index" not in refs
+    # 但完整引用里要留着，方括号形式本身是合法的
+    assert "input.prompts[index]" in collect_refs("{{ input.prompts[index] }}")
+
+
+def test_interpolation_with_loop_var() -> None:
+    """循环变量能插进文本 —— 「第 {{ index }} 个镜头」。"""
+    assert resolve_value("第 {{ index }} 个镜头", CTX) == "第 1 个镜头"
+
+
 def main() -> int:
     tests = [
         test_literal_passthrough,
@@ -171,6 +230,12 @@ def main() -> int:
         test_list_pick_on_empty_list,
         test_list_rejects_unknown_key,
         test_whole_reference_with_pick_keeps_type,
+        test_bracket_index_takes_list_element,
+        test_bracket_index_out_of_range,
+        test_bracket_index_must_be_integer,
+        test_bracket_index_literal_points_to_dot_form,
+        test_loop_vars_collect_as_base_refs,
+        test_interpolation_with_loop_var,
     ]
     failures: list[str] = []
     for test in tests:

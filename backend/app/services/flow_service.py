@@ -14,6 +14,7 @@
 在流程里是常规用法。
 """
 import asyncio
+import re
 import logging
 
 from app.database import async_session
@@ -38,6 +39,11 @@ _POLL_INTERVAL_SECONDS = 1.0
 
 class FlowError(RuntimeError):
     """流程配置错或执行出错。消息面向使用者，不含内部细节。"""
+
+
+# 循环次数上限 —— 防止一条流程把引擎队列塞爆。
+# 上限定 200：够覆盖「一集 20 镜头」这类场景，再多就该拆流程了。
+MAX_LOOP_COUNT = 200
 
 
 def _is_asset_list(value) -> bool:
@@ -73,7 +79,12 @@ async def submit_flow(db, flow: Flow, params: dict, user) -> FlowRun:
 
 
 async def _execute_flow(run_id: str) -> None:
-    """后台执行一条流程。出错把原因写进 FlowRun，不往上抛。"""
+    """后台执行一条流程。出错把原因写进 FlowRun，不往上抛。
+
+    **开头用短会话读完就释放**：整个执行过程可能跑几分钟，长会话会把
+    连接池占住（池是给 50 个人用的），而且它持有的读事务会挡住后面
+    `_update_run` 的写入 —— 状态写不进去，流程永远卡在 running。
+    """
     async with async_session() as db:
         run = await db.get(FlowRun, run_id)
         if run is None:
@@ -85,84 +96,194 @@ async def _execute_flow(run_id: str) -> None:
             run.finished_at = utcnow()
             await db.commit()
             return
-
         steps = list(flow.steps or [])
-        ctx: dict = {"input": dict(run.params or {}), "steps": {}}
-        state: list[dict] = []
-        total = len(steps)
+        params = dict(run.params or {})
 
-        # 按依赖分层：同层的步骤互不依赖，一起提交、一起等。
-        # 「谁吃谁」是流程声明的，「谁能同时跑」是算出来的 —— 不让用户配并行组，
-        # 因为并行组配错了（把有依赖的放进同一组）会拿不到产物，而且错得很隐蔽。
-        layers, cycle = compute_layers(steps)
-        if cycle:
-            await _fail_run(run_id, f"步骤之间存在循环依赖：{', '.join(cycle)}", state)
-            return
-        if not layers:
-            await _update_run(run_id, status="done", progress=100.0, steps=state)
-            return
+    ctx: dict = {"input": params, "steps": {}}
+    state: list[dict] = []
+    total = len(steps)
 
-        by_id = {str(s.get("id") or ""): s for s in steps}
-        done_count = 0
+    # 按依赖分层：同层的步骤互不依赖，一起提交、一起等。
+    # 「谁吃谁」是流程声明的，「谁能同时跑」是算出来的 —— 不让用户配并行组，
+    # 因为并行组配错了（把有依赖的放进同一组）会拿不到产物，而且错得很隐蔽。
+    layers, cycle = compute_layers(steps)
+    if cycle:
+        await _fail_run(run_id, f"步骤之间存在循环依赖：{', '.join(cycle)}", state)
+        return
+    if not layers:
+        await _update_run(run_id, status="done", progress=100.0, steps=state)
+        return
 
-        for layer_index, layer_ids in enumerate(layers):
-            layer_steps = [(sid, by_id[sid]) for sid in layer_ids if sid in by_id]
-            if not layer_steps:
-                continue
+    by_id = {str(s.get("id") or ""): s for s in steps}
+    done_count = 0
 
-            # ── 先把整层都提交出去（这一步不等待，任务在后台跑）──
-            started: list[tuple[str, str]] = []
-            for step_id, step in layer_steps:
+    for layer_index, layer_ids in enumerate(layers):
+        layer_steps = [(sid, by_id[sid]) for sid in layer_ids if sid in by_id]
+        if not layer_steps:
+            continue
+
+        # ── 先把整层都提交出去（这一步不等待，任务在后台跑）──
+        # 循环步骤在这一层展开成 N 个实例（N 个任务一起提交，并行跑）
+        started: list[tuple[str, str, int]] = []
+        for step_id, step in layer_steps:
+            try:
+                instances = await _expand_instances(step, step_id, ctx)
+            except (FlowError, FlowExprError) as exc:
+                await _fail_run(run_id, f"{step_label(steps, step_id)}：{exc}", state)
+                return
+
+            for iteration, iteration_ctx in instances:
                 try:
-                    resolved = await _resolve_step_params(step, ctx)
+                    resolved = await _resolve_step_params(step, iteration_ctx)
                 except (FlowError, FlowExprError) as exc:
-                    await _fail_run(run_id, f"{step_label(steps, step_id)}：{exc}", state)
+                    await _fail_run(
+                        run_id,
+                        f"{step_label(steps, step_id)}第 {iteration + 1} 次：{exc}",
+                        state,
+                    )
                     return
                 try:
                     task_id = await _start_step(run, step, step_id, resolved)
                 except FlowError as exc:
-                    await _fail_run(run_id, f"{step_label(steps, step_id)}：{exc}", state)
+                    await _fail_run(
+                        run_id,
+                        f"{step_label(steps, step_id)}第 {iteration + 1} 次：{exc}",
+                        state,
+                    )
                     return
-                started.append((step_id, task_id))
+                started.append((step_id, task_id, iteration))
 
-            # ── 再等这一层全部跑完 ──
-            finished: list[tuple[str, Task]] = []
-            for step_id, task_id in started:
-                try:
-                    finished.append((step_id, await _wait_task(task_id)))
-                except FlowError as exc:
-                    await _fail_run(run_id, f"{step_label(steps, step_id)}：{exc}", state)
-                    return
-
-            # 同层一步失败，同层其他步骤的产物仍然入库（跑都跑了，别浪费），
-            # 但后续层不执行 —— 它们拿不到这一步的产物。
-            failed = [(sid, t) for sid, t in finished if t.status != "done"]
-            for step_id, task in finished:
-                outputs = await _collect_outputs(task.id)
-                ctx["steps"][step_id] = {"outputs": outputs}
-                state.append(
-                    {
-                        "step_id": step_id,
-                        "task_id": task.id,
-                        "status": task.status,
-                        "layer": layer_index,
-                        "outputs": outputs,
-                    }
-                )
-                done_count += 1
-            await _update_run(run_id, progress=done_count / total * 100, steps=state)
-
-            if failed:
-                step_id, task = failed[0]
-                detail = task.error_msg or f"任务状态 {task.status}"
-                await _fail_run(
-                    run_id,
-                    f"{step_label(steps, step_id)}失败：{detail}",
-                    state,
-                )
+        # ── 再等这一层全部跑完 ──
+        finished: list[tuple[str, Task, int]] = []
+        for step_id, task_id, iteration in started:
+            try:
+                finished.append((step_id, await _wait_task(task_id), iteration))
+            except FlowError as exc:
+                await _fail_run(run_id, f"{step_label(steps, step_id)}：{exc}", state)
                 return
 
-        await _update_run(run_id, status="done", progress=100.0, steps=state)
+        # 同层一步失败，同层其他步骤的产物仍然入库（跑都跑了，别浪费），
+        # 但后续层不执行 —— 它们拿不到这一步的产物。
+        failed = [(sid, t) for sid, t, _ in finished if t.status != "done"]
+        # 同一循环步骤的 N 个实例，产物汇总成一份给下游
+        merged: dict[str, list[dict]] = {}
+        for step_id, task, iteration in finished:
+            outputs = await _collect_outputs(task.id)
+            merged.setdefault(step_id, []).extend(outputs)
+            state.append(
+                {
+                    "step_id": step_id,
+                    "task_id": task.id,
+                    "status": task.status,
+                    "layer": layer_index,
+                    "iteration": iteration,
+                    "outputs": outputs,
+                }
+            )
+            done_count += 1
+        for step_id, outputs in merged.items():
+            ctx["steps"][step_id] = {"outputs": outputs}
+        await _update_run(run_id, progress=done_count / total * 100, steps=state)
+
+        if failed:
+            step_id, task = failed[0]
+            detail = task.error_msg or f"任务状态 {task.status}"
+            await _fail_run(
+                run_id,
+                f"{step_label(steps, step_id)}失败：{detail}",
+                state,
+            )
+            return
+
+    await _update_run(run_id, status="done", progress=100.0, steps=state)
+
+
+async def _expand_instances(step: dict, step_id: str, ctx: dict) -> list[tuple[int, dict]]:
+    """把一个步骤展开成要跑几次。
+
+    普通步骤 → 一次，上下文原样。
+    循环步骤（type=repeat）→ N 次，每次的上下文里带上循环变量：
+      index  当前是第几次（从 0 开始）
+      total  一共跑几次
+      item   当前这次对应的那一项（列表输入时）
+
+    **为什么循环必须每次输入不同**：现有节点一次只出 1 个产物，跑 N 次
+    但每次参数一样，等于跑 N 遍同样的活。所以循环的价值全在
+    「每次喂不同的提示词」—— 那就需要一个列表输入 + 索引。
+    """
+    step_type = str(step.get("type") or "template")
+    if step_type != "repeat":
+        return [(0, ctx)]
+
+    count_expr = step.get("count_expr") or ""
+    # count = 0 的含义是「由列表长度决定」—— 不能写成 `or 1`，那会把 0 变成 1
+    raw_count = step.get("count")
+    count = 0 if raw_count is None else int(raw_count)
+    # 列表输入：次数由列表长度决定（省掉一个要填的数）
+    source = _loop_source(step, ctx)
+    try:
+        if isinstance(count_expr, str) and count_expr.strip():
+            resolved = resolve_value(count_expr, ctx)
+            count = int(resolved)
+        elif source is not None and count <= 0:
+            count = len(source)
+        else:
+            count = int(count)
+    except (TypeError, ValueError) as exc:
+        raise FlowError(f"循环次数不是整数：{count_expr!r}") from exc
+    except FlowExprError as exc:
+        raise FlowError(f"循环次数算不出来：{exc}") from exc
+
+    if count < 1:
+        raise FlowError(f"循环次数至少是 1（现在 {count}）")
+    if count > MAX_LOOP_COUNT:
+        raise FlowError(f"循环次数不能超过 {MAX_LOOP_COUNT}（现在 {count}）")
+
+    instances: list[tuple[int, dict]] = []
+    for i in range(count):
+        iteration_ctx = dict(ctx)
+        iteration_ctx["index"] = i
+        iteration_ctx["total"] = count
+        if source is not None:
+            if i >= len(source):
+                raise FlowError(
+                    f"循环要跑 {count} 次，但列表只有 {len(source)} 项"
+                    "（次数不能超过列表长度）"
+                )
+            iteration_ctx["item"] = source[i]
+        else:
+            # 没有列表来源时 item 就是序号 —— 别让 {{ item }} 引用不到东西
+            iteration_ctx["item"] = i
+        instances.append((i, iteration_ctx))
+    return instances
+
+
+# 循环列表来源的识别：`input.<字段>[index]`
+_LOOP_SOURCE = re.compile(
+    r"input\.([A-Za-z_][A-Za-z0-9_]*)\[[A-Za-z_][A-Za-z0-9_]*\]"
+)
+
+
+def _loop_source(step: dict, ctx: dict) -> list | None:
+    """循环每次喂的那一项 —— 来自流程输入里的列表字段。
+
+    **从表达式的结构识别，不从求值结果猜。**
+    `{{ input.prompts[index] }}` 求值出来是「第 i 项」——一个字符串，
+    不是列表。所以不能靠「哪个 param 求值结果是 list」来判断来源。
+
+    约定：param 里写了 `input.<字段>[...]` 这种形式，那个 `<字段>`
+    就是列表来源。循环次数默认由它的长度决定（count 留 0 即可）。
+    """
+    inputs = ctx.get("input") or {}
+    for expr in (step.get("params") or {}).values():
+        if not isinstance(expr, str) or "{{" not in expr:
+            continue
+        for m in _LOOP_SOURCE.finditer(expr):
+            name = m.group(1)
+            value = inputs.get(name)
+            if isinstance(value, list):
+                return value
+    return None
 
 
 async def _fail_run(run_id: str, message: str, state: list[dict]) -> None:

@@ -19,6 +19,10 @@
 
 第一刀只支持两种引用；函数管道、条件表达式留到第二刀（接口已经留好，
 加的时候不用改调用方）。
+
+**列表下标**：`input.prompts[index]` —— 方括号里是变量名（不是字面量），
+求值时从上下文取值再当下标用。循环节点就靠它把「第 i 条提示词」喂给节点。
+方括号里只允许标识符，不允许表达式 —— 保持可静态分析。
 """
 import re
 
@@ -32,6 +36,18 @@ _PATH = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
 _PATH_WITH_INDEX = re.compile(
     r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*(\.\d+)?$"
 )
+# 带方括号下标的路径：input.prompts[index]
+_BRACKET_INDEX = re.compile(r"\[([A-Za-z_][A-Za-z0-9_]*)\]")
+# 路径里允许出现方括号（段内下标），也要允许纯点号分段
+# —— 两者的区别只是有没有方括号，所以合并成一个正则：
+#   input.prompts[index]      段内带方括号
+#   steps.gen.outputs.first   纯点号（first/last 是列表取值）
+_PATH_WITH_BRACKET = re.compile(
+    r"^[A-Za-z_][A-Za-z0-9_]*"
+    r"(\.[A-Za-z_][A-Za-z0-9_]*|\[[A-Za-z0-9_]+\])*$"
+)
+# 段内带方括号的路径（用于区分「要不要走方括号求值」）
+_PATH_WITH_INNER_BRACKET = re.compile(r"\[[A-Za-z0-9_]+\]")
 
 
 class FlowExprError(ValueError):
@@ -46,12 +62,42 @@ def parse_ref(path: str) -> list[str]:
     return path.split(".")
 
 
+def _split_index(path: str, part: str, ctx: dict) -> int:
+    """方括号里的下标求值 —— 只允许标识符，取它的整数值。"""
+    m = _BRACKET_INDEX.fullmatch(part)
+    if not m:
+        # 方括号里是数字 —— 那是「固定下标」，写法应该是 .0 而不是 [0]
+        if re.fullmatch(r"\[\d+\]", part):
+            raise FlowExprError(
+                f"引用「{path}」的固定下标请写成点号形式"
+                f"（{part} → .{part[1:-1]}）"
+            )
+        raise FlowExprError(f"下标写法不合法：{part!r}（方括号里只能是变量名）")
+    name = m.group(1)
+    if name not in ctx:
+        raise FlowExprError(f"下标变量「{name}」不存在")
+    raw = ctx[name]
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise FlowExprError(f"下标变量「{name}」不是整数（{raw!r}）")
+    if raw < 0:
+        raise FlowExprError(f"下标变量「{name}」不能是负数")
+    return raw
+
+
 def resolve_ref(path: str, ctx: dict):
     """按路径从上下文取值。取值只走字典下标 —— 不 getattr，不 eval。
 
     列表可以用 .first / .last 取元素 —— ComfyUI 一个工作流常出好几张图，
     下游只要其中一张时必须能指名，否则只能全喂过去然后报「字段只接一张图」。
+
+    方括号下标 `input.prompts[index]` —— 循环节点靠它把「第 i 条」喂给节点。
+    方括号里只允许标识符（变量名），不允许表达式 —— 保持可静态分析。
     """
+    path = path.strip()
+    # 只有「段内带方括号」才走新求值器；纯点号路径走原逻辑
+    # （steps.gen.outputs.first 里的 first 是列表取值，不是方括号下标）
+    if _PATH_WITH_BRACKET.match(path) and _PATH_WITH_INNER_BRACKET.search(path):
+        return _resolve_with_bracket(path, ctx)
     parts = parse_ref(path)
     cur: object = ctx
     for i, part in enumerate(parts):
@@ -86,6 +132,59 @@ def resolve_ref(path: str, ctx: dict):
             raise FlowExprError(
                 f"引用「{path}」不存在（第 {i + 1} 段 {part!r} 找不到）"
             )
+    return cur
+
+
+def _resolve_with_bracket(path: str, ctx: dict):
+    """求值带方括号下标的路径，如 input.prompts[index]。"""
+    # 按 '.' 分段，但方括号里的点不拆（虽然现在也不允许）
+    segments: list[str] = []
+    buf = ""
+    depth = 0
+    for ch in path:
+        if ch == "[":
+            depth += 1
+            buf += ch
+        elif ch == "]":
+            depth -= 1
+            buf += ch
+        elif ch == "." and depth == 0:
+            segments.append(buf)
+            buf = ""
+        else:
+            buf += ch
+    if buf:
+        segments.append(buf)
+
+    cur: object = ctx
+    for i, seg in enumerate(segments):
+        bracket = _BRACKET_INDEX.fullmatch(seg)
+        if bracket:
+            index = _split_index(path, seg, ctx)
+            if not isinstance(cur, list):
+                raise FlowExprError(f"引用「{path}」的第 {i + 1} 段不是列表，不能取下标")
+            if index >= len(cur):
+                raise FlowExprError(f"引用「{path}」越界（只有 {len(cur)} 项）")
+            cur = cur[index]
+            continue
+
+        # 段里可能既有名字又有下标：prompts[index]
+        m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)(.*)$", seg)
+        if not m:
+            raise FlowExprError(f"引用「{path}」的第 {i + 1} 段不合法：{seg!r}")
+        name, rest = m.group(1), m.group(2)
+        if not isinstance(cur, dict):
+            raise FlowExprError(f"引用「{path}」的第 {i + 1} 段找不到（取值不是对象）")
+        if name not in cur:
+            raise FlowExprError(f"引用「{path}」不存在（第 {i + 1} 段 {name!r} 找不到）")
+        cur = cur[name]
+        if rest:
+            index = _split_index(path, rest, ctx)
+            if not isinstance(cur, list):
+                raise FlowExprError(f"引用「{path}」不能取下标（{name} 不是列表）")
+            if index >= len(cur):
+                raise FlowExprError(f"引用「{path}」越界（只有 {len(cur)} 项）")
+            cur = cur[index]
     return cur
 
 
@@ -127,4 +226,23 @@ def collect_refs(expr) -> list[str]:
     if not isinstance(expr, str):
         return []
     refs = [m.group(1).strip() for m in _PART_REF.finditer(expr)]
-    return [r for r in refs if _PATH.match(r) or _PATH_WITH_INDEX.match(r)]
+    return [
+        r
+        for r in refs
+        if _PATH.match(r) or _PATH_WITH_INDEX.match(r) or _PATH_WITH_BRACKET.match(r)
+    ]
+
+
+def collect_base_refs(expr) -> list[str]:
+    """列出一个取值表达式引用了哪些「基础路径」—— 去掉方括号下标。
+
+    校验时要确认 `input.prompts[index]` 里的 `input.prompts` 存在，
+    但 `index` 是循环变量（运行时才有），不该被当成流程输入来查。
+    """
+    out: list[str] = []
+    for ref in collect_refs(expr):
+        # input.prompts[index] → input.prompts
+        base = ref.split("[", 1)[0]
+        if base and base not in out:
+            out.append(base)
+    return out

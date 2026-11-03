@@ -246,6 +246,99 @@ def test_non_file_field_still_rejects_upstream_output() -> None:
     assert any("不能接上游产物" in e for e in result["errors"]), result["errors"]
 
 
+def test_loop_with_list_source_accepts_zero_count() -> None:
+    """count=0 = 由列表长度决定 —— 列表长度运行时才知道，不该报错。"""
+    steps = [
+        {
+            "id": "shots",
+            "type": "repeat",
+            "title": "生成镜头",
+            "template_id": "t1",
+            "count": 0,
+            "params": {"prompt": "{{ input.prompts[index] }}"},
+        }
+    ]
+    result = validate_flow_config(
+        steps=steps,
+        input_schema={
+            "fields": [
+                {
+                    "name": "prompts",
+                    "label": "提示词列表",
+                    "type": "textarea",
+                    "multiple": True,
+                }
+            ]
+        },
+        outputs=[],
+        templates=TEMPLATES,
+    )
+    assert result["ok"], result["errors"]
+
+
+def test_loop_zero_count_without_list_source_errors() -> None:
+    """count=0 但没有列表来源 —— 无从知道跑几次，要报错说清楚。"""
+    steps = [
+        {
+            "id": "shots",
+            "type": "repeat",
+            "title": "生成镜头",
+            "template_id": "t1",
+            "count": 0,
+            "params": {"prompt": "固定"},
+        }
+    ]
+    result = validate_flow_config(
+        steps=steps,
+        input_schema={"fields": []},
+        outputs=[],
+        templates=TEMPLATES,
+    )
+    assert not result["ok"]
+    assert any("列表来源" in e for e in result["errors"]), result["errors"]
+
+
+def test_loop_var_in_non_loop_step_errors() -> None:
+    """index / total / item 只在循环步骤里才有意义。"""
+    steps = [
+        {
+            "id": "gen",
+            "title": "普通步骤",
+            "template_id": "t1",
+            "params": {"prompt": "{{ index }}"},
+        }
+    ]
+    result = validate_flow_config(
+        steps=steps,
+        input_schema={"fields": []},
+        outputs=[],
+        templates=TEMPLATES,
+    )
+    assert not result["ok"]
+    assert any("循环变量" in e for e in result["errors"]), result["errors"]
+
+
+def test_loop_var_in_loop_step_ok() -> None:
+    """循环步骤里用 index 是对的。"""
+    steps = [
+        {
+            "id": "shots",
+            "type": "repeat",
+            "title": "生成镜头",
+            "template_id": "t1",
+            "count": 3,
+            "params": {"prompt": "第 {{ index }} 个， 共 {{ total }} 个"},
+        }
+    ]
+    result = validate_flow_config(
+        steps=steps,
+        input_schema={"fields": []},
+        outputs=[],
+        templates=TEMPLATES,
+    )
+    assert result["ok"], result["errors"]
+
+
 def main() -> int:
     tests = [
         test_step_label_prefers_title,
@@ -261,6 +354,10 @@ def main() -> int:
         test_image_upload_alias_treated_as_file_field,
         test_file_field_can_take_upstream_output,
         test_non_file_field_still_rejects_upstream_output,
+        test_loop_with_list_source_accepts_zero_count,
+        test_loop_zero_count_without_list_source_errors,
+        test_loop_var_in_non_loop_step_errors,
+        test_loop_var_in_loop_step_ok,
     ]
     failures: list[str] = []
     for test in tests:

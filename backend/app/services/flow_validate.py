@@ -11,9 +11,15 @@
 还是顺序的，但分层结果一并返回 —— 编排界面要显示「第几步」，
 将来并行时执行器直接用这个分层，不用重新算。
 """
+import re
+
 from app.models.models import Template
 from app.services.field_types import is_file_field, normalized_field_map
-from app.services.flow_expr import collect_refs
+from app.services.flow_expr import collect_base_refs, collect_refs
+
+
+# 循环步骤里才有的变量
+_LOOP_VARS = {"index", "total", "item"}
 
 
 def _field_map(input_schema) -> dict:
@@ -27,6 +33,16 @@ def _field_map(input_schema) -> dict:
 
 def _input_field_names(input_schema) -> set[str]:
     return set(_field_map(input_schema))
+
+
+def _has_list_source(step: dict) -> bool:
+    """这一步的参数量引了「列表[序号]」吗 —— 那种情况下次数由列表长度决定。"""
+    for expr in (step.get("params") or {}).values():
+        if not isinstance(expr, str):
+            continue
+        if re.search(r"input\.[A-Za-z_][A-Za-z0-9_]*\[[A-Za-z_][A-Za-z0-9_]*\]", expr):
+            return True
+    return False
 
 
 def _refs_upstream(expr) -> bool:
@@ -111,11 +127,13 @@ def validate_flow_config(
         sid = str(step.get("id") or f"step{index + 1}")
         label = step_label(steps, sid)
         step_type = step.get("type") or "template"
-        if step_type != "template":
+        if step_type == "flow":
             warnings.append(
-                f"{label}的类型是 {step_type}，第一刀只支持 template"
-                "（子流程与循环还没实现）"
+                f"{label}是子流程 —— 还没实现，先按普通步骤跳过"
             )
+            continue
+        if step_type not in ("template", "repeat"):
+            errors.append(f"{label}的类型 {step_type} 不认识")
             continue
 
         template_id = str(step.get("template_id") or "")
@@ -152,14 +170,22 @@ def validate_flow_config(
                     "（只有图片/文件类型的字段能接）"
                 )
 
-            for ref in collect_refs(expr):
+            for ref in collect_base_refs(expr):
                 if ref.startswith("input."):
                     name = ref.split(".", 1)[1]
                     if name not in input_names:
                         errors.append(
                             f"{label}引用了流程输入「{name}」，但流程输入里没有这个字段"
                         )
-                elif ref.startswith("steps."):
+                elif ref in _LOOP_VARS:
+                    # index / total / item 只在循环步骤里才有意义
+                    if step_type != "repeat":
+                        errors.append(
+                            f"{label}用了循环变量「{ref}」，但它不是循环步骤"
+                            "（只有「循环」步骤才能用 index / total / item）"
+                        )
+            for ref in collect_refs(expr):
+                if ref.startswith("steps."):
                     parts = ref.split(".")
                     if len(parts) < 3 or parts[2] != "outputs":
                         warnings.append(
@@ -185,6 +211,33 @@ def validate_flow_config(
                                     f"{label}引用了后面的{step_label(steps, upstream)}"
                                     "（只能引用前面的步骤 —— 顺序执行下拿不到还没跑的产物）"
                                 )
+
+    # ── 循环次数 ──
+    for step in steps:
+        if (step.get("type") or "template") != "repeat":
+            continue
+        label = step_label(steps, str(step.get("id") or ""))
+        count_expr = str(step.get("count_expr") or "").strip()
+        if count_expr:
+            for ref in collect_base_refs(count_expr):
+                if ref.startswith("input."):
+                    name = ref.split(".", 1)[1]
+                    if name not in input_names:
+                        errors.append(
+                            f"{label}的循环次数引用了流程输入「{name}」，"
+                            "但流程输入里没有这个字段"
+                        )
+        else:
+            count = step.get("count")
+            # count = 0 的含义是「由列表长度决定」—— 循环的默认用法，
+            # 不该报错（列表长度要等运行时才知道）。
+            if not isinstance(count, int) or count < 0:
+                errors.append(f"{label}的循环次数不能是负数")
+            elif count == 0 and not _has_list_source(step):
+                errors.append(
+                    f"{label}的循环次数是 0，但没找到列表来源"
+                    "（填具体次数，或在参数里引用「列表[序号]」来按列表长度跑）"
+                )
 
     # ── 输出声明 ──
     for out in outputs:
