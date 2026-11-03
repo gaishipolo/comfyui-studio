@@ -3,7 +3,16 @@ import { useState, useEffect, useRef } from 'react'
 import type { Asset, Template, TemplateField } from '../types'
 import { getAssetThumbUrl, getAssetUrl, uploadFromAsset, uploadInput } from '../api/client'
 import AssetPickerModal from './AssetPickerModal'
-import { missingRequiredList, missingRequiredUpload, normalizeBatchCount } from './uiBehavior'
+import {
+  DEFAULT_RANDOM_MAX,
+  RANDOM_SENTINEL,
+  initialRandomValue,
+  missingRequiredList,
+  missingRequiredUpload,
+  normalizeBatchCount,
+  randomFieldInputMin,
+  randomInt,
+} from './uiBehavior'
 import AuthMedia from './AuthMedia'
 import { completeUpload } from './uploadTransaction'
 import { alertDialog } from './dialog'
@@ -40,7 +49,20 @@ const initialFieldValue = (
   initialValues?: Record<string, unknown>,
 ): unknown => {
   const prefill = initialValues?.[field.name]
-  return prefill !== undefined && prefill !== null ? prefill : (field.default ?? '')
+  const hasPrefill = prefill !== undefined && prefill !== null
+  // 随机数字段：先解析预填/默认值（存量模板里常是字符串 "-1"），解析不出来
+  // 才现取一个 —— 保证「打开表单就有值、且每次不一样」。不要放进 useEffect，
+  // 那样首帧是空值，用户手快点提交会发空参数。
+  if (field.type === 'random_number') {
+    return initialRandomValue(
+      hasPrefill ? prefill : field.default,
+      field.min ?? 0,
+      field.max ?? DEFAULT_RANDOM_MAX,
+    )
+  }
+  if (hasPrefill) return prefill
+  if (field.default !== undefined && field.default !== null) return field.default
+  return ''
 }
 
 const initialFilePreviews = (
@@ -637,10 +659,50 @@ export default function DynamicForm({ template, onSubmit, submitting, initialVal
             className="field"
             placeholder={field.placeholder || `请输入${field.label}`}
             value={String(value ?? '')}
+            min={field.min}
+            max={field.max}
             onChange={(e) => setValue(field.name, e.target.value ? Number(e.target.value) : '')}
             required={field.required}
           />
         )
+      case 'random_number': {
+        // 数字输入 + 重抽按钮。值始终是可见的具体数字 —— 不做「提交时偷偷随机」，
+        // 否则同一个任务重跑会得到不同结果，用户无法复现。
+        // 想每次都不一样就把值填成 -1（RANDOM_SENTINEL）：后端在提交时展开，
+        // 批量生成时每个任务各取一个，落库的是展开后的真实值。
+        const lo = field.min ?? 0
+        const hi = field.max ?? DEFAULT_RANDOM_MAX
+        return (
+          <>
+            <div className="flex items-center gap-xs">
+              <input
+                id={id}
+                type="number"
+                className="field"
+                placeholder={field.placeholder || `请输入${field.label}`}
+                value={String(value ?? '')}
+                min={randomFieldInputMin(field.min)}
+                max={hi}
+                onChange={(e) => setValue(field.name, e.target.value ? Number(e.target.value) : '')}
+                required={field.required}
+              />
+              <button
+                type="button"
+                className="btn shrink-0"
+                onClick={() => setValue(field.name, randomInt(lo, hi))}
+                title={`重新取一个 ${lo} ~ ${hi} 的随机整数`}
+                aria-label={`重新生成${field.label}的随机数`}
+              >
+                随机
+              </button>
+            </div>
+            <p className="mt-2xs text-xs text-muted">
+              填 <code>{RANDOM_SENTINEL}</code> ＝ 每次生成自动换一个（
+              {lo} ~ {hi}），批量时每张图各不相同
+            </p>
+          </>
+        )
+      }
       case 'select':
         return (
           <select

@@ -93,7 +93,14 @@ async def scenario() -> None:
                                     "label": "提示词",
                                     "type": "textarea",
                                     "required": True,
-                                }
+                                },
+                                {
+                                    "name": "seed",
+                                    "label": "种子",
+                                    "type": "random_number",
+                                    "min": 0,
+                                    "max": 1000,
+                                },
                             ]
                         },
                         "engine": "comfyui",
@@ -165,6 +172,29 @@ async def scenario() -> None:
                 assert response.headers["content-type"].startswith("application/json"), (
                     response.headers.get("content-type")
                 )
+
+                # ⑪ 随机数字段填 -1：提交时逐任务展开成真实种子。
+                # 批量 3 个必须各不同，否则「随机」等于复制；落库的也不能
+                # 还是 -1，否则任务详情看不到实际用了什么、事后也复现不了。
+                response = await client.post(
+                    "/api/tasks",
+                    headers=headers,
+                    json={
+                        "template_id": template_id,
+                        "params": {"prompt": "一只猫", "seed": -1},
+                        "batch_count": 3,
+                    },
+                )
+                assert response.status_code == 200, response.text
+                batch = response.json()
+                assert len(batch) == 3, batch
+                seeds = [item["params"]["seed"] for item in batch]
+                assert all(isinstance(s, int) and 0 <= s <= 1000 for s in seeds), seeds
+                assert len(set(seeds)) == 3, f"批量任务复用了同一个种子: {seeds}"
+
+                response = await client.get(f"/api/tasks/{batch[0]['id']}", headers=headers)
+                assert response.status_code == 200, response.text
+                assert response.json()["params"]["seed"] == seeds[0], response.text
         finally:
             tasks_api.spawn_task = original_spawn
             task_service.async_session = original_session

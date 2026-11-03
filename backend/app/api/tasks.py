@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.models import Task, Template, Asset, User
+from app.quota import ensure_quota
 from app.schemas.schemas import TaskCreate, TaskResponse, AssetResponse
 from app.services.task_service import (
     TaskService,
@@ -19,6 +20,7 @@ from app.services.task_service import (
     spawn_task,
     _running_tasks,
 )
+from app.services.random_fields import resolve_random_fields
 from app.auth import get_current_user
 from app.thumbs import (
     cleanup_asset_files,
@@ -48,12 +50,18 @@ async def submit_tasks(
     if not template or not template.is_active:
         raise HTTPException(status_code=404, detail="Template not found or inactive")
 
+    # 配额准入：产物多大要等引擎跑完才知道，这里只能判断「当前是否已超限」。
+    # 不在落盘时按大小拦截 —— 用户白等几分钟换一个失败，比多占几百 MB 更糟。
+    await ensure_quota(db, user, 0)
+
     batch_id = uuid.uuid4().hex
     tasks = []
     for _ in range(data.batch_count):
+        # random_number 字段填 -1 = 「每次生成自动换一个」：逐任务展开，
+        # 批量 N 张各用不同种子；展开后的真实值随 params 落库，便于复现
         task = await TaskService.create_task(
-            db, data.template_id, data.params, batch_id,
-            created_by=user.id, commit=False,
+            db, data.template_id, resolve_random_fields(template.input_schema, data.params),
+            batch_id, created_by=user.id, commit=False,
         )
         tasks.append(task)
     await db.commit()  # 批量提交统一一次 commit
@@ -120,7 +128,9 @@ async def get_task_assets(
     task = await db.get(Task, task_id)
     if not task or not can_view_task(user, task.created_by):
         raise HTTPException(status_code=404, detail="Task not found")
-    result = await db.execute(select(Asset).where(Asset.task_id == task_id))
+    result = await db.execute(
+        select(Asset).where(Asset.task_id == task_id, Asset.deleted_at.is_(None))
+    )
     assets = result.scalars().all()
     # 归属读素材自己的 owner_id（写入时已按 task.created_by 落好），
     # 不再假定「任务提交人 = 素材作者」
