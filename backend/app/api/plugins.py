@@ -25,12 +25,16 @@ from app.engines.plugin_loader import (
     load_plugin_file,
 )
 from app.models.models import EnginePlugin, User
+from app.upload_rules import read_upload_bounded
 
 router = APIRouter(prefix="/api/plugins", tags=["plugins"])
 
 # 内置引擎：没有 DB 记录、没有代码文件、不可删除/停用。
 # 只有 ComfyUI —— 其他引擎一律走插件机制。
 BUILTIN_ENGINE_NAMES: tuple[str, ...] = ("comfyui",)
+
+# 插件源码上限。一个 Provider 就是一个 .py，512KB 已经远超正常体量
+_PLUGIN_MAX_BYTES = 512 * 1024
 
 _HEALTH_CHECK_TIMEOUT_SECONDS = 15.0
 
@@ -110,9 +114,13 @@ async def upload_plugin(
     if not (file.filename or "").endswith(".py"):
         raise HTTPException(status_code=400, detail="只接受 .py 文件")
 
-    code = await file.read()
-    if len(code) > 512 * 1024:
+    # 先看声明的体积再读：File(...) 已经落过盘，但代码仍走分块读 + 即时封顶，
+    # 避免「先 read() 再判 512KB」这种先吃满内存再说太大的顺序
+    if (file.size or 0) > _PLUGIN_MAX_BYTES:
         raise HTTPException(status_code=400, detail="插件文件过大（上限 512KB）")
+    code = await read_upload_bounded(
+        file, {"max": _PLUGIN_MAX_BYTES, "label": "插件文件"}
+    )
 
     PLUGIN_DIR.mkdir(parents=True, exist_ok=True)
     tmp_path = PLUGIN_DIR / f"_upload_{hashlib.sha256(code).hexdigest()[:12]}.py"

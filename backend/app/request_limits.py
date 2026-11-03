@@ -18,6 +18,14 @@ _UPLOAD_RAW_LIMITS = {
     "video": 200 * MiB + _MULTIPART_OVERHEAD,
 }
 _BATCH_JSON_RAW_LIMIT = 64 * 1024
+# JSON 体也要封顶。不封的话认证用户发一个超大 JSON 就能把整个请求吃进内存
+# （`/api/tasks` 的 params、`/api/templates/import` 的内嵌工作流都没有天然上限）。
+_JSON_BODY_LIMITS = {
+    # 一次最多 32 个任务，params 里是短文本 + 文件名，1MB 已经很宽松
+    "/api/tasks": 1 * MiB,
+    # 导入包里内嵌整个 ComfyUI 工作流，节点多的能有几 MB
+    "/api/templates/import": 32 * MiB,
+}
 _SPOOL_MEMORY_LIMIT = 1 * MiB
 _REPLAY_CHUNK_SIZE = 1 * MiB
 
@@ -31,6 +39,9 @@ def _raw_limit(scope: dict) -> int | None:
         return None
 
     path = scope.get("path")
+    json_limit = _JSON_BODY_LIMITS.get(path)
+    if json_limit is not None:
+        return json_limit
     if path == "/api/assets/batch-download":
         return _BATCH_JSON_RAW_LIMIT
     # /prepare 是现行批量下载入口（生成 ZIP + 票据），body 是 asset_ids JSON 数组，

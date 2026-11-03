@@ -8,7 +8,10 @@
 设计取舍：
 - `collect_issues` 只接收参数、不读全局 settings —— 单测能直接构造各种坏配置。
 - 检查项本身不做副作用（除了写一个临时探针文件再删掉），可以反复调用。
-- development 环境一律降级为 warning：本地开发不该被生产要求卡住。
+- development 环境默认降级为 warning：本地开发不该被生产要求卡住。
+  例外是「应用根本跑不起来」的两项（存储目录 / SQLite 目录不可写）——它们
+  直接 append `error`，development 下也拒绝启动：目录不可写时写素材、写库
+  全会失败，放行只会把问题推到运行期。
 """
 from __future__ import annotations
 
