@@ -15,7 +15,9 @@ import { formatDateTime } from '../time'
 const statusConfig: Record<string, { label: string; tone: string }> = {
   pending: { label: '排队中', tone: 'neutral' },
   running: { label: '生成中', tone: 'accent' },
-  done: { label: '已完成', tone: 'success' },
+  // 完成态用中性色：它是**最不需要被注意**的状态，而一屏里它出现最多。
+  // 彩色留给「要你处理」的（失败、超额、离线）和「正在进行」的 —— 见下面 error/accent
+  done: { label: '已完成', tone: 'neutral' },
   error: { label: '失败', tone: 'error' },
   cancelled: { label: '已取消', tone: 'neutral' },
 }
@@ -351,7 +353,8 @@ export default function TaskPanel({ user, onReuseTask }: { user: User; onReuseTa
       ) : (
         <div className="overflow-hidden rounded-md border border-rule bg-paper shadow-xs">
           <div className="overflow-x-auto">
-          <table className="table">
+          {/* table-dense：台账类表格，行高比表单表格再收一档 —— 50 条一屏能少滚一段 */}
+          <table className="table table-dense">
             <caption className="visually-hidden">生成任务</caption>
             <thead>
               <tr>
@@ -436,26 +439,34 @@ export default function TaskPanel({ user, onReuseTask }: { user: User; onReuseTa
                         {formatDateTime(task.created_at)}
                       </td>
                       <td className="num">
-                        <div className="flex items-center justify-end gap-xs">
-                          <span
-                            aria-hidden="true"
-                            className="h-1.5 w-14 overflow-hidden rounded-pill bg-paper-3"
-                          >
+                        {task.status === 'done' ? (
+                          // 完成态不再画进度条：状态「已完成」+ 满格条 + 100% 是三重复述。
+                          // 50 行全是满条时，真正在跑的那几条就淹没在绿色里了
+                          <span className="text-sm text-muted" title="已完成">
+                            —
+                          </span>
+                        ) : (
+                          <div className="flex items-center justify-end gap-xs">
                             <span
-                              className={`block h-full rounded-pill ${
-                                task.status === 'error'
-                                  ? 'bg-error'
-                                  : task.status === 'cancelled'
-                                    ? 'bg-muted'
-                                    : 'bg-accent'
-                              }`}
-                              style={{ width: `${Math.max(0, Math.min(100, task.progress))}%` }}
-                            />
-                          </span>
-                          <span className="w-9 text-right text-sm text-ink-2">
-                            {task.progress}%
-                          </span>
-                        </div>
+                              aria-hidden="true"
+                              className="h-1.5 w-14 overflow-hidden rounded-pill bg-paper-3"
+                            >
+                              <span
+                                className={`block h-full rounded-pill ${
+                                  task.status === 'error'
+                                    ? 'bg-error'
+                                    : task.status === 'cancelled'
+                                      ? 'bg-muted'
+                                      : 'bg-accent'
+                                }`}
+                                style={{ width: `${Math.max(0, Math.min(100, task.progress))}%` }}
+                              />
+                            </span>
+                            <span className="w-9 text-right text-sm text-ink-2">
+                              {task.progress}%
+                            </span>
+                          </div>
+                        )}
                       </td>
                       <td>
                         <div className="flex items-center gap-2xs">

@@ -36,7 +36,7 @@ export default function Login({ onLogin }: Props) {
           <div className="mb-lg flex flex-col items-center text-center">
             <BrandLogo className="mb-md h-14 w-auto text-ink" />
             <h1 className="font-display text-xl font-semibold">雨范AI工作台</h1>
-            <p className="mt-2xs text-sm text-muted">登录以继续使用</p>
+            <p className="mt-2xs text-sm text-muted">AI 生成集成工作台</p>
           </div>
 
           <form

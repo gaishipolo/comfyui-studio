@@ -43,7 +43,8 @@ function writeSessionIds(ids: string[]) {
 const statusConfig: Record<string, { label: string; tone: string }> = {
   pending: { label: '排队中', tone: 'neutral' },
   running: { label: '生成中', tone: 'accent' },
-  done: { label: '已完成', tone: 'success' },
+  // 与任务页保持一致：完成态不抢颜色，彩色留给失败与进行中
+  done: { label: '已完成', tone: 'neutral' },
   error: { label: '失败', tone: 'error' },
   cancelled: { label: '已取消', tone: 'neutral' },
 }
@@ -194,9 +195,12 @@ export default function GenerateWorkspace({
               />
             </div>
           ) : (
-            <div className="empty h-full min-h-[18rem]">
-              <span className="empty-icon" aria-hidden="true">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+            /* 未选场景时的占位。左侧场景列表很高（一屏放不下要滚），右栏原本只有
+               一行小字浮在 400 多像素的空白里，像是没加载完。这里把空态撑开，
+               顺手把「怎么用」讲清楚 —— 新用户第一次进来看到的就是这一屏。 */
+            <div className="empty h-full min-h-[24rem]">
+              <span className="empty-icon h-16 w-16" aria-hidden="true">
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none">
                   <path
                     d="M4 5h16v14H4zM4 15l4.5-4.5L13 15l3-3 4 4"
                     stroke="currentColor"
@@ -208,6 +212,11 @@ export default function GenerateWorkspace({
               </span>
               <p className="empty-title">请先选择生成场景</p>
               <p className="empty-hint">左侧选中一个场景后，这里会出现对应的输入表单</p>
+              <ol className="mt-sm grid max-w-[34ch] gap-xs text-left text-sm text-muted">
+                <li>左侧场景决定用哪个引擎、哪套工作流</li>
+                <li>随机种子填 -1，每次提交都会自动换一个</li>
+                <li>提交后的进度与结果在下方「本会话任务」</li>
+              </ol>
             </div>
           )}
         </div>

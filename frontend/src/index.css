@@ -449,6 +449,18 @@
   .table .btn,
   .table .btn-quiet,
   .table .btn-danger-quiet { padding-inline: var(--space-xs); }
+  /* 表格里的「删除」默认中性灰，悬停才亮红。
+     任务列表一屏 50 行，每行一个红字 = 整页都在喊危险，真正要处理的那条反而看不出。
+     危险语义交给悬停态和二次确认，不靠常态着色。
+     注意特异性：.table .btn-danger-quiet 与 .btn-danger-quiet:hover 同为 (0,2,0)，
+     所以悬停态必须再补一条 (0,3,0)，否则会被上面的灰字压掉。 */
+  .table .btn-danger-quiet { color: var(--color-muted); }
+  .table .btn-danger-quiet:hover,
+  .table .btn-danger-quiet:active { color: var(--color-accent-ink); }
+
+  /* 台账型表格（任务列表）：行高比表单表格再收一档 —— 50 条一屏能少滚一段。
+     只收纵向，横向内边距不变，列对齐与别的表格保持一致 */
+  .table.table-dense td { padding-block: var(--space-2xs); }
 
   /* ── The four states a data region owes ───────────────────────── */
 

@@ -45,12 +45,12 @@ const KIND_TABS: { value: KindFilter; label: string }[] = [
  *  标签栏只保留真正的业务分类，这几个由类型分栏统一管。 */
 const FILE_KIND_TAGS = new Set(['image', 'video', 'audio'])
 
-/** 按 MIME 大类给素材一个统一的中文格式角标（图片/视频/音频）。
- *  三类都给一枚小角标，保持一致；标签里的 image/video/audio 已被过滤，这里补格式标识不重复。 */
+/** 按 MIME 大类给素材一枚中文格式角标。
+ *  只标视频/音频 —— 素材库里绝大多数是图片，每张都盖一个「图片」等于没有信息，
+ *  还会压住画面左上/右上的内容；真正需要提示的是「这块不是静态图」。 */
 const formatLabel = (mime: string): string | null => {
   if (mime.startsWith('video/')) return '视频'
   if (mime.startsWith('audio/')) return '音频'
-  if (mime.startsWith('image/')) return '图片'
   return null
 }
 
@@ -453,6 +453,10 @@ export default function AssetGallery({ templates, user }: Props) {
 
   /** 配额用尽：上传和提交任务都会被后端 403，界面提前置灰并说明原因 */
   const quotaFull = !!quota && !quota.unlimited && quota.used_bytes >= quota.quota_bytes
+  /** 不限配额时「已用」只是一句数字，收进副标题就够 —— 原来它独占一整条卡片，
+   *  视觉上像一根永远空着的进度条，还白占 80px 版面 */
+  const quotaInline =
+    quota?.unlimited && quota.used_bytes > 0 ? ` · 已用 ${formatSize(quota.used_bytes)}` : ''
 
   return (
     <section>
@@ -468,6 +472,7 @@ export default function AssetGallery({ templates, user }: Props) {
               : assets.length === 0
                 ? '生成产物与上传的文件都会收在这里'
                 : `共 ${assets.length} 个素材`}
+            {quotaInline}
           </p>
         </div>
         <div className="flex items-center gap-xs">
@@ -509,39 +514,34 @@ export default function AssetGallery({ templates, user }: Props) {
       </div>
 
       {/* 配额条。注意「已用」包含回收站 —— 软删除不动磁盘文件，删了不会变小；
-          只有彻底删除才释放。这也是为什么超限时的提示要指向回收站。 */}
-      {quota && (
+          只有彻底删除才释放。这也是为什么超限时的提示要指向回收站。
+          不限配额时不渲染这张卡片（数字已并入副标题），省掉一整条空荡荡的版面。 */}
+      {quota && !quota.unlimited && (
         <div className="panel mb-md px-md py-sm">
           <div className="flex flex-wrap items-baseline justify-between gap-xs text-xs">
             <span className="text-muted">
-              {quota.unlimited
-                ? `已用 ${formatSize(quota.used_bytes)} · 不限配额`
-                : `已用 ${formatSize(quota.used_bytes)} / ${formatSize(quota.quota_bytes)}`}
+              已用 {formatSize(quota.used_bytes)} / {formatSize(quota.quota_bytes)}
             </span>
-            {!quota.unlimited && (
-              <span className={quotaFull ? 'font-medium text-error' : 'text-muted'}>
-                {quota.percent ?? 0}%
-                {quotaFull ? ' · 已满，上传与提交任务会被拒绝' : ''}
-              </span>
-            )}
+            <span className={quotaFull ? 'font-medium text-error' : 'text-muted'}>
+              {quota.percent ?? 0}%
+              {quotaFull ? ' · 已满，上传与提交任务会被拒绝' : ''}
+            </span>
           </div>
-          {!quota.unlimited && (
+          <div
+            className="mt-2xs h-1.5 overflow-hidden rounded-pill bg-paper-2"
+            role="progressbar"
+            aria-label="存储配额使用率"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={Math.min(100, quota.percent ?? 0)}
+          >
             <div
-              className="mt-2xs h-1.5 overflow-hidden rounded-pill bg-paper-2"
-              role="progressbar"
-              aria-label="存储配额使用率"
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={Math.min(100, quota.percent ?? 0)}
-            >
-              <div
-                className={`h-full rounded-pill transition-[width] duration-short ${
-                  quotaFull ? 'bg-error' : 'bg-accent'
-                }`}
-                style={{ width: `${Math.min(100, Math.max(0, quota.percent ?? 0))}%` }}
-              />
-            </div>
-          )}
+              className={`h-full rounded-pill transition-[width] duration-short ${
+                quotaFull ? 'bg-error' : 'bg-accent'
+              }`}
+              style={{ width: `${Math.min(100, Math.max(0, quota.percent ?? 0))}%` }}
+            />
+          </div>
         </div>
       )}
 

@@ -199,11 +199,20 @@ export default function UsagePanel({ user }: ModuleProps) {
                     </tr>
                   </thead>
                   <tbody>
-                    {data.by_user.map((u) => (
+                    {data.by_user.map((u) => {
+                      const name = u.display_name || u.username
+                      return (
                       <tr key={u.user_id || '__none__'}>
                         <td>
-                          {u.display_name || u.username}
-                          {u.role === 'admin' && <span className="ml-2xs chip">管理员</span>}
+                          <span className="text-ink">{name}</span>
+                          {/* 显示名和登录名不同才补一行 —— 管理员账号两者常都是「管理员」，
+                              原样印两遍等于同一句话说了两次 */}
+                          {u.username && u.username !== name && (
+                            <span className="ml-2xs text-xs text-muted">{u.username}</span>
+                          )}
+                          {u.role === 'admin' && name !== '管理员' && (
+                            <span className="ml-2xs chip">管理员</span>
+                          )}
                         </td>
                         <td className="num">{u.task_total}</td>
                         <td className="num">{u.task_done}</td>
@@ -213,7 +222,8 @@ export default function UsagePanel({ user }: ModuleProps) {
                         <td className="num">{formatSize(u.storage_bytes)}</td>
                         <td className="num">{formatDuration(u.avg_duration_seconds)}</td>
                       </tr>
-                    ))}
+                      )
+                    })}
                     {/* 合计行：直接展示后端算好的总数，不做前端二次相加 */}
                     <tr className="bg-paper-2 hover:bg-paper-2">
                       <td>

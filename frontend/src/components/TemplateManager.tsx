@@ -60,6 +60,20 @@ const categoryLabel: Record<string, string> = {
   text: '文本',
 }
 
+/** 能力 kind 的中文名兜底表。
+ *
+ *  首选插件自己声明的 label（同一 kind 各家措辞可能不同，比如 image_compose
+ *  有的叫「多图合成」有的叫「多图参考」），这里只兜住两种意外：插件没装/已删除，
+ *  或者早期存进来的 kind 已经不在声明里。否则管理页会直接把 text_to_image
+ *  这种 token 摆给用户看。 */
+const CAPABILITY_FALLBACK: Record<string, string> = {
+  text_to_image: '文生图',
+  image_to_image: '图生图',
+  image_compose: '多图合成',
+  text_to_video: '文生视频',
+  image_to_video: '图生视频',
+}
+
 export default function TemplateManager({ onTemplatesChange }: Props) {
   const [templates, setTemplates] = useState<Template[]>([])
   const [plugins, setPlugins] = useState<EnginePluginInfo[]>([])
@@ -76,6 +90,12 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
   const [inventoryError, setInventoryError] = useState('')
   /** 工作流解析的请求序号：快速切换模板时只认最后一次响应，防止串台 */
   const inventoryRequests = useRef(createLatestRequestGate())
+
+  /** 能力 kind → 展示名：插件声明优先，其次兜底表，最后才原样显示 token */
+  const capabilityLabel = (engine: string, kind: string) =>
+    plugins.find((p) => p.name === engine)?.capabilities[kind]?.label ??
+    CAPABILITY_FALLBACK[kind] ??
+    kind
 
   // ── 导出 / 导入 ──────────────────────────
 
@@ -1022,14 +1042,20 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
                   <td>
                     <div className="flex flex-wrap items-center gap-xs">
                       <span className="font-display text-title text-ink">{template.name}</span>
-                      <span className="chip" data-tone={template.is_active ? 'success' : undefined}>
+                      {/* 启用是常态，不抢颜色；停用才是需要看一眼的例外 —— 反向着色后
+                          一屏 9 个绿标消失，扫表时找「哪条停用了」反而更快 */}
+                      <span className="chip" data-tone={template.is_active ? undefined : 'warning'}>
                         {template.is_active ? '已启用' : '已停用'}
                       </span>
                       <span className="chip">{categoryLabel[template.category] ?? template.category}</span>
                       <span className="chip">
                         {plugins.find((p) => p.name === template.engine)?.label || template.engine}
                       </span>
-                      {template.capability && <span className="chip">{template.capability}</span>}
+                      {template.capability && (
+                        <span className="chip">
+                          {capabilityLabel(template.engine, template.capability)}
+                        </span>
+                      )}
                     </div>
                     {template.description && (
                       <p className="mt-2xs text-sm text-muted">{template.description}</p>

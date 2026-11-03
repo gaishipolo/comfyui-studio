@@ -214,12 +214,12 @@ export default function App() {
           <div className="flex items-center gap-sm">
             {/* 品牌标记：YF 交织字母。图形本身就是识别物，不再套彩色方块压住它 */}
             <BrandLogo className="h-9 w-auto shrink-0 text-ink" />
-            <div className="min-w-0">
-              <h1 className="font-display text-xl font-semibold leading-tight tracking-tight">
-               雨范AI工作台
-              </h1>
-              <p className="text-xs text-muted">AI 生成集成工作台</p>
-            </div>
+            {/* 只留名称。原来下面还有一行「AI 生成集成工作台」，和「雨范AI工作台」
+                说的是同一件事，却把顶栏撑到 118px（900px 屏的 13%）。
+                那句定位挪去了登录页 —— 只有第一次进来的人需要知道「这是什么」。 */}
+            <h1 className="font-display text-xl font-semibold leading-tight tracking-tight">
+              雨范AI工作台
+            </h1>
           </div>
 
           <div className="flex items-center gap-md">

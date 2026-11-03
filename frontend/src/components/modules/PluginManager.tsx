@@ -6,9 +6,9 @@
  *  安全提示常驻页面：上传 = 服务端执行任意代码，只给 admin 且留审计。
  *  机密（api_key 等）填在「配置」里存 DB，不进代码文件，换 key 不用重传。 */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { EnginePluginInfo, FieldSpec } from '../../types'
+import type { EngineInfo, EnginePluginInfo, FieldSpec } from '../../types'
 import {
-  listPlugins, uploadPlugin, savePluginConfig, setPluginEnabled, deletePlugin, testPlugin,
+  listPlugins, uploadPlugin, savePluginConfig, setPluginEnabled, deletePlugin, testPlugin, getEngines,
 } from '../../api/client'
 import type { ModuleProps } from '../../modules/registry'
 import { confirmDialog } from '../dialog'
@@ -16,8 +16,41 @@ import { confirmDialog } from '../dialog'
 /** 配置项名含 key/secret/token 的用密码框，别明文晃 */
 const isSecretField = (name: string) => /key|secret|token|password/i.test(name)
 
+/** 一个引擎「现在能不能用」。
+ *
+ *  这张列表最该先回答的就是这件事，所以按严重度取第一条命中的：
+ *  加载失败 > 停用 > 连不上 > 在线 > 状态未知。
+ *  语义与顶栏那颗状态 chip 保持一致（同一份 /api/engines 数据），
+ *  颜色只用来标记「需要处理」的状态，正常态保持中性 —— 一屏全是绿灯反而没有重点。 */
+const engineState = (
+  p: EnginePluginInfo,
+  status?: EngineInfo['status'],
+): { label: string; tone?: string; dot: string; hint: string } => {
+  if (p.last_error) {
+    return { label: '加载失败', tone: 'error', dot: 'bg-error', hint: p.last_error }
+  }
+  if (!p.enabled) {
+    return { label: '已停用', dot: 'bg-muted', hint: '停用后引用它的模板无法提交任务' }
+  }
+  if (status === 'connected') {
+    return { label: '在线', tone: 'success', dot: 'bg-success', hint: '健康检查通过' }
+  }
+  if (status === 'disconnected' || status === 'error') {
+    return {
+      label: status === 'error' ? '检查异常' : '连接失败',
+      tone: 'error',
+      dot: 'bg-error',
+      hint: '检查「配置」里的地址与密钥，或点「测试」看具体报错',
+    }
+  }
+  // unknown：插件没实现 health_check。它不是故障，只是没有答案
+  return { label: '已启用', dot: 'bg-muted', hint: '该引擎未提供健康检查，无法判断连通性' }
+}
+
 export default function PluginManager({ user }: ModuleProps) {
   const [plugins, setPlugins] = useState<EnginePluginInfo[]>([])
+  /** 引擎连通状态（与顶栏同一份数据）。拉不到就只显示启用/停用，不谎报在线 */
+  const [engines, setEngines] = useState<EngineInfo[] | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
@@ -31,6 +64,10 @@ export default function PluginManager({ user }: ModuleProps) {
   const load = useCallback(async () => {
     setLoading(true)
     setError('')
+    // 连通性要打一次真实健康检查，与列表并行；失败不当错误处理（插件列表照样能管）
+    getEngines()
+      .then(setEngines)
+      .catch(() => setEngines(null))
     try {
       setPlugins(await listPlugins())
     } catch (err) {
@@ -189,7 +226,9 @@ export default function PluginManager({ user }: ModuleProps) {
             <p className="empty-hint">上传引擎插件包后，这里会列出可用的生成引擎</p>
           </div>
         )}
-        {plugins.map((p) => (
+        {plugins.map((p) => {
+          const st = engineState(p, engines?.find((e) => e.name === p.name)?.status)
+          return (
           <article key={p.name} className="rounded-lg border border-tertiary p-md">
             <div className="flex flex-wrap items-center justify-between gap-sm">
               <div>
@@ -197,7 +236,10 @@ export default function PluginManager({ user }: ModuleProps) {
                   <h3 className="font-display text-base">{p.label}</h3>
                   <code className="text-sm text-muted">{p.name}</code>
                   {p.builtin && <span className="text-xs text-muted">内置</span>}
-                  {!p.enabled && <span className="text-xs text-warning">已停用</span>}
+                  <span className="chip" data-tone={st.tone} title={st.hint}>
+                    <span className={`h-1.5 w-1.5 rounded-pill ${st.dot}`} aria-hidden="true" />
+                    {st.label}
+                  </span>
                 </div>
                 <div className="mt-xs flex flex-wrap gap-xs">
                   {Object.values(p.capabilities).map((c) => (
@@ -205,8 +247,10 @@ export default function PluginManager({ user }: ModuleProps) {
                       {c.label}
                     </span>
                   ))}
+                  {/* 空的 capabilities 不等于「没加载好」：ComfyUI 这类工作流引擎本来就是
+                      按模板里配的字段走，不声明能力。别把它报成故障 */}
                   {Object.values(p.capabilities).length === 0 && (
-                    <span className="text-xs text-muted">（未加载 — 见下方报错）</span>
+                    <span className="text-xs text-muted">未声明能力 — 字段由模板自行配置</span>
                   )}
                 </div>
               </div>
@@ -280,7 +324,8 @@ export default function PluginManager({ user }: ModuleProps) {
               </div>
             )}
           </article>
-        ))}
+          )
+        })}
       </div>
     </section>
   )
