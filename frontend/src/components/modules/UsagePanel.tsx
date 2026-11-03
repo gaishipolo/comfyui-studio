@@ -12,7 +12,7 @@ import { useCallback, useEffect, useState } from 'react'
 import type { UsageResponse } from '../../types'
 import { getUsage } from '../../api/client'
 import type { ModuleProps } from '../../modules/registry'
-import { localMonthStart } from '../uiBehavior'
+import { localMonthStart, localMonthEnd } from '../uiBehavior'
 
 const formatSize = (bytes: number) =>
   bytes > 1024 * 1024 * 1024
@@ -98,7 +98,7 @@ export default function UsagePanel({ user }: ModuleProps) {
             className="btn"
             onClick={() => {
               setDateFrom(localMonthStart(-1))
-              setDateTo(localMonthStart(0))
+              setDateTo(localMonthEnd(-1))
             }}
           >
             上月

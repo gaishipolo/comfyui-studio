@@ -1,5 +1,5 @@
 /** 模板管理 — admin 专属：新建/编辑/启停模板 + 工作流上传 + 参数映射配置 */
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import type {
   Template, TemplateField, EnginePluginInfo, FieldSpec, TemplateOutputConfig,
   WorkflowInventory, WorkflowInput,
@@ -10,6 +10,7 @@ import {
   exportTemplate, importTemplate,
 } from '../api/client'
 import { applyTemplateEngine, normalizeTemplateEngineFields } from './templateFormState'
+import { createLatestRequestGate } from './listViewState'
 import { alertDialog, confirmDialog } from './dialog'
 import { notify, reportError } from '../notify'
 
@@ -73,6 +74,8 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
   const [inventory, setInventory] = useState<WorkflowInventory | null>(null)
   const [inventoryLoading, setInventoryLoading] = useState(false)
   const [inventoryError, setInventoryError] = useState('')
+  /** 工作流解析的请求序号：快速切换模板时只认最后一次响应，防止串台 */
+  const inventoryRequests = useRef(createLatestRequestGate())
 
   // ── 导出 / 导入 ──────────────────────────
 
@@ -151,16 +154,24 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
   // ── 工作流清单 ──────────────────────────
 
   const loadInventory = useCallback(async (filename: string) => {
+    // 请求序号：先点 A（解析慢）再点 B（解析快）时，A 的响应会后到并覆盖
+    // inventory —— 而此时编辑的是 B，下拉里列的却是 A 的节点。管理员照这些
+    // 选项配好的 param_mapping 会指向错误节点，后端只校验节点存在、查不出语义错。
+    const request = inventoryRequests.current.start()
     if (!filename) {
       setInventory(null)
       setInventoryError('')
+      setInventoryLoading(false)
       return
     }
     setInventoryLoading(true)
     setInventoryError('')
     try {
-      setInventory(await getWorkflowInventory(filename))
+      const data = await getWorkflowInventory(filename)
+      if (!inventoryRequests.current.isLatest(request)) return
+      setInventory(data)
     } catch (err) {
+      if (!inventoryRequests.current.isLatest(request)) return
       setInventory(null)
       const msg = err instanceof Error ? err.message : '工作流解析失败'
       // 这个接口回「Template not found」只有一种解释：请求落进了 GET /{template_id}，
@@ -171,7 +182,7 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
           : msg,
       )
     } finally {
-      setInventoryLoading(false)
+      if (inventoryRequests.current.isLatest(request)) setInventoryLoading(false)
     }
   }, [])
 
@@ -395,6 +406,15 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
       .map((s) => s.trim())
       .filter(Boolean)
       .map((s) => (/^-?\d+(\.\d+)?$/.test(s) ? Number(s) : s))
+
+  /** 数值输入框 → number | undefined。留空表示「不设这个边界」，
+   *  不能转成 0 —— 0 是合法边界（seed 下界就是 0） */
+  const toOptionalNumber = (raw: string): number | undefined => {
+    const text = raw.trim()
+    if (!text) return undefined
+    const value = Number(text)
+    return Number.isFinite(value) ? value : undefined
+  }
 
   // ── 参数映射编辑 ────────────────────────
 
@@ -746,6 +766,7 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
                           <option value="text">文本</option>
                           <option value="textarea">多行文本</option>
                           <option value="number">数字</option>
+                          <option value="random_number">随机数</option>
                           <option value="select">下拉</option>
                           <option value="file_upload">文件上传</option>
                         </select>
@@ -803,6 +824,35 @@ export default function TemplateManager({ onTemplatesChange }: Props) {
                           onChange={(e) => updateField(i, { placeholder: e.target.value || undefined })}
                         />
                       </label>
+                      {(field.type === 'number' || field.type === 'random_number') && (
+                        <>
+                          <label className="block w-24">
+                            <span className="field-label">最小值</span>
+                            <input
+                              className="field"
+                              type="number"
+                              placeholder="0"
+                              value={field.min ?? ''}
+                              onChange={(e) => updateField(i, { min: toOptionalNumber(e.target.value) })}
+                            />
+                          </label>
+                          <label className="block w-28">
+                            <span className="field-label">最大值</span>
+                            <input
+                              className="field"
+                              type="number"
+                              placeholder={field.type === 'random_number' ? '2147483647' : '不限'}
+                              value={field.max ?? ''}
+                              onChange={(e) => updateField(i, { max: toOptionalNumber(e.target.value) })}
+                            />
+                          </label>
+                          {field.type === 'random_number' && (
+                            <span className="self-end pb-xs text-xs text-muted">
+                              用户填 -1 ＝ 每次生成自动换一个
+                            </span>
+                          )}
+                        </>
+                      )}
                       {field.type === 'file_upload' && (
                         <label className="block w-28">
                           <span className="field-label">文件种类</span>

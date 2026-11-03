@@ -26,6 +26,9 @@ frontend/src-backup-*/
 .hallmark/
 .playwright-cli/
 
+# 工作区本地数据（记忆、临时文件），属于个人环境不入库
+.workbuddy/
+
 # 测试产物
 ComfyUI_temp*
 login.yaml

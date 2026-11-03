@@ -7,8 +7,12 @@ export interface TemplateField {
    * 控件类型（不是元素类型）。
    * image_upload 是历史名字，后端读取时已统一成 file_upload + accept=image，
    * 这里保留兼容，前端渲染两者走同一分支
+   *
+   * random_number = 数字输入 + 「随机」按钮，挂载时自动取一个随机整数
+   * （典型用途：seed）。值仍是普通数字，提交时按数字下发；填 -1 表示
+   * 「每次生成自动换一个」，由后端在提交时展开并回写真实值
    */
-  type: 'text' | 'textarea' | 'number' | 'select' | 'file_upload' | 'image_upload'
+  type: 'text' | 'textarea' | 'number' | 'select' | 'file_upload' | 'image_upload' | 'random_number'
   required: boolean
   placeholder?: string
   options?: (string | number | boolean)[]
@@ -18,6 +22,10 @@ export interface TemplateField {
   accept?: 'image' | 'audio' | 'video'
   /** 基数：true = 表单值是数组。**与控件类型正交**，任何类型都能是列表 */
   multiple?: boolean
+  /** 数值下界（number / random_number）。缺省 0 */
+  min?: number
+  /** 数值上界（number / random_number）。缺省 2147483647 */
+  max?: number
 }
 
 export interface Template {
@@ -84,6 +92,17 @@ export interface Asset {
   created_by?: string  // 归属人 id（assets.owner_id）
   creator_name?: string  // 归属人显示名（展示「来自谁」）
   created_at: string
+  /** 进回收站的时间；null / 缺省 = 正常素材。仅回收站接口会返回非空值 */
+  deleted_at?: string | null
+}
+
+/** 存储配额概览。`used_bytes` **含回收站** —— 软删除不动磁盘文件。
+ *  `quota_bytes=0` + `unlimited=true` 表示不限；此时 `percent` 为 null。 */
+export interface StorageQuota {
+  used_bytes: number
+  quota_bytes: number
+  unlimited: boolean
+  percent: number | null
 }
 
 export interface User {
@@ -92,6 +111,8 @@ export interface User {
   display_name: string
   role: 'admin' | 'member'
   is_active: boolean
+  /** 存储配额（字节），0 = 不限。仅对 member 生效，admin 豁免准入检查 */
+  storage_quota_bytes?: number
   created_at: string
 }
 

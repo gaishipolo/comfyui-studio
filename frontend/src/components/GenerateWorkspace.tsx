@@ -2,13 +2,14 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import type { GenerateDraft, Template, Task, Asset, User } from '../types'
 import {
-  submitTask, listTasks, getTaskAssets, getAssetUrl, getAssetThumbUrl, openAssetInNewTab,
+  submitTask, listTasks, getTask, getTaskAssets, getAssetUrl, getAssetThumbUrl, openAssetInNewTab,
 } from '../api/client'
 import FriendlyError from './FriendlyError'
 import TemplateGallery from './TemplateGallery'
 import DynamicForm from './DynamicForm'
 import AuthMedia from './AuthMedia'
 import { reportError } from '../notify'
+import { formatTimeOnly } from '../time'
 
 interface Props {
   templates: Template[]
@@ -90,8 +91,19 @@ export default function GenerateWorkspace({
       return
     }
     try {
-      const all = await listTasks()
+      const all = await listTasks(undefined, { limit: 200 })
       const byId = new Map(all.map((t) => [t.id, t]))
+      // 会话里的老任务可能已经掉出最近 200 条 —— 只按列表查会让它们凭空消失。
+      // 缺的按 id 单独补拉（单个 404 = 已被删除，忽略即可）。
+      const missing = ids.filter((id) => !byId.has(id))
+      if (missing.length > 0) {
+        const fetched = await Promise.all(
+          missing.map((id) => getTask(id).catch(() => null)),
+        )
+        for (const task of fetched) {
+          if (task) byId.set(task.id, task)
+        }
+      }
       // 按会话内的提交顺序排（新的在前），已删掉的任务自然缺席
       const tasks = ids.map((id) => byId.get(id)).filter((t): t is Task => Boolean(t))
       setSessionTasks(tasks)
@@ -245,7 +257,7 @@ export default function GenerateWorkspace({
                           {String(task.params.prompt ?? task.params.description ?? '生成任务').slice(0, 60)}
                         </span>
                         <span className="text-sm text-muted">
-                          {new Date(task.created_at).toLocaleTimeString('zh-CN')}
+                          {formatTimeOnly(task.created_at)}
                         </span>
                         <span className="num text-sm text-ink-2">{task.progress}%</span>
                         {/* 「改一改再跑」：带参回表单，比从头填一遍省事 */}

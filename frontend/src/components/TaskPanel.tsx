@@ -10,6 +10,7 @@ import AuthMedia from './AuthMedia'
 import { taskListViewState } from './listViewState'
 import { alertDialog, confirmDialog } from './dialog'
 import { reportError } from '../notify'
+import { formatDateTime } from '../time'
 
 const statusConfig: Record<string, { label: string; tone: string }> = {
   pending: { label: '排队中', tone: 'neutral' },
@@ -46,11 +47,20 @@ export default function TaskPanel({ user, onReuseTask }: { user: User; onReuseTa
   /** 异步确认框期间的同步重入守卫（state 要等下一次渲染才生效） */
   const batchDeleteBusy = useRef(false)
 
+  /** 后端默认只回 50 条（上限 200）。不显式传 limit 就等于静默截断：
+   *  超过 50 条后旧任务从页面上消失，用户以为被删了。 */
+  const PAGE_SIZE = 50
+  const MAX_LIMIT = 200
+  const [pageLimit, setPageLimit] = useState(PAGE_SIZE)
+  const [hasMore, setHasMore] = useState(false)
+  const [loadingMore, setLoadingMore] = useState(false)
+
   const refresh = useCallback(async () => {
     try {
-      const data = await listTasks()
+      const data = await listTasks(undefined, { limit: pageLimit })
       setTasks(data)
       setLoadFailed(false)
+      setHasMore(data.length >= pageLimit && pageLimit < MAX_LIMIT)
       // 轮询期间任务可能已被别处删掉 —— 失效 id 从选中集剔除，别让「删除 (N)」虚高
       setSelected((prev) => {
         const alive = new Set(data.map((t) => t.id))
@@ -60,12 +70,31 @@ export default function TaskPanel({ user, onReuseTask }: { user: User; onReuseTa
     } catch {
       setLoadFailed(true)
     }
-  }, [])
+  }, [pageLimit])
 
   // 初始加载
   useEffect(() => {
     refresh()
   }, [refresh])
+
+  /** 扩大窗口再拉一次。用「加大 limit 重取」而不是 append：
+   *  任务会在轮询中变状态，append 会留下过期的旧副本。 */
+  const loadMore = async () => {
+    if (loadingMore || !hasMore) return
+    const nextLimit = Math.min(pageLimit + PAGE_SIZE, MAX_LIMIT)
+    setLoadingMore(true)
+    try {
+      const data = await listTasks(undefined, { limit: nextLimit })
+      setTasks(data)
+      setPageLimit(nextLimit)
+      setHasMore(data.length >= nextLimit && nextLimit < MAX_LIMIT)
+      setLoadFailed(false)
+    } catch (err) {
+      reportError('加载更多任务失败', err)
+    } finally {
+      setLoadingMore(false)
+    }
+  }
 
   // 拉一次模板名（含停用，任务可能指向已停用的模板），建 id→name 映射
   useEffect(() => {
@@ -404,7 +433,7 @@ export default function TaskPanel({ user, onReuseTask }: { user: User; onReuseTa
                         </td>
                       )}
                       <td className="num whitespace-nowrap text-sm text-muted">
-                        {new Date(task.created_at).toLocaleString('zh-CN')}
+                        {formatDateTime(task.created_at)}
                       </td>
                       <td className="num">
                         <div className="flex items-center justify-end gap-xs">
@@ -565,6 +594,24 @@ export default function TaskPanel({ user, onReuseTask }: { user: User; onReuseTa
               })}
             </tbody>
           </table>
+          {(hasMore || pageLimit > PAGE_SIZE) && (
+            <div className="border-t border-rule px-md py-sm text-center">
+              {hasMore ? (
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={loadMore}
+                  disabled={loadingMore}
+                >
+                  {loadingMore ? '加载中…' : '加载更早的任务'}
+                </button>
+              ) : (
+                <span className="text-xs text-muted">
+                  已显示最近 {tasks.length} 条任务
+                </span>
+              )}
+            </div>
+          )}
           </div>
         </div>
       )}

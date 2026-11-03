@@ -21,9 +21,11 @@ import {
   normalizeTemplateEngineFields,
 } from '../src/components/templateFormState.ts'
 import { resolveModalKey } from '../src/components/modalA11y.ts'
+import { parseServerTime } from '../src/time.ts'
 import {
   clearTaskStatusHistory,
   localMonthStart,
+  localMonthEnd,
   missingRequiredList,
   missingRequiredUpload,
   normalizeBatchCount,
@@ -260,6 +262,53 @@ test('local month start handles year rollover', () => {
     getMonth: () => 0,
   } as Date
   assert.equal(localMonthStart(-1, january), '2025-12-01')
+})
+
+test('local month end is the last day of that month', () => {
+  const november = {
+    getFullYear: () => 2026,
+    getMonth: () => 10,
+  } as Date
+  // 上月（10 月）的右界必须是 10-31，不能是本月 1 号 ——
+  // 后端把纯日期解成当天 23:59:59，用 11-01 当上界会把 11 月 1 号算进上月
+  assert.equal(localMonthEnd(-1, november), '2026-10-31')
+  assert.equal(localMonthEnd(0, november), '2026-11-30')
+  const january = {
+    getFullYear: () => 2026,
+    getMonth: () => 0,
+  } as Date
+  assert.equal(localMonthEnd(-1, january), '2025-12-31')
+  const leap = {
+    getFullYear: () => 2024,
+    getMonth: () => 1,
+  } as Date
+  assert.equal(localMonthEnd(0, leap), '2024-02-29')
+})
+
+test('server timestamps without zone are parsed as UTC', () => {
+  // 后端存 naive UTC，序列化出来没有 Z。按规范无偏移=本地时间，UTC+8 会早 8 小时
+  assert.equal(
+    parseServerTime('2026-11-02T16:00:00')?.toISOString(),
+    '2026-11-02T16:00:00.000Z',
+  )
+  // 已经有偏移的原样信任，别补成 ZZ
+  assert.equal(
+    parseServerTime('2026-11-02T16:00:00Z')?.toISOString(),
+    '2026-11-02T16:00:00.000Z',
+  )
+  assert.equal(
+    parseServerTime('2026-11-02T16:00:00+08:00')?.toISOString(),
+    '2026-11-02T08:00:00.000Z',
+  )
+  assert.equal(parseServerTime(''), null)
+  assert.equal(parseServerTime(null), null)
+
+  // 纯日期是「日历日」语义，不做时区换算（否则 UTC+8 下可能被推到前一天）
+  const dateOnly = parseServerTime('2026-11-02')
+  assert.ok(dateOnly)
+  assert.equal(dateOnly.getFullYear(), 2026)
+  assert.equal(dateOnly.getMonth(), 10)
+  assert.equal(dateOnly.getDate(), 2)
 })
 
 test('login 401 keeps backend credential error without clearing or reloading', async () => {

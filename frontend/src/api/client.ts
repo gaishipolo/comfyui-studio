@@ -2,7 +2,7 @@
 import type {
   Template, Task, Asset, User, LoginResponse,
   AssetTag, EngineInfo, WorkflowUploadResponse, WorkflowInventoryResponse,
-  UsageResponse, EnginePluginInfo, TemplateImportResult,
+  UsageResponse, EnginePluginInfo, TemplateImportResult, StorageQuota,
 } from '../types'
 
 const BASE = '/api'
@@ -56,6 +56,49 @@ async function authFetch(
   return resp
 }
 
+/** 从失败响应里提取可读错误：优先后端 `detail`，其次纯文本，最后才用状态码兜底。
+ *
+ *  为什么不能直接 `resp.json()`：413（反代 body 上限）、502/504 返回的是 HTML
+ *  错误页，`json()` 会先抛 `SyntaxError: Unexpected token '<'`，把真正的状态码
+ *  彻底盖掉，用户看到的是"上传失败：Unexpected token '<'"。 */
+export async function responseErrorMessage(
+  resp: Response,
+  fallback: string,
+): Promise<string> {
+  // body 只能读一次：真 Response 有 text()，先整段读出来再试 JSON.parse，
+  // 这样非 JSON（反代返回的 HTML 错误页）还能退回文本。
+  // 单测里的替身有时只实现 json()，那种情况走下面的兼容分支。
+  let raw: string | null = null
+  if (typeof resp.text === 'function') {
+    try {
+      raw = await resp.text()
+    } catch {
+      return `${fallback} (${resp.status})`
+    }
+  }
+
+  if (raw !== null) {
+    try {
+      const body = JSON.parse(raw)
+      if (typeof body?.detail === 'string' && body.detail) return body.detail
+    } catch {
+      // 不是 JSON，落到下面的文本处理
+    }
+    const text = raw.trim()
+    // HTML 错误页对用户毫无意义，不如只报状态码
+    if (text && !text.startsWith('<')) return text.slice(0, 200)
+    return `${fallback} (${resp.status})`
+  }
+
+  try {
+    const body = await resp.json()
+    if (typeof body?.detail === 'string' && body.detail) return body.detail
+  } catch {
+    // 读不出来就退回状态码
+  }
+  return `${fallback} (${resp.status})`
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const headers = new Headers(options?.headers)
   if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
@@ -66,15 +109,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     path !== '/auth/login',
   )
   if (!resp.ok) {
-    // 优先提取后端 detail 字段，给出可读错误
-    let message = `请求失败 (${resp.status})`
-    try {
-      const body = await resp.json()
-      if (typeof body?.detail === 'string') message = body.detail
-    } catch {
-      // 非 JSON 响应，保留默认信息
-    }
-    throw new Error(message)
+    throw new Error(await responseErrorMessage(resp, '请求失败'))
   }
   return resp.json()
 }
@@ -119,13 +154,20 @@ export const resetUserPassword = (userId: string, newPassword: string) =>
     body: JSON.stringify({ new_password: newPassword }),
   })
 
-/** 管理员调整账号：角色 / 启用停用 / 显示名。
+/** 管理员调整账号：角色 / 启用停用 / 显示名 / 存储配额。
  *
  *  后端有两条硬规则：不能把自己停用或降级、系统必须保留至少一个启用的管理员。
- *  违反时是 400 且带可读文案，直接抛给用户看即可。 */
+ *  违反时是 400 且带可读文案，直接抛给用户看即可。
+ *
+ *  `storage_quota_bytes` 传 0 = 不限。只对 member 生效（admin 豁免准入检查）。 */
 export const updateUser = (
   userId: string,
-  data: { role?: 'admin' | 'member'; is_active?: boolean; display_name?: string },
+  data: {
+    role?: 'admin' | 'member'
+    is_active?: boolean
+    display_name?: string
+    storage_quota_bytes?: number
+  },
 ) =>
   request<User>(`/auth/users/${userId}`, { method: 'PATCH', body: JSON.stringify(data) })
 
@@ -152,9 +194,8 @@ export const uploadWorkflow = async (file: File): Promise<WorkflowUploadResponse
     method: 'POST',
     body: form,
   })
-  const data = await resp.json()
-  if (!resp.ok) throw new Error(data?.detail || '上传失败')
-  return data
+  if (!resp.ok) throw new Error(await responseErrorMessage(resp, '上传失败'))
+  return resp.json()
 }
 
 /** 解析已上传的工作流，拿节点表 / 可注入输入 / 出图节点三份清单 */
@@ -173,8 +214,11 @@ export async function exportTemplate(templateId: string, templateName: string): 
   const a = document.createElement('a')
   a.href = url
   a.download = `${templateName}.template.json`
+  document.body.appendChild(a)
   a.click()
-  URL.revokeObjectURL(url)
+  a.remove()
+  // 不能紧接着 revoke：下载还没真正开始读 blob，Safari/Firefox 可能存出 0 字节
+  setTimeout(() => URL.revokeObjectURL(url), 60_000)
 }
 
 /** 导入模板导出文件。overwrite=true 时同名模板被覆盖（保留原 id，历史任务不断链） */
@@ -206,8 +250,8 @@ export const uploadInput = async (
       body: form,
     },
   )
+  if (!resp.ok) throw new Error(await responseErrorMessage(resp, '上传失败'))
   const data = await resp.json()
-  if (!resp.ok) throw new Error(data?.detail || '上传失败')
   return data.filename as string
 }
 
@@ -280,8 +324,20 @@ export const submitTask = (templateId: string, params: Record<string, unknown>, 
     body: JSON.stringify({ template_id: templateId, params, batch_count: batchCount }),
   })
 
-export const listTasks = (status?: string) =>
-  request<Task[]>(`/tasks${status ? `?status=${status}` : ''}`)
+/** 任务列表。`limit` 显式传：后端默认只给 50 条，不传就等于静默截断，
+ *  超过 50 条后旧任务会凭空消失（且没有翻页入口）。 */
+export const listTasks = (
+  status?: string,
+  opts: { limit?: number; offset?: number; batchId?: string } = {},
+) => {
+  const qs = new URLSearchParams()
+  if (status) qs.set('status', status)
+  if (opts.batchId) qs.set('batch_id', opts.batchId)
+  if (opts.limit != null) qs.set('limit', String(opts.limit))
+  if (opts.offset) qs.set('offset', String(opts.offset))
+  const suffix = qs.toString()
+  return request<Task[]>(`/tasks${suffix ? `?${suffix}` : ''}`)
+}
 
 export const retryTask = (id: string) =>
   request<Task>(`/tasks/${id}/retry`, { method: 'POST' })
@@ -291,6 +347,9 @@ export const cancelTask = (id: string) =>
   request<Task>(`/tasks/${id}/cancel`, { method: 'POST' })
 
 export const getTaskAssets = (taskId: string) => request<Asset[]>(`/tasks/${taskId}/assets`)
+
+/** 单个任务。会话面板按 id 补拉用 —— 较早的任务会掉出最近一页列表 */
+export const getTask = (id: string) => request<Task>(`/tasks/${id}`)
 
 /** 删除任务（级联删掉它的素材记录与磁盘文件）。仅本人或管理员可删
  *
@@ -334,15 +393,50 @@ export const shareAsset = (assetId: string, shared: boolean) =>
     body: JSON.stringify({ shared }),
   })
 
-/** 删除单个素材（记录 + 磁盘文件）。仅本人或管理员可删
+/** 删除单个素材 → **移入回收站**（软删除）。仅本人或管理员可删
  *
- *  `file_removed=false` 不代表失败 —— 记录一定已删，只是磁盘文件没清掉，
- *  原因在 `file_error`。别把它当异常抛给用户。 */
+ *  后端只打 `deleted_at` 时间戳，**不动磁盘文件**：误删能恢复，但空间不会
+ *  因此释放。真要腾空间走 `purgeAsset`。 */
 export const deleteAsset = (assetId: string) =>
-  request<{ message: string; id: string; file_removed: boolean; file_error: string }>(
+  request<{ message: string; id: string; deleted_at: string }>(
     `/assets/${assetId}`,
     { method: 'DELETE' },
   )
+
+// ── 回收站 ─────────────────────────────────
+
+/** 回收站列表（只看自己删的；管理员看全部） */
+export const listTrash = (limit = 50, offset = 0) =>
+  request<Asset[]>(`/assets/trash?limit=${limit}&offset=${offset}`)
+
+/** 从回收站恢复 */
+export const restoreAsset = (assetId: string) =>
+  request<Asset>(`/assets/${assetId}/restore`, { method: 'POST' })
+
+/** 彻底删除（记录 + 磁盘文件，不可恢复）。只对回收站里的素材生效 */
+export const purgeAsset = (assetId: string) =>
+  request<{
+    message: string
+    id: string
+    file_removed: boolean
+    file_error: string
+    thumbnail_removed: boolean
+    thumbnail_error: string
+  }>(`/assets/${assetId}/purge`, { method: 'DELETE' })
+
+/** 清空回收站。分批执行，`remaining>0` 表示还没清完，需要再来一次 */
+export const emptyTrash = () =>
+  request<{
+    deleted: number
+    files_removed: number
+    file_errors: string[]
+    remaining: number
+  }>('/assets/trash', { method: 'DELETE' })
+
+// ── 存储配额 ───────────────────────────────
+
+/** 当前用户的配额概览。`used_bytes` 含回收站（文件还在盘上） */
+export const getQuota = () => request<StorageQuota>('/assets/quota')
 
 /** 准备浏览器原生批量下载：返回一次性下载地址（ZIP 由下载管理器流式保存，不进页面内存） */
 export const prepareBatchDownload = async (assetIds: string[]): Promise<string> => {
@@ -484,8 +578,11 @@ export async function downloadAsset(path: string, fileName: string): Promise<voi
   const a = document.createElement('a')
   a.href = url
   a.download = fileName
+  document.body.appendChild(a)
   a.click()
-  URL.revokeObjectURL(url)
+  a.remove()
+  // 同 exportTemplate：立即 revoke 会让部分浏览器存出空文件
+  setTimeout(() => URL.revokeObjectURL(url), 60_000)
 }
 
 // ── 健康检查 ──────────────────────────────
@@ -516,8 +613,8 @@ export const uploadPlugin = async (file: File): Promise<EnginePluginInfo> => {
     method: 'POST',
     body: form,
   })
+  if (!resp.ok) throw new Error(await responseErrorMessage(resp, '上传失败'))
   const data = await resp.json()
-  if (!resp.ok) throw new Error(data?.detail || '上传失败')
   return data as EnginePluginInfo
 }
 
