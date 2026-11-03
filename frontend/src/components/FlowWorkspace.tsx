@@ -275,7 +275,11 @@ function RunView({
                     <span className="chip">{i + 1}</span>
                     <span>{nodeName(s.template_id)}</span>
                     {s.title && <span className="text-muted">{s.title}</span>}
-                    <span className="text-xs text-muted">{STEP_TYPE_LABEL[s.type] ?? s.type}</span>
+                    <span className="text-xs text-muted">
+                      {s.type === 'repeat'
+                        ? `循环 ${s.count || 'N'} 次`
+                        : STEP_TYPE_LABEL[s.type] ?? s.type}
+                    </span>
                   </li>
                 ))}
               </ol>
@@ -660,6 +664,15 @@ function EditView({
                         <span aria-hidden="true" className="text-ink-2">
                           {visual.icon}
                         </span>
+                        {step.type === 'repeat' && (
+                          <span
+                            className="chip shrink-0"
+                            data-tone="accent"
+                            title={`跑 ${step.count || '列表长度'} 次`}
+                          >
+                            循环 {step.count || 'N'} 次
+                          </span>
+                        )}
                         <span className="min-w-0 flex-1">
                           <span className="block truncate text-sm font-medium">
                             {step.title?.trim() || cap?.name || '（未选节点）'}
@@ -712,7 +725,8 @@ function EditView({
               </button>
               {showInputs && (
                 <p className="mt-2xs text-xs text-muted">
-                  运行时要用户填的东西。在节点参数里选「流程输入 · 字段名」就能引用
+                  运行时要用户填的东西。在节点参数里选「流程输入 · 字段名」就能引用。
+                  勾「多条」就是列表 —— 循环节点靠它把「20 条提示词」喂给每一轮。
                 </p>
               )}
               {showInputs && (
@@ -984,6 +998,14 @@ function InputFields({
               <option value="select">下拉</option>
               <option value="file_upload">文件</option>
             </select>
+          </label>
+          <label className="check-row h-9">
+            <input
+              type="checkbox"
+              checked={!!f.multiple}
+              onChange={(e) => patch(f.name, { multiple: e.target.checked })}
+            />
+            多条
           </label>
           <button
             type="button"

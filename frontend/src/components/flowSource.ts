@@ -26,6 +26,8 @@ const PART_REF = /\{\{\s*([^{}]+?)\s*\}\}/g
 
 /** 输入引用：{{ input.xxx }} */
 const INPUT_REF = /^input\.([A-Za-z0-9_]+)$/
+/** 带下标的输入引用：input.prompts[index] */
+const INPUT_INDEX_REF = /^input\.([A-Za-z0-9_]+)\[([A-Za-z0-9_]+)\]$/
 /** 步骤引用：{{ steps.<id>.outputs }} 或 {{ steps.<id>.outputs.first }} */
 const STEP_REF = /^steps\.([A-Za-z0-9_]+)\.outputs(?:\.(first|last|\d+))?$/
 
@@ -33,8 +35,8 @@ const STEP_REF = /^steps\.([A-Za-z0-9_]+)\.outputs(?:\.(first|last|\d+))?$/
 export type ParamSource =
   /** 固定值：直接写死 */
   | { kind: 'literal'; value: string }
-  /** 流程输入：运行时由运营填 */
-  | { kind: 'input'; field: string }
+  /** 流程输入：运行时由运营填。带 index 表示取列表的第 N 项 */
+  | { kind: 'input'; field: string; index?: string }
   /** 上游产物：吃某一步的产出 */
   | { kind: 'upstream'; stepId: string; pick: 'all' | 'first' | 'last' | string }
 
@@ -66,6 +68,14 @@ export function parseParamSource(raw: string): ParsedParam {
     if (input) {
       return { source: { kind: 'input', field: input[1] }, raw: text, isCustom: false }
     }
+    const indexed = path.match(INPUT_INDEX_REF)
+    if (indexed) {
+      return {
+        source: { kind: 'input', field: indexed[1], index: indexed[2] },
+        raw: text,
+        isCustom: false,
+      }
+    }
     const step = path.match(STEP_REF)
     if (step) {
       return {
@@ -92,7 +102,9 @@ export function parseParamSource(raw: string): ParsedParam {
 export function formatParamSource(source: ParamSource): string {
   switch (source.kind) {
     case 'input':
-      return `{{ input.${source.field} }}`
+      return source.index
+        ? `{{ input.${source.field}[${source.index}] }}`
+        : `{{ input.${source.field} }}`
     case 'upstream': {
       const suffix = source.pick && source.pick !== 'all' ? `.${source.pick}` : ''
       return `{{ steps.${source.stepId}.outputs${suffix} }}`
@@ -159,6 +171,14 @@ export function buildSourceOptions(
       label: `流程输入 · ${inputTitle(f)}`,
       kind: 'input',
     })
+    // 列表输入在循环里要能按序号取 —— 「列表[序号]」
+    if (f.multiple) {
+      options.push({
+        value: `input:${f.name}[index]`,
+        label: `流程输入 · ${inputTitle(f)}（第 N 项）`,
+        kind: 'input',
+      })
+    }
   }
   upstreams.forEach((s, i) => {
     options.push({
@@ -185,7 +205,17 @@ export function optionToSource(
   if (optionValue === 'literal') return { kind: 'literal', value: literalValue }
   if (optionValue === 'custom') return 'custom'
   if (optionValue.startsWith('input:')) {
-    return { kind: 'input', field: optionValue.slice('input:'.length) }
+    // 带下标的：`input:prompts[index]` —— 循环里取列表的第 N 项
+    const rest = optionValue.slice('input:'.length)
+    const bracket = rest.indexOf('[')
+    if (bracket >= 0) {
+      return {
+        kind: 'input',
+        field: rest.slice(0, bracket),
+        index: rest.slice(bracket + 1, -1),
+      }
+    }
+    return { kind: 'input', field: rest }
   }
   if (optionValue.startsWith('upstream:')) {
     return { kind: 'upstream', stepId: optionValue.slice('upstream:'.length), pick: 'all' }
@@ -200,7 +230,7 @@ export function sourceToOption(source: ParamSource, isCustom: boolean): string {
   if (isCustom) return 'custom'
   switch (source.kind) {
     case 'input':
-      return `input:${source.field}`
+      return source.index ? `input:${source.field}[${source.index}]` : `input:${source.field}`
     case 'upstream':
       return `upstream:${source.stepId}`
     default:
@@ -238,7 +268,8 @@ export function describeSource(
   switch (source.kind) {
     case 'input': {
       const field = inputs.find((f) => f.name === source.field)
-      return field ? `流程输入 · ${inputTitle(field)}` : '流程输入'
+      const base = field ? `流程输入 · ${inputTitle(field)}` : '流程输入'
+      return source.index ? `${base}（第 N 项）` : base
     }
     case 'upstream': {
       const title = stepTitles[source.stepId]

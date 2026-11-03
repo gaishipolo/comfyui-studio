@@ -272,6 +272,23 @@ export default function StepEditorDialog({
                 autoFocus
               />
             </label>
+            <label className="field-label w-32">
+              类型
+              <select
+                className="field"
+                value={draft.type}
+                onChange={(e) =>
+                  patch({
+                    type: e.target.value as FlowStep['type'],
+                    // 切成循环时给个默认次数；切回来时次数保留（改回去不用重设）
+                    count: e.target.value === 'repeat' ? (draft.count || 1) : draft.count,
+                  })
+                }
+              >
+                <option value="template">普通</option>
+                <option value="repeat">循环</option>
+              </select>
+            </label>
             <label className="field-label flex-1">
               节点
               <select
@@ -302,6 +319,32 @@ export default function StepEditorDialog({
               </select>
             </label>
           </div>
+
+          {draft.type === 'repeat' && (
+            <div className="mt-sm panel px-md py-sm">
+              <div className="flex flex-wrap items-end gap-sm">
+                <label className="field-label w-32">
+                  跑几次
+                  <input
+                    className="field"
+                    type="number"
+                    min={0}
+                    max={200}
+                    value={draft.count}
+                    onChange={(e) =>
+                      patch({ count: Number(e.target.value) || 0, count_expr: '' })
+                    }
+                  />
+                </label>
+                <p className="flex-1 text-xs text-muted">
+                  填 0 = 由列表长度决定（下面的参数里引用
+                  「列表[序号]」就自动按列表长度跑）。
+                  参数里可以用 {'{{ index }}'}（第几次，从 0 起）、
+                  {'{{ total }}'}（一共几次）、{'{{ item }}'}（当前这一项）。
+                </p>
+              </div>
+            </div>
+          )}
           <p className="mt-2xs text-xs text-muted">
             步骤名称只是给人看的标签，随便改。内部编号（{draft.id}）由系统管理 ——
             改了它会让引用它的步骤断链，所以不开放编辑。

@@ -270,6 +270,54 @@ test('自定义表达式描述为「自定义」', () => {
   assert.equal(describeSource(src, true, inputs, {}), '自定义')
 })
 
+test('列表输入能被识别成带序号的来源', () => {
+  const listInputs: TemplateField[] = [
+    { name: 'prompts', label: '提示词列表', type: 'textarea', required: true, multiple: true },
+  ]
+  const parsed = parseParamSource('{{ input.prompts[index] }}')
+  assert.equal(parsed.source.kind, 'input')
+  assert.equal(parsed.source.kind === 'input' && parsed.source.field, 'prompts')
+  assert.equal(parsed.source.kind === 'input' && parsed.source.index, 'index')
+  assert.equal(parsed.isCustom, false)
+})
+
+test('带序号的输入能往返', () => {
+  const raw = '{{ input.prompts[index] }}'
+  const parsed = parseParamSource(raw)
+  assert.equal(formatParamSource(parsed.source), raw)
+})
+
+test('带序号的来源能映射回选项值', () => {
+  const parsed = parseParamSource('{{ input.prompts[index] }}')
+  assert.equal(sourceToOption(parsed.source, false), 'input:prompts[index]')
+  const back = optionToSource('input:prompts[index]', '')
+  assert.equal(back.kind === 'input' && back.field, 'prompts')
+  assert.equal(back.kind === 'input' && back.index, 'index')
+})
+
+test('列表输入多一个「第 N 项」选项', () => {
+  const listInputs: TemplateField[] = [
+    { name: 'prompts', label: '提示词列表', type: 'textarea', required: true, multiple: true },
+    { name: 'style', label: '画风', type: 'textarea', required: false },
+  ]
+  const options = buildSourceOptions(parseParamSource(''), listInputs, [], [])
+  const values = options.map((o) => o.value)
+  assert.ok(values.includes('input:prompts'))
+  assert.ok(values.includes('input:prompts[index]'))
+  // 不是列表的字段没有「第 N 项」
+  assert.ok(!values.includes('input:style[index]'))
+})
+
+test('带序号的输入在摘要里说明是第几项', () => {
+  const listInputs: TemplateField[] = [
+    { name: 'prompts', label: '提示词列表', type: 'textarea', required: true, multiple: true },
+  ]
+  const parsed = parseParamSource('{{ input.prompts[index] }}')
+  const text = describeSource(parsed.source, false, listInputs, {})
+  assert.ok(text.includes('提示词列表'), text)
+  assert.ok(text.includes('第 N 项'), text)
+})
+
 // ── 步骤标题 ──────────────────────────────────────────
 
 test('步骤标题优先显示名，空则退回序号', () => {

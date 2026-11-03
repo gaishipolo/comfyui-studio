@@ -262,10 +262,14 @@ export interface FlowStep {
   id: string
   /** 步骤显示名 —— 给人看的标签，随便改 */
   title?: string
+  /** template = 普通步骤；repeat = 循环（跑 N 次，每次喂不同的输入） */
   type: 'template' | 'flow' | 'repeat'
   template_id: string
   flow_id: string
+  /** 循环次数。0 = 由列表长度决定 */
   count: number
+  /** 循环次数的表达式，如 {{ input.shot_count }}。填了就以它为准 */
+  count_expr?: string
   /** 字段 → 字面量或 {{...}} 表达式 */
   params: Record<string, string>
 }
