@@ -17,7 +17,9 @@ import type { Flow, FlowRun, FlowStep, NodeCapability, Template, TemplateField }
 import {
   createFlow,
   deleteFlow,
+  exportFlow,
   getFlowRun,
+  importFlow,
   listFlows,
   listNodeCapabilities,
   runFlow,
@@ -29,6 +31,7 @@ import StepEditorDialog from './StepEditorDialog'
 import { nodeVisual, paramSummary, reorderSteps, wouldBreakDependency } from './flowEditor'
 import { stepTitle } from './flowSource'
 import { notify, reportError } from '../notify'
+import { alertDialog, confirmDialog } from './dialog'
 import type { ModuleProps } from '../modules/registry'
 
 type Tab = 'run' | 'edit'
@@ -411,6 +414,61 @@ function EditView({
   )
   const patch = (next: Flow) => setDraft(next)
 
+  // ── 导出 / 导入 ──────────────────────────
+  /** 导出流程为 JSON 文件（带上引用的节点与子流程快照） */
+  const handleExport = async (flow: Flow) => {
+    try {
+      await exportFlow(flow.id, flow.name)
+    } catch (err) {
+      reportError('导出失败', err)
+    }
+  }
+
+  /** 导入流程导出文件。只在真的重名时才问覆盖 —— 没冲突就不该拦一道 */
+  const handleImport = async (file: File) => {
+    let payload: unknown
+    try {
+      payload = JSON.parse(await file.text())
+    } catch {
+      notify('这个文件不是合法的 JSON', 'error')
+      return
+    }
+    const fmt = (payload as { format?: string })?.format
+    if (fmt !== 'comfyui-workbench/flow') {
+      notify(`不是本系统导出的流程文件${fmt ? `（format=${fmt}）` : ''}`, 'error')
+      return
+    }
+    const name =
+      (payload as { flow?: { name?: string } })?.flow?.name || file.name.replace(/\.json$/i, '')
+    const exists = flows.some((f) => f.name === name)
+    let overwrite = false
+    if (exists) {
+      overwrite = await confirmDialog({
+        title: `已存在同名流程「${name}」`,
+        message: '覆盖会保留原 id，历史运行记录不受影响。',
+        confirmText: '覆盖',
+        cancelText: '取消',
+      })
+      if (!overwrite) return
+    }
+    try {
+      const res = await importFlow(payload, overwrite)
+      await onChanged()
+      onSelect(res.id)
+      if (res.warnings.length) {
+        await alertDialog({
+          title: `已导入「${res.name}」`,
+          message: res.warnings.map((w) => `· ${w}`).join('\n'),
+          tone: 'warning',
+        })
+      } else {
+        notify(`已导入「${res.name}」`, 'success')
+      }
+    } catch (err) {
+      reportError('导入失败', err)
+    }
+  }
+
   // 流程输入字段 —— 参数摘要里要说「流程输入 · 初始画面」而不是字段名
   const inputFields = draft?.input_schema?.fields ?? []
 
@@ -580,6 +638,22 @@ function EditView({
         <button type="button" className="btn btn-quiet mb-sm w-full" onClick={() => void createNew()}>
           新建流程
         </button>
+        {/* 导入只能 admin（会往系统里加流程，可能连带加节点） */}
+        {user.role === 'admin' && (
+          <label className="btn btn-quiet mb-sm w-full cursor-pointer text-center">
+            导入流程
+            <input
+              type="file"
+              accept=".json,application/json"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0]
+                e.target.value = '' // 允许重复导入同一个文件
+                if (file) void handleImport(file)
+              }}
+            />
+          </label>
+        )}
         <ul className="flex flex-col gap-2xs">
           {flows.map((f) => (
             <li key={f.id}>
@@ -928,6 +1002,15 @@ function EditView({
               <button type="button" className="btn btn-quiet" disabled={busy} onClick={() => void doValidate()}>
                 只校验
               </button>
+              {draft.id && (
+                <button
+                  type="button"
+                  className="btn btn-quiet"
+                  onClick={() => void handleExport(draft)}
+                >
+                  导出
+                </button>
+              )}
               {draft.id && (
                 <button type="button" className="btn btn-danger-quiet" onClick={() => void remove()}>
                   删除流程

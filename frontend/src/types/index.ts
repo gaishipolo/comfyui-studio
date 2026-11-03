@@ -325,6 +325,16 @@ export interface FlowRun {
   finished_at: string | null
 }
 
+/** 流程导入的结果 */
+export interface FlowImportResult {
+  id: string
+  name: string
+  /** false = 覆盖了已有的同名流程 */
+  created: boolean
+  /** 引用解析的提示：本机没有的节点已按快照创建等 */
+  warnings: string[]
+}
+
 /** 能力清单里的一项 —— 一个可用节点。从数据库自动生成，不写文档 */
 export interface NodeCapability {
   id: string

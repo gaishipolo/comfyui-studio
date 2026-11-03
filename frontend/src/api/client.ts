@@ -4,7 +4,7 @@ import type {
   AssetTag, EngineInfo, WorkflowUploadResponse, WorkflowInventoryResponse,
   UsageResponse, EnginePluginInfo, TemplateImportResult, StorageQuota,
   Flow, FlowRun, FlowStep, FlowOutput, FlowValidateResult, NodeCapability,
-  TemplateField,
+  FlowImportResult, TemplateField,
 } from '../types'
 
 const BASE = '/api'
@@ -672,6 +672,29 @@ export const validateFlow = (data: {
   request<FlowValidateResult>('/flows/validate', {
     method: 'POST',
     body: JSON.stringify(data),
+  })
+
+/** 下载流程导出文件。
+ *  包里带上引用的节点与子流程快照 —— 流程不只有自己的配置。
+ *  走 fetch 而不是 <a href>：导出接口要 JWT，直链发不出 Authorization 头 */
+export async function exportFlow(flowId: string, flowName: string): Promise<void> {
+  const blob = await fetchAssetBlob(`${BASE}/flows/${flowId}/export`, { silent: false })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `${flowName}.flow.json`
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  // 不能紧接着 revoke：下载还没真正开始读 blob，Safari/Firefox 可能存出 0 字节
+  setTimeout(() => URL.revokeObjectURL(url), 60_000)
+}
+
+/** 导入流程导出文件。overwrite=true 时同名流程被覆盖 */
+export const importFlow = (payload: unknown, overwrite = false) =>
+  request<FlowImportResult>(`/flows/import?overwrite=${overwrite}`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
   })
 
 /** 跑一条流程。返回运行记录，后台顺序执行 */
