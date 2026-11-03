@@ -14,12 +14,15 @@
 **多引擎插件机制**
 - 一家供应商 = 一个 `GenerationProvider` 子类 `.py`，管理页上传即注册生效（不发版、不重启）
 - 能力声明（`capabilities`）驱动模板表单；运行配置（API Key 等）存 DB 不进代码
-- 内置引擎：`comfyui`、`generic_api`（可配置的通用 HTTP 生成 API）；参考实现见 `backend/examples/provider_agnes.py`
+- 内置引擎仅 `comfyui`；其他供应商一律走插件机制（参考实现：`backend/examples/provider_agnes.py`、`provider_grsai*.py`）。早期的 `generic_api` 通用适配器已移除
 
 **素材库与存储**
-- 生成产物自动落盘入库，缩略图、筛选、批量删除
+- 素材独立于任务：生成产物自动入库，也可**直接上传**本地文件（不经过引擎），之后作为生成输入复用
+- 缩略图双轨：视频落盘时用 ffmpeg 抽帧，图片首访懒生成（带并发闸门与像素上限）
+- 标签体系、按类型/场景/创建人/日期筛选、批量删除
+- 批量下载走**一次性票据 + 浏览器原生流式 ZIP**，不把整包读进页面内存
+- 素材可手动共享给团队（共享 ≠ 共同所有：可见可下载，不可改）
 - 存储后端可切换：本机目录 / MinIO（S3 兼容），业务代码不感知（`app/filestore.py`）
-- 素材可反选为生成输入（含跨引擎传输）
 
 **用户与统计**
 - bcrypt + JWT，admin / member 角色，改密与密码重置
@@ -148,7 +151,7 @@ Get-ChildItem tests\test_*.py | ForEach-Object { & .\.venv\Scripts\python.exe $_
 
 全部用临时 SQLite / 假 Provider / 假 HTTP，不连真实服务、不碰 `workbench.db`。
 
-### verify 脚本（37 个 `verify_*.py`）
+### verify 脚本（38 个 `verify_*.py`）
 
 不依赖 pytest。以下是运行条件清单，不代表整套脚本已经在当前提交上全量通过；完整回归、UI 和真实生成证据由 Task 7 记录。
 
@@ -156,9 +159,9 @@ Get-ChildItem tests\test_*.py | ForEach-Object { & .\.venv\Scripts\python.exe $_
 |---|---:|---|
 | 离线 / 进程内 | 9 | `verify_cancel.py`、`verify_download_tickets.py`、`verify_from_asset_size_gate.py`、`verify_media_mime.py`、`verify_param_coercion.py`、`verify_progress.py`、`verify_provider_lifecycle.py`、`verify_schema_idempotent.py`、`verify_video_outputs.py` |
 | 临时或隔离资源，不起 FastAPI | 13 | `verify_batch_archive.py`、`verify_error_boundary.py`、`verify_filestore.py`、`verify_filestore_live.py`、`verify_grsai_plugins.py`、`verify_json_ascii.py`、`verify_json_migration.py`、`verify_json_migration_edge.py`、`verify_media_reliability.py`、`verify_multi_image.py`、`verify_queue_and_auth.py`、`verify_tag_json_each.py`、`verify_tag_persist.py` |
-| 隔离 FastAPI 服务 | 13 | `verify_asset_filters.py`、`verify_delete_assets_tasks.py`、`verify_delete_semantics.py`、`verify_frontend_contract.py`、`verify_multi_image_api.py`、`verify_p0_fixes.py`、`verify_plugin_loader.py`、`verify_prod_deploy.py`、`verify_schema_normalization.py`、`verify_template_export.py`、`verify_upload_kinds.py`、`verify_usage_stats.py`、`verify_user_isolation.py` |
+| 隔离 FastAPI 服务 | 14 | `verify_asset_filters.py`、`verify_delete_assets_tasks.py`、`verify_delete_semantics.py`、`verify_frontend_contract.py`、`verify_multi_image_api.py`、`verify_p0_fixes.py`、`verify_plugin_loader.py`、`verify_prod_deploy.py`、`verify_schema_normalization.py`、`verify_template_export.py`、`verify_thumbnail_perf.py`、`verify_upload_kinds.py`、`verify_usage_stats.py`、`verify_user_isolation.py` |
 | 隔离服务 + 真实 ComfyUI | 2 | `verify_b5_b6.py`、`verify_from_asset_upload.py` |
-| 破坏性重启（不计入 37 个 verify 脚本） | - | `e2e_restart_recovery.py`（仅 Windows） |
+| 破坏性重启（不计入 38 个 verify 脚本） | - | `e2e_restart_recovery.py`（仅 Windows） |
 
 `verify_tag_persist.py` / `verify_tag_json_each.py` 使用**临时数据库**，不碰真实 `workbench.db`（负向断言不受真实数据干扰，崩溃不留残留）。
 
@@ -186,7 +189,7 @@ npm run test:ui
 
 - `verify_prod_deploy.py`：先在 `frontend/` 执行 `npm ci` 和 `npm run build`，服务的 `FRONTEND_DIST` 必须指向这份非空构建产物；隔离数据库还要至少有一个模板，才能验证业务响应不是空壳。
 - `verify_template_export.py`：隔离服务中必须预置至少一个绑定现有工作流文件的模板，并让 `WORKFLOW_DIR` 指向对应工作流快照。
-- `verify_b5_b6.py`：B5 完全在进程内运行，使用临时 SQLite、真实 `TaskService.execute_task` 和假 `generic_api` Provider，不访问运行中服务、FileStore 或 generic/cloud HTTP。B6 才会真实提交生成任务；必须显式设置 `COMFYUI_STUDIO_B5_B6_TEMPLATE_ID` 为本轮预置模板的精确 ID。该模板必须是 `comfyui` 引擎、绑定 `image_flux2_klein_text_to_image.json`，参数映射必须精确为 `prompt -> 76.inputs.value`、`width -> 103.inputs.value`、`height -> 106.inputs.value`，输出节点必须仅为 `108`。
+- `verify_b5_b6.py`：B5 完全在进程内运行，使用临时 SQLite、真实 `TaskService.execute_task` 和进程内假 Provider（`_B5FakeProvider`），不访问运行中服务、FileStore 或 generic/cloud HTTP。B6 才会真实提交生成任务；必须显式设置 `COMFYUI_STUDIO_B5_B6_TEMPLATE_ID` 为本轮预置模板的精确 ID。该模板必须是 `comfyui` 引擎、绑定 `image_flux2_klein_text_to_image.json`，参数映射必须精确为 `prompt -> 76.inputs.value`、`width -> 103.inputs.value`、`height -> 106.inputs.value`，输出节点必须仅为 `108`。
 - `e2e_upload_generate.py`：需要真实 ComfyUI，并在任何请求前校验 `COMFYUI_STUDIO_E2E_IMAGE_PATH` 和 `COMFYUI_STUDIO_E2E_TEMPLATE_ID`；可用 `COMFYUI_STUDIO_E2E_ENGINE` 覆盖默认 `comfyui`。模板必须接受 `ref_image`、`prompt`、`width`、`height` 参数，图片路径必须是隔离测试夹具。
 
 `verify_plugin_loader.py`、`verify_from_asset_upload.py`、`verify_usage_stats.py`、`verify_user_isolation.py` 仍直接打开 `backend/workbench.db`；`e2e_restart_recovery.py` 与维护脚本 `backfill_video_thumbs.py`、`cleanup_*.py`、`purge_test_residue.py`、`align_template_fields.py`、`fix_bool_select_options.py`、`smoke_fixes.py` 也有同样约束（这些脚本均已内置 `COMFYUI_STUDIO_LIVE_TESTS_OK` 自检，未设置即拒绝执行）。因此完整服务回归要在一次性 worktree 中使用该默认 SQLite 文件名。worktree 独占且数据库不受 Git 跟踪，测试后可删除，不会接触原工作区数据库。
@@ -201,7 +204,7 @@ npm run test:ui
 backend/
   app/
     api/          # REST 路由（tasks/templates/assets/auth/plugins/stats/uploads）
-    engines/      # 引擎抽象：base / comfyui / generic_api / plugin_loader / factory
+    engines/      # 引擎抽象：base / comfyui / plugin_loader / factory
     services/     # 任务链路（task_service）、工作流解析
     models/       # SQLAlchemy 模型
     filestore.py  # 存储抽象（local / MinIO 双后端）

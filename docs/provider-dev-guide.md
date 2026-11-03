@@ -38,7 +38,7 @@ class MyProvider(GenerationProvider):
 
 | 属性 | 说明 |
 |---|---|
-| `name` | 引擎注册名，模板的 engine 字段引用它。**不许用** `comfyui` / `generic_api`（内置保留） |
+| `name` | 引擎注册名，模板的 engine 字段引用它。**不许用** `comfyui`（内置引擎）。`generic_api` 是已移除的早期内置引擎名，同样保留不用，免得和历史文档撞车 |
 | `label` | 界面展示名 |
 | `capabilities` | `{kind: CapabilitySpec}`。kind 用 `text_to_image` / `image_to_image` / `text_to_video` 这类蛇形命名 |
 | `config_schema` | `list[FieldSpec]`。运行配置项声明，**机密放这里，不要写死在代码里** |
