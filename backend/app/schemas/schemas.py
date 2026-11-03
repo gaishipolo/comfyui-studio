@@ -393,6 +393,11 @@ class FlowResponse(FlowBase):
     created_by: str = ""
     created_at: datetime
     updated_at: datetime
+    # 审批留痕（Agent 编排）：draft 时 reviewed_by 为空
+    reviewed_by: str = ""
+    reviewed_at: datetime | None = None
+    review_note: str = ""
+    agent_note: str = ""
 
     model_config = {"from_attributes": True}
 
@@ -455,6 +460,57 @@ class FlowValidateResponse(BaseModel):
     errors: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     layers: list[list[str]] = Field(default_factory=list, description="依赖分层，同层可并行")
+
+
+class AgentDraftRequest(BaseModel):
+    """Agent 提交一份流程配置。
+
+    **走的是和编排器同一道校验门**（validate_flow_config）——
+    Agent 不该有特权，它的配置照样得满足同样的约束。
+    """
+
+    name: str = Field(min_length=1, max_length=128, description="流程名称")
+    description: str = Field(default="", description="流程说明")
+    category: str = Field(default="image", max_length=64, description="分类")
+    icon: str = Field(default="", max_length=256, description="图标")
+    input_schema: dict = Field(default_factory=dict, description="流程输入字段定义")
+    outputs: list[FlowOutput] = Field(default_factory=list, description="流程输出声明")
+    steps: list[FlowStep] = Field(default_factory=list, description="步骤列表")
+    note: str = Field(default="", description="Agent 对这份流程的说明（给人看的）")
+
+    @field_validator("input_schema")
+    @classmethod
+    def _normalize_schema(cls, v: Any) -> dict:
+        return normalize_input_schema(v)
+
+
+class AgentDraftResponse(BaseModel):
+    """Agent 草稿提交结果。
+
+    **落库的是 draft 状态** —— 人审批后才 active。
+    校验没过就不落库（ok=false，带上错误），让 Agent 自己改。
+    """
+
+    ok: bool
+    flow_id: str = ""
+    version: int = 0
+    errors: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    layers: list[list[str]] = Field(default_factory=list)
+
+
+class AgentApproveRequest(BaseModel):
+    """审批一份草稿。"""
+
+    approve: bool = Field(default=True, description="True=批准上线，False=驳回")
+    note: str = Field(default="", description="审批意见 / 驳回原因")
+
+
+class AgentApproveResponse(BaseModel):
+    ok: bool
+    flow_id: str = ""
+    status: str = ""
+    message: str = ""
 
 
 class NodeCapability(BaseModel):

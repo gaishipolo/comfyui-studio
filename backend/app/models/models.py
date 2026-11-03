@@ -102,6 +102,12 @@ class Task(Base):
     step_id: Mapped[str] = mapped_column(
         String(32), default="", comment="流程内的步骤别名（Flow.steps[].id）"
     )
+    # 试跑（2026-11-04）：Agent 生成的流程上线前先试跑。
+    # 试跑任务不进正式任务列表（素材也不进正式素材库）——
+    # 它们是「看看效果」的产物，不是正式产出。
+    is_trial: Mapped[bool] = mapped_column(
+        Boolean, default=False, index=True, comment="试跑任务；正式任务为 0"
+    )
 
     status: Mapped[str] = mapped_column(
         String(16), default="pending", index=True,
@@ -172,6 +178,13 @@ class Asset(Base):
         DateTime, nullable=True, index=True, comment="进回收站的时间；NULL 表示正常"
     )
 
+    # 试跑产物（2026-11-04）：Agent 生成的流程要先试跑再上线。
+    # 试跑真的调引擎、真的出图，但**不进正式素材库** —— 那是给人看效果的，
+    # 不是正式产出。默认从素材列表排除（有开关能翻出来）。
+    is_trial: Mapped[bool] = mapped_column(
+        Boolean, default=False, index=True, comment="试跑产物；正式素材为 0"
+    )
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     task: Mapped["Task | None"] = relationship(back_populates="assets")
@@ -216,6 +229,24 @@ class Flow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
+    # 审批留痕（2026-11-04）：Agent 生成的流程要过人眼。
+    # **谁批的、什么时候批的、说了什么**都得留下 —— 出问题时才知道该找谁。
+    # draft 时 reviewed_by 为空；审批后填上。
+    reviewed_by: Mapped[str] = mapped_column(
+        String(32), default="", comment="审批人 user id；未审批为空"
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, comment="审批时间"
+    )
+    review_note: Mapped[str] = mapped_column(
+        Text, default="", comment="审批意见 / 驳回原因"
+    )
+    # Agent 生成流程时写下的说明：这版是怎么来的、Agent 说了什么。
+    # 审批人第一眼看的就是这个。
+    agent_note: Mapped[str] = mapped_column(
+        Text, default="", comment="Agent 对这份流程的说明"
+    )
+
     # 删除流程时**保留运行记录**（它们是历史，不是流程的一部分）。
     # 不加 passive_deletes 的话，SQLAlchemy 的默认 cascade 会试图把
     # flow_runs.flow_id 置空 —— 而那列是 NOT NULL，删流程直接 500。
@@ -251,6 +282,13 @@ class FlowRun(Base):
     error_msg: Mapped[str] = mapped_column(Text, default="", comment="失败原因")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # 试跑标记（2026-11-04）：这次运行是「试跑」——
+    # Agent 生成的流程上线前先跑一遍看看效果。
+    # 试跑产物打 is_trial 标记，不进正式素材库；正式运行不受影响。
+    is_trial: Mapped[bool] = mapped_column(
+        Boolean, default=False, index=True, comment="试跑运行；正式运行为 0"
+    )
 
     flow: Mapped["Flow"] = relationship(back_populates="runs")
 

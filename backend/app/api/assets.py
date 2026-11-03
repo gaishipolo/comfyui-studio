@@ -203,6 +203,10 @@ async def list_assets(
     creator: str | None = Query(None, description="按创建人 user_id 筛选"),
     created_from: str | None = Query(None, description="创建时间起（2026-10-01 或完整 ISO）"),
     created_to: str | None = Query(None, description="创建时间止（纯日期含当天全天）"),
+    trial: str | None = Query(
+        None,
+        description="试跑产物：exclude=不含（默认）/ only=只看试跑 / include=都算",
+    ),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     user: User = Depends(get_current_user),
@@ -267,6 +271,22 @@ async def list_assets(
     if template_id:
         query = query.outerjoin(Task, Asset.task_id == Task.id).where(
             Task.template_id == template_id
+        )
+
+    # 试跑产物（2026-11-04）：Agent 生成的流程上线前试跑，出图是真的，
+    # 但**不进正式素材库** —— 那是给人看效果的，不是正式产出。
+    # 默认排除；`trial=only` 只看试跑、`trial=include` 都算。
+    trial_mode = (trial or "exclude").strip().lower()
+    if trial_mode == "only":
+        query = query.where(Asset.is_trial.is_(True))
+    elif trial_mode == "include":
+        pass
+    elif trial_mode == "exclude":
+        query = query.where(Asset.is_trial.is_(False))
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"trial 只能是 exclude / only / include，收到：{trial}",
         )
 
     query = query.offset(offset).limit(limit)

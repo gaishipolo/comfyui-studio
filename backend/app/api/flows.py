@@ -17,6 +17,10 @@ from app.disposition import attachment_disposition
 from app.models.models import Flow, FlowRun, Template, User
 from app.auth import get_current_user, require_admin
 from app.schemas.schemas import (
+    AgentApproveRequest,
+    AgentApproveResponse,
+    AgentDraftRequest,
+    AgentDraftResponse,
     FlowCreate,
     FlowImportPayload,
     FlowImportResponse,
@@ -27,6 +31,7 @@ from app.schemas.schemas import (
     FlowValidateResponse,
     NodeCapability,
 )
+from app.services.agent_spec import build_spec
 from app.services.flow_service import FlowError, submit_flow
 from app.timeutils import utcnow
 from app.services.flow_validate import validate_flow_config
@@ -147,6 +152,183 @@ async def get_run(
     return FlowRunResponse.model_validate(run)
 
 
+# ── Agent 编排 ───────────────────────────────────────────────────────
+#
+# 四步：spec（拿规格）→ draft（提交配置，落草稿）→ trial（试跑）
+#      → approve（人审批后生效）
+#
+# **为什么 Agent 的配置和人手工编的配置走同一道门**：
+# Agent 只是另一个写配置的人，它的产出一样可能写错（引用了不存在的节点、
+# 字段接错、步骤成环）。给它特权等于放弃质量控制 —— 所以 draft 提交
+# 用的就是编排器保存时走的那个 validate_flow_config。
+
+
+@router.get("/agent/spec")
+async def agent_spec(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """编排规格 —— Agent 想知道「能拼什么、怎么写合法」就问这里。
+
+    **这份规格是从代码生成的**，不是手写文档：
+    - 可用节点 → 数据库里 active 的模板（和编排器下拉里同一批）
+    - 可用函数 → 表达式白名单本身
+    - 步骤类型与规则 → 校验器的实际逻辑
+
+    手写的规格必然和实现漂移 —— 加了新东西忘了写进文档，
+    Agent 就会一直按旧规则拼，产出一堆跑不通的配置。
+    """
+    templates = (
+        await db.execute(select(Template).where(Template.is_active.is_(True)))
+    ).scalars().all()
+    flows = (
+        await db.execute(select(Flow).where(Flow.status == "active"))
+    ).scalars().all()
+    return build_spec(templates, flows)
+
+
+@router.post("/agent/draft", response_model=AgentDraftResponse)
+async def agent_draft(
+    payload: AgentDraftRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Agent 提交流程配置 → 校验 → 落成**草稿**。
+
+    校验不过就不落库，返回错误让 Agent 自己改（ok=false, errors 非空）。
+    校验过了也只是 draft —— **人审批后才 active**，Agent 不能自己上线。
+
+    同名流程已存在时**不覆盖** —— 直接报错。Agent 反复提交同名配置
+    应该是改自己的草稿，不是把别人在用的流程冲掉。
+    """
+    templates = {
+        t.id: t for t in (await db.execute(select(Template))).scalars().all()
+    }
+    flows = {
+        f.id: f.name for f in (await db.execute(select(Flow))).scalars().all()
+    }
+    result = validate_flow_config(
+        steps=[s.model_dump() for s in payload.steps],
+        input_schema=payload.input_schema,
+        outputs=[o.model_dump() for o in payload.outputs],
+        templates=templates,
+        flows=flows,
+    )
+    if not result["ok"]:
+        return AgentDraftResponse(
+            ok=False,
+            errors=result["errors"],
+            warnings=result["warnings"],
+            layers=result["layers"],
+        )
+
+    existing = (
+        await db.execute(select(Flow).where(Flow.name == payload.name))
+    ).scalars().first()
+    if existing is not None:
+        return AgentDraftResponse(
+            ok=False,
+            errors=[f"流程「{payload.name}」已存在，换个名字再提交"],
+            warnings=result["warnings"],
+        )
+
+    flow = Flow(
+        name=payload.name,
+        description=payload.description,
+        category=payload.category,
+        icon=payload.icon,
+        input_schema=payload.input_schema,
+        outputs=[o.model_dump() for o in payload.outputs],
+        steps=[s.model_dump() for s in payload.steps],
+        # 关键：Agent 生成的流程一律 draft —— 要人批
+        status="draft",
+        created_by=user.id,
+        version=1,
+        agent_note=payload.note,
+    )
+    db.add(flow)
+    await db.commit()
+    await db.refresh(flow)
+    return AgentDraftResponse(
+        ok=True,
+        flow_id=flow.id,
+        version=flow.version,
+        warnings=result["warnings"],
+        layers=result["layers"],
+    )
+
+
+@router.post("/{flow_id}/trial", response_model=FlowRunResponse)
+async def trial_flow(
+    flow_id: str,
+    params: dict | None = None,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """试跑一条流程 —— **产物不进正式素材库**。
+
+    Agent 生成的流程上线前得先看看效果。试跑真的调引擎、真的出图，
+    但产物打上试跑标记，默认从素材库排除（`?trial=only` 能翻出来看）。
+
+    **草稿也能试跑** —— 这正是试跑的用途：审批人要先看效果再批。
+    """
+    flow = await db.get(Flow, flow_id)
+    if flow is None:
+        raise HTTPException(status_code=404, detail="流程不存在")
+    if not _can_edit(flow, user):
+        raise HTTPException(status_code=403, detail="只能试跑自己创建的流程")
+    try:
+        run = await submit_flow(db, flow, params or {}, user, is_trial=True)
+    except FlowError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return FlowRunResponse.model_validate(run)
+
+
+@router.post("/{flow_id}/approve", response_model=AgentApproveResponse)
+async def approve_flow(
+    flow_id: str,
+    payload: AgentApproveRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """审批一份草稿 —— 批准上线或驳回。
+
+    **谁能批**：作者本人或 admin。
+    Agent 生成的流程作者是提交它的人 —— 他最清楚这份配置想干什么。
+
+    批准 → status=active（能被运行台跑到）；
+    驳回 → status=archived（留档，但不再出现在可用流程里）。
+
+    审批意见写进 review_note，出问题时知道当时是怎么定的。
+    """
+    flow = await db.get(Flow, flow_id)
+    if flow is None:
+        raise HTTPException(status_code=404, detail="流程不存在")
+    if not _can_edit(flow, user):
+        raise HTTPException(status_code=403, detail="只能审批自己创建的流程")
+    if flow.status != "draft":
+        return AgentApproveResponse(
+            ok=False,
+            flow_id=flow_id,
+            status=flow.status,
+            message=f"只有草稿需要审批（当前状态：{flow.status}）",
+        )
+
+    flow.status = "active" if payload.approve else "archived"
+    flow.reviewed_by = user.id
+    flow.reviewed_at = utcnow()
+    flow.review_note = payload.note
+    flow.version = (flow.version or 0) + 1
+    await db.commit()
+    await db.refresh(flow)
+    return AgentApproveResponse(
+        ok=True,
+        flow_id=flow_id,
+        status=flow.status,
+        message="已批准上线" if payload.approve else "已驳回",
+    )
+
+
 @router.get("/{flow_id}", response_model=FlowResponse)
 async def get_flow(
     flow_id: str,
@@ -157,6 +339,8 @@ async def get_flow(
     if flow is None:
         raise HTTPException(status_code=404, detail="流程不存在")
     return FlowResponse.model_validate(flow)
+
+
 
 
 @router.post("", response_model=FlowResponse)

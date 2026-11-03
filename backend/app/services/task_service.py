@@ -262,6 +262,7 @@ class TaskService:
         commit: bool = True,
         flow_run_id: str = "",
         step_id: str = "",
+        is_trial: bool = False,
     ) -> Task:
         task = Task(
             template_id=template_id,
@@ -270,6 +271,7 @@ class TaskService:
             created_by=created_by,
             flow_run_id=flow_run_id,
             step_id=step_id,
+            is_trial=is_trial,
         )
         db.add(task)
         if commit:
@@ -824,6 +826,8 @@ class TaskService:
                 mime_type=mime,
                 tags=[template.category],
                 meta=task.params,
+                # 试跑产物跟着任务走 —— 任务标记了试跑，素材就不能进正式素材库
+                is_trial=bool(task.is_trial),
             )
             db.add(asset)
             return asset

@@ -60,8 +60,12 @@ def _is_asset_ref(value) -> bool:
     return isinstance(value, dict) and bool(value.get("asset_id"))
 
 
-async def submit_flow(db, flow: Flow, params: dict, user) -> FlowRun:
-    """创建运行记录并后台执行。返回刚创建的 FlowRun。"""
+async def submit_flow(db, flow: Flow, params: dict, user, is_trial: bool = False) -> FlowRun:
+    """创建运行记录并后台执行。返回刚创建的 FlowRun。
+
+    is_trial = 试跑（Agent 生成的流程上线前先跑一遍看看效果）。
+    试跑真的调引擎、真的出图，但产物打上标记，不进正式素材库。
+    """
     run = FlowRun(
         flow_id=flow.id,
         flow_name=flow.name,
@@ -70,6 +74,7 @@ async def submit_flow(db, flow: Flow, params: dict, user) -> FlowRun:
         status="running",
         progress=0.0,
         steps=[],
+        is_trial=is_trial,
     )
     db.add(run)
     await db.commit()
@@ -696,6 +701,7 @@ async def _start_step(run: FlowRun, step: dict, step_id: str, params: dict) -> s
             created_by=run.created_by,
             flow_run_id=run.id,
             step_id=step_id,
+            is_trial=bool(run.is_trial),
         )
         task_id = task.id
 

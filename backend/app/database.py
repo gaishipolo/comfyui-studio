@@ -79,6 +79,16 @@ _COLUMN_MIGRATIONS = [
     # 流程级产出（2026-11-03）：按流程的 outputs 声明解析出来的产物。
     # 子流程嵌套时，父流程按产出名引用子流程的结果。
     ("flow_runs", "outputs", "ALTER TABLE flow_runs ADD COLUMN outputs TEXT NOT NULL DEFAULT '[]'"),
+    # Agent 编排（2026-11-04）：试跑隔离 + 审批留痕。
+    # is_trial = 试跑产物/任务，不进正式素材库与任务列表（可以筛出来看）。
+    ("assets", "is_trial", "ALTER TABLE assets ADD COLUMN is_trial BOOLEAN DEFAULT 0"),
+    ("tasks", "is_trial", "ALTER TABLE tasks ADD COLUMN is_trial BOOLEAN DEFAULT 0"),
+    ("flow_runs", "is_trial", "ALTER TABLE flow_runs ADD COLUMN is_trial BOOLEAN DEFAULT 0"),
+    # 审批：谁批的、什么时候、说了什么；Agent 对流程的说明
+    ("flows", "reviewed_by", "ALTER TABLE flows ADD COLUMN reviewed_by VARCHAR(32) DEFAULT ''"),
+    ("flows", "reviewed_at", "ALTER TABLE flows ADD COLUMN reviewed_at DATETIME"),
+    ("flows", "review_note", "ALTER TABLE flows ADD COLUMN review_note TEXT NOT NULL DEFAULT ''"),
+    ("flows", "agent_note", "ALTER TABLE flows ADD COLUMN agent_note TEXT NOT NULL DEFAULT ''"),
 ]
 
 # SQLite 不支持 ALTER COLUMN，改 task_id 可空只能重建表。列顺序与 models.Asset 对齐。
