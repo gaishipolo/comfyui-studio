@@ -153,7 +153,7 @@ cd ../deploy/windows && .\install-service.ps1
 
 ### 单元测试（离线一条命令跑完，不碰任何真实资源）
 
-`backend/tests/test_*.py`（44 个，不依赖 pytest）：鉴权吊销、请求准入、任务终态竞态、插件恢复守卫、输入校验、下载票据、登录限速、启动配置自检、清理脚本守卫、live 脚本自检、端口匹配、素材回收站、存储配额与默认配额、按引擎分组的并发闸门、重启后排队任务重排、图片缩略图预生成、随机数字段 schema 与 -1 哨兵展开、整应用 ASGI 冒烟（登录→建模板→提交→列素材）等。逐个直接运行即可：
+`backend/tests/test_*.py`（45 个，不依赖 pytest）：鉴权吊销、请求准入、任务终态竞态、插件恢复守卫、输入校验、下载票据、登录限速、启动配置自检、清理脚本守卫、live 脚本自检、端口匹配、素材回收站、存储配额与默认配额、按引擎分组的并发闸门、重启后排队任务重排、图片缩略图预生成、随机数字段 schema 与 -1 哨兵展开、媒体 MIME 的跨平台一致性、整应用 ASGI 冒烟（登录→建模板→提交→列素材）等。逐个直接运行即可：
 
 ```powershell
 Get-ChildItem tests\test_*.py | ForEach-Object { & .\.venv\Scripts\python.exe $_.FullName; if ($LASTEXITCODE -ne 0) { exit 1 } }
@@ -192,13 +192,13 @@ ruff check .
 
 ruff 的版本**精确锁定**：lint 规则集在小版本之间会变，上游某天加一条新规则就会让 CI 无缘无故变红，而改的人根本不知道自己碰到了什么。升级 lint 工具应当是显式动作。
 
-### verify 脚本（38 个 `verify_*.py`）
+### verify 脚本（37 个 `verify_*.py`）
 
 不依赖 pytest。以下是运行条件清单，不代表整套脚本已经在当前提交上全量通过；完整回归、UI 和真实生成证据由 Task 7 记录。
 
 | 类别 | 数量 | 脚本 |
 |---|---:|---|
-| 离线 / 进程内 | 9 | `verify_cancel.py`、`verify_download_tickets.py`、`verify_from_asset_size_gate.py`、`verify_media_mime.py`、`verify_param_coercion.py`、`verify_progress.py`、`verify_provider_lifecycle.py`、`verify_schema_idempotent.py`、`verify_video_outputs.py` |
+| 离线 / 进程内 | 8 | `verify_cancel.py`、`verify_download_tickets.py`、`verify_from_asset_size_gate.py`、`verify_param_coercion.py`、`verify_progress.py`、`verify_provider_lifecycle.py`、`verify_schema_idempotent.py`、`verify_video_outputs.py` |
 | 临时或隔离资源，不起 FastAPI | 13 | `verify_batch_archive.py`、`verify_error_boundary.py`、`verify_filestore.py`、`verify_filestore_live.py`、`verify_grsai_plugins.py`、`verify_json_ascii.py`、`verify_json_migration.py`、`verify_json_migration_edge.py`、`verify_media_reliability.py`、`verify_multi_image.py`、`verify_queue_and_auth.py`、`verify_tag_json_each.py`、`verify_tag_persist.py` |
 | 隔离 FastAPI 服务 | 14 | `verify_asset_filters.py`、`verify_delete_assets_tasks.py`、`verify_delete_semantics.py`、`verify_frontend_contract.py`、`verify_multi_image_api.py`、`verify_p0_fixes.py`、`verify_plugin_loader.py`、`verify_prod_deploy.py`、`verify_schema_normalization.py`、`verify_template_export.py`、`verify_thumbnail_perf.py`、`verify_upload_kinds.py`、`verify_usage_stats.py`、`verify_user_isolation.py` |
 | 隔离服务 + 真实 ComfyUI | 2 | `verify_b5_b6.py`、`verify_from_asset_upload.py` |

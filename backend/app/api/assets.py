@@ -337,7 +337,7 @@ async def upload_assets(
             # 配额检查在落盘之前：超限时当前文件还没写，之前写过的由 finally 回滚
             pending_bytes += len(data)
             await ensure_quota(db, user, pending_bytes)
-            mime = guess_mime(raw_name, data)
+            mime = guess_mime(raw_name, data, declared=upload.content_type)
             safe_name = unique_asset_name(raw_name, used_names)
             used_names.add(safe_name)
 
