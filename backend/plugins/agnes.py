@@ -231,7 +231,7 @@ class AgnesProvider(GenerationProvider):
         try:
             data = resp.json()
         except ValueError:
-            raise ValueError(f"Agnes 返回的不是 JSON：{resp.text[:200]}")
+            raise ValueError(f"Agnes 返回的不是 JSON：{resp.text[:200]}") from None
         if not data.get("data"):
             raise ValueError(f"Agnes 响应缺少 data 字段：{str(data)[:200]}")
 

@@ -132,7 +132,7 @@ class GenerationProvider(ABC):
         """引擎健康检查"""
         ...
 
-    async def close(self) -> None:
+    async def close(self) -> None:  # noqa: B027 —— 刻意的可选钩子，见 docstring
         """释放实例持有的资源（httpx 连接池、后台协程等）。默认无操作。
 
         工厂在替换/注销实例时会调用（factory._retire）—— 不覆写也没关系，

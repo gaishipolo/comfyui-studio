@@ -169,7 +169,7 @@ async def cancel_task(
     try:
         return await TaskService.cancel_task(db, task_id)
     except ValueError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        raise HTTPException(status_code=409, detail=str(e)) from e
 
 
 @router.post("/{task_id}/retry", response_model=TaskResponse)

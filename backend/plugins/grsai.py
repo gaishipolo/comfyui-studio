@@ -139,7 +139,7 @@ class GrsaiProvider(GenerationProvider):
         try:
             return resp.json()
         except ValueError:
-            raise ValueError(f"Grsai 返回的不是 JSON（HTTP {resp.status_code}）：{resp.text[:200]}")
+            raise ValueError(f"Grsai 返回的不是 JSON（HTTP {resp.status_code}）：{resp.text[:200]}") from None
 
     # ── ③ 参考图：短标记 ↔ base64 ───────────────────────
     @staticmethod

@@ -223,7 +223,8 @@ export default function TaskPanel({ user, onReuseTask }: { user: User; onReuseTa
     if (!isTerminal(task.status)) return
     setSelected((prev) => {
       const next = new Set(prev)
-      next.has(task.id) ? next.delete(task.id) : next.add(task.id)
+      if (next.has(task.id)) next.delete(task.id)
+      else next.add(task.id)
       return next
     })
   }

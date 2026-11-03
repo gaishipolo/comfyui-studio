@@ -130,7 +130,7 @@ class GrsaiMinimaxH3Provider(GenerationProvider):
         try:
             return resp.json()
         except ValueError:
-            raise ValueError(f"Grsai 返回的不是 JSON（HTTP {resp.status_code}）：{resp.text[:200]}")
+            raise ValueError(f"Grsai 返回的不是 JSON（HTTP {resp.status_code}）：{resp.text[:200]}") from None
 
     # ── ③ 参考图 / 参考音频：短标记 ↔ base64 ─────────────
     @staticmethod
@@ -274,7 +274,7 @@ class GrsaiMinimaxH3Provider(GenerationProvider):
         try:
             duration = 5 if raw_duration in (None, "") else int(raw_duration)
         except (TypeError, ValueError):
-            raise ValueError(f"时长必须是整数秒：{raw_duration}")
+            raise ValueError(f"时长必须是整数秒：{raw_duration}") from None
         if not 1 <= duration <= _MAX_DURATION:
             raise ValueError(f"时长需在 1~{_MAX_DURATION} 秒之间，收到 {duration}")
         if resolution == "1080p" and duration > _MAX_DURATION_1080P:
@@ -298,7 +298,7 @@ class GrsaiMinimaxH3Provider(GenerationProvider):
             try:
                 payload["seed"] = int(seed)
             except (TypeError, ValueError):
-                raise ValueError(f"随机种子必须是整数：{seed}")
+                raise ValueError(f"随机种子必须是整数：{seed}") from None
 
         skill = params.get("promptSkill")
         if skill is not None and skill != "":

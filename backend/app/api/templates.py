@@ -37,7 +37,7 @@ def _read_workflow_file(workflow_file: str) -> dict:
     try:
         workflow = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
-        raise HTTPException(status_code=400, detail=f"工作流文件不是合法 JSON：{safe_name}")
+        raise HTTPException(status_code=400, detail=f"工作流文件不是合法 JSON：{safe_name}") from None
     if not isinstance(workflow, dict):
         raise HTTPException(status_code=400, detail=f"工作流格式不正确：{safe_name}")
     return workflow
@@ -117,7 +117,7 @@ async def get_workflow_inventory(
     try:
         inventory = inspect_workflow(workflow)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     return WorkflowInventoryResponse(filename=safe_name, **inventory)
 
 
@@ -237,7 +237,7 @@ async def upload_workflow(
     try:
         workflow = json.loads(content)
     except json.JSONDecodeError:
-        raise HTTPException(status_code=400, detail="Invalid JSON file")
+        raise HTTPException(status_code=400, detail="Invalid JSON file") from None
 
     # 校验是 ComfyUI 工作流格式（节点字典）
     if not isinstance(workflow, dict):
@@ -246,7 +246,7 @@ async def upload_workflow(
     try:
         inventory = inspect_workflow(workflow)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     node_count = len(workflow)
 
@@ -457,7 +457,7 @@ async def import_template(
         raise HTTPException(
             status_code=400,
             detail=f"模板内容不合法：{first.get('loc', '')} {first.get('msg', '')}".strip(),
-        )
+        ) from e
 
     # 内嵌工作流落盘：内容相同就复用已有文件，绝不覆盖本机已有的同名工作流
     if payload.workflow:

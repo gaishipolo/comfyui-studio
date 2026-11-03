@@ -25,7 +25,7 @@ from app.asset_retention import purge_matching
 from app.database import get_db
 from app.download_tickets import registry as download_ticket_registry
 from app.media import guess_mime
-from app.models.models import Asset, Task, Template, User
+from app.models.models import Asset, Task, User
 from app.quota import ensure_quota, usage_summary
 from app.schemas.schemas import AssetResponse, AssetShareRequest
 from app.auth import get_current_user

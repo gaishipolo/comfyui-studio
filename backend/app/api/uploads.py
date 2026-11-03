@@ -50,7 +50,7 @@ async def _forward_to_engine(engine: str, data: bytes, name: str) -> str:
             name,
             exc_info=(type(e), e, e.__traceback__),
         )
-        raise HTTPException(status_code=400, detail=safe_detail(e))
+        raise HTTPException(status_code=400, detail=safe_detail(e)) from e
     try:
         with lease as provider:
             return await provider.upload_input(data, name)
@@ -61,7 +61,7 @@ async def _forward_to_engine(engine: str, data: bytes, name: str) -> str:
             name,
             exc_info=(type(e), e, e.__traceback__),
         )
-        raise HTTPException(status_code=400, detail=safe_detail(e))
+        raise HTTPException(status_code=400, detail=safe_detail(e)) from e
     except Exception as e:  # noqa: BLE001 —— 引擎侧报错统一收成 502
         # 异常原文可能带上游完整 URL（含 query 里的 key），过脱敏再回 —— 与 /engines 同一道防线
         logger.error(
@@ -70,7 +70,7 @@ async def _forward_to_engine(engine: str, data: bytes, name: str) -> str:
             name,
             exc_info=(type(e), e, e.__traceback__),
         )
-        raise HTTPException(status_code=502, detail=f"上传到生成引擎失败: {safe_detail(e)}")
+        raise HTTPException(status_code=502, detail=f"上传到生成引擎失败: {safe_detail(e)}") from e
 
 
 @router.post("/file")
