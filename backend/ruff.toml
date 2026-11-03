@@ -1,0 +1,46 @@
+# ruff 配置 —— 只保留「能拦住 bug」的规则集
+#
+# 取舍原则：进 CI 的规则必须做到「报出来的每一条都值得改」。
+# 一旦出现大量假阳性，团队就会开始习惯性忽略输出，这比不检查更糟。
+# 因此刻意不启用 UP / SIM / PIE / PERF / C4 这类「现代化建议」：
+# 它们不影响正确性，却会持续产出噪音（例如把 timezone.utc 换成 UTC、
+# 把嵌套 with 合并成一行、把 try/except/pass 换成 contextlib.suppress）。
+
+target-version = "py311"
+line-length = 100
+# tests/ 里刻意构造脏数据用来验证清洗逻辑（比如模块级 import 不在文件顶部，
+# 因为测试要先设环境变量再 import），E402 这类是必然的，不纳入检查。
+# 注意：ruff 对「显式指定的路径」默认不套用 exclude，所以 CI 那条命令
+# 自己用 git ls-files 排除了 tests/，两处都要改。
+extend-exclude = ["tests"]
+
+[lint]
+select = [
+    "E",    # pycodestyle error：缩进、语法相关
+    "F",    # pyflakes：未使用导入/变量、未定义名、f-string 缺占位符
+    "W",    # pycodestyle warning
+    "B",    # bugbear：真 bug 类（异常链、循环变量绑定、可变默认参数…）
+    "RUF",  # ruff 自有规则（其中只有少数几条会命中）
+]
+
+ignore = [
+    # ── 框架惯用法，不是问题 ──────────────────────────────
+    "B008",   # FastAPI 的 Depends()/Query()/File() 必须写在默认参数里，这是框架契约
+    "E712",   # SQLAlchemy 列比较必须用 Column == True；改成 Column 会变成 Python 真值判断，语义不同
+
+    # ── 刻意保留的写法 ───────────────────────────────────
+    "BLE001", # 盲 except：项目只在边界处使用，且都带 noqa 与理由说明
+    "E501",   # 行长：注释以中文为主，中文实际显示宽度是 2，按字符数卡没有意义
+    "RUF012", # 可变类默认值：插件的 capabilities / 字段表就是类级常量声明
+    "RUF100", # 多余 noqa：手写的 `# noqa: BLE001` 在这里是对读者的说明，不是给工具的
+
+    # ── 中文语境下的假阳性 ───────────────────────────────
+    "RUF001", # 字符串里的「全角标点」
+    "RUF002", # docstring 里的全角标点
+    "RUF003", # 注释里的全角标点
+]
+
+[lint.per-file-ignores]
+# 示例模板是给第三方插件作者抄的，允许它比生产代码宽松一点点：
+# 预留的扩展点参数暂时用不到，但签名必须完整，否则抄过去的人会缺实现
+"examples/provider_template.py" = ["F841"]

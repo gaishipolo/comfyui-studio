@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # ── 后端：40 个不依赖 pytest 的裸脚本，逐个独立进程跑 ──────────────
+  # ── 后端：44 个不依赖 pytest 的裸脚本，逐个独立进程跑 ──────────────
   backend:
     name: backend / py3.13
     runs-on: ubuntu-latest
@@ -28,10 +28,20 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
-          cache-dependency-path: backend/requirements.txt
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
 
-      - name: 安装依赖
-        run: pip install -r requirements.txt
+      - name: 安装依赖（含 lint 工具）
+        run: pip install -r requirements-dev.txt
+
+      # 只检查 git 跟踪的 .py。两个原因：
+      #   plugins/ 目录运行时可被写入管理员上传的第三方插件 —— 那是别人的代码，
+      #     不该由我们的门禁拦下（也不该让它把 CI 弄红）
+      #   tests/ 里刻意构造脏数据用来验证清洗逻辑，E402 之类是必然的
+      # git ls-files 输出相对当前目录的路径，在 backend/ 下正好对应磁盘布局
+      - name: lint
+        run: ruff check $(git ls-files '*.py' | grep -v '^tests/')
 
       # 不用 `set -e` 逐个中断：让一次构建把所有失败都报出来，
       # 否则每修一个就要再 push 一次才能看到下一个。
@@ -81,6 +91,9 @@ jobs:
 
       - name: 安装依赖
         run: npm ci --no-audit --no-fund
+
+      - name: lint
+        run: npm run lint
 
       - name: 单测
         run: npm run test:state

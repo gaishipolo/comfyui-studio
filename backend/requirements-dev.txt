@@ -1,0 +1,11 @@
+# 开发与 CI 专用依赖 —— 不进生产镜像。
+#
+# 用 `-r requirements.txt` 继承运行时依赖，本地一条命令装齐：
+#     pip install -r requirements-dev.txt
+#
+# 工具类依赖精确锁定版本（而不是像 requirements.txt 那样给范围）：
+# lint 规则集在小版本之间会变，某天上游加了一条新规则，CI 就会无缘无故
+# 变红，而改的人根本不知道自己碰到了什么。升级 lint 工具应当是显式动作。
+-r requirements.txt
+
+ruff==0.17.3

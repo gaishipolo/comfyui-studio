@@ -8,22 +8,29 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "test:state": "tsx --test tests/task5_state.test.ts tests/list_view_state.test.ts tests/modal_a11y.test.ts tests/random_field.test.ts",
-    "test:ui": "npm run build && node tests/verify_task5_ui.mjs"
+    "test:ui": "npm run build && node tests/verify_task5_ui.mjs",
+    "lint": "eslint src",
+    "lint:fix": "eslint src --fix"
   },
   "dependencies": {
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
     "autoprefixer": "^10.4.20",
+    "eslint": "^10.14.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.14.0",
     "playwright": "^1.64.1",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.17",
     "tsx": "^4.20.6",
     "typescript": "^5.6.3",
+    "typescript-eslint": "^8.72.1",
     "vite": "^6.0.5"
   }
 }

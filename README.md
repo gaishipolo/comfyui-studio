@@ -165,10 +165,32 @@ Get-ChildItem tests\test_*.py | ForEach-Object { & .\.venv\Scripts\python.exe $_
 
 `.github/workflows/ci.yml`：push 到 `main` 和每个 PR 自动触发，两个 job 并行，约 2–3 分钟。
 
-- `backend / py3.13`（ubuntu，与生产镜像同版本）：装 `requirements.txt`，逐个跑 `tests/test_*.py`。脚本会跑完**全部**再汇总失败，不会第一个失败就中断 —— 一次构建能看到所有问题。
-- `frontend / node22`：`npm ci` → `npm run test:state` → `npm run build`（`build` 内含 `tsc -b`，类型错误在这里挂）。
+- `backend / py3.13`（ubuntu，与生产镜像同版本）：装 `requirements-dev.txt`，先 `ruff check .`（秒级，先挂掉能省几分钟测试等待），再逐个跑 `tests/test_*.py`。测试脚本会跑完**全部**再汇总失败，不会第一个失败就中断 —— 一次构建能看到所有问题。
+- `frontend / node22`：`npm ci` → `npm run lint` → `npm run test:state` → `npm run build`（`build` 内含 `tsc -b`，类型错误在这里挂）。
 
 只跑离线单元测试。`verify_*.py` 里需要真实 ComfyUI、需要起 FastAPI 服务的那些仍在本地回归，不进 CI。
+
+### 代码质量门禁（lint）
+
+| 位置 | 工具 | 命令 | 规则集 |
+|---|---|---|---|
+| 后端 | [ruff](https://docs.astral.sh/ruff/) 0.17.3 | `ruff check .` | `backend/ruff.toml` |
+| 前端 | eslint 10 + typescript-eslint | `npm run lint` | `frontend/eslint.config.js` |
+
+两个配置都遵循同一条取舍：**只启用「报出来每一条都值得改」的规则**。ruff 刻意不启用 `UP`/`SIM`/`PIE` 这类现代化建议（不影响正确性，只持续产噪音）；eslint 刻意只开 `rules-of-hooks` 与 `exhaustive-deps` 两条，不展开 react-hooks 插件面向 React 19 Compiler 的 16 条规则集。假阳性一旦成堆，输出就会被习惯性忽略，那比不检查更糟。
+
+配置里逐条写了每个 ignore 的理由 —— 改动前先读那段注释。
+
+后端 lint 需要开发依赖：
+
+```powershell
+pip install -r requirements-dev.txt
+ruff check .
+```
+
+`ruff check .` 会连同 `plugins/` 目录一起扫 —— 那里可能有你上传的第三方插件，那部分代码也值得过一遍规范。CI 则只检查 git 跟踪的文件（`ruff check $(git ls-files '*.py' | grep -v '^tests/')`），因为上传的插件不属于本仓库，不该让 CI 因为别人的代码变红。
+
+ruff 的版本**精确锁定**：lint 规则集在小版本之间会变，上游某天加一条新规则就会让 CI 无缘无故变红，而改的人根本不知道自己碰到了什么。升级 lint 工具应当是显式动作。
 
 ### verify 脚本（38 个 `verify_*.py`）
 
