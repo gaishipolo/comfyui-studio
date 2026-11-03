@@ -314,6 +314,12 @@ export interface FlowRun {
   progress: number
   params: Record<string, unknown>
   steps: FlowStepState[]
+  /** 流程级产出 [{name, pick, outputs}] —— 按流程的 outputs 声明解析 */
+  outputs: {
+    name: string
+    pick: string
+    outputs: { asset_id: string; filename: string; mime_type: string }[]
+  }[]
   error_msg: string
   created_at: string
   finished_at: string | null

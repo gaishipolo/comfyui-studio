@@ -13,7 +13,7 @@
  * 「谁在吃它的产物」，让人知道这条线接到哪里去了。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { FlowStep, NodeCapability, TemplateField } from '../types'
+import type { Flow, FlowStep, NodeCapability, TemplateField } from '../types'
 import { useModalKeyboard } from './useModalKeyboard'
 import { nodeVisual, paramSummary, stepDependencies } from './flowEditor'
 import {
@@ -32,6 +32,8 @@ interface Props {
   steps: FlowStep[]
   caps: NodeCapability[]
   inputFields: TemplateField[]
+  /** 可被调用的子流程（排除自己） */
+  flows: Flow[]
   onSave: (step: FlowStep) => void
   onDelete: () => void
   onClose: () => void
@@ -42,6 +44,7 @@ export default function StepEditorDialog({
   steps,
   caps,
   inputFields,
+  flows,
   onSave,
   onDelete,
   onClose,
@@ -287,37 +290,56 @@ export default function StepEditorDialog({
               >
                 <option value="template">普通</option>
                 <option value="repeat">循环</option>
+                <option value="flow">子流程</option>
               </select>
             </label>
-            <label className="field-label flex-1">
-              节点
-              <select
-                className="field"
-                value={draft.template_id}
-                onChange={(e) => {
-                  const next = caps.find((c) => c.id === e.target.value)
-                  patch({
-                    template_id: e.target.value,
-                    // 换节点后字段全变了，参数按同名字段保留、其余清掉
-                    params: next
-                      ? Object.fromEntries(
-                          next.fields.map((f) => [
-                            f.name,
-                            draft.params?.[f.name] ?? '',
-                          ]),
-                        )
-                      : {},
-                  })
-                }}
-              >
-                <option value="">选一个节点…</option>
-                {caps.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name}
-                  </option>
-                ))}
-              </select>
-            </label>
+            {draft.type === 'flow' ? (
+              <label className="field-label flex-1">
+                调用哪条流程
+                <select
+                  className="field"
+                  value={draft.flow_id}
+                  onChange={(e) => patch({ flow_id: e.target.value })}
+                >
+                  <option value="">选一条流程…</option>
+                  {flows.map((f) => (
+                    <option key={f.id} value={f.id}>
+                      {f.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : (
+              <label className="field-label flex-1">
+                节点
+                <select
+                  className="field"
+                  value={draft.template_id}
+                  onChange={(e) => {
+                    const next = caps.find((c) => c.id === e.target.value)
+                    patch({
+                      template_id: e.target.value,
+                      // 换节点后字段全变了，参数按同名字段保留、其余清掉
+                      params: next
+                        ? Object.fromEntries(
+                            next.fields.map((f) => [
+                              f.name,
+                              draft.params?.[f.name] ?? '',
+                            ]),
+                          )
+                        : {},
+                    })
+                  }}
+                >
+                  <option value="">选一个节点…</option>
+                  {caps.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
           </div>
 
           {draft.type === 'repeat' && (

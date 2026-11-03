@@ -278,7 +278,9 @@ function RunView({
                     <span className="text-xs text-muted">
                       {s.type === 'repeat'
                         ? `循环 ${s.count || 'N'} 次`
-                        : STEP_TYPE_LABEL[s.type] ?? s.type}
+                        : s.type === 'flow'
+                          ? `子流程 · ${flows.find((f) => f.id === s.flow_id)?.name ?? '未选'}`
+                          : STEP_TYPE_LABEL[s.type] ?? s.type}
                     </span>
                   </li>
                 ))}
@@ -341,6 +343,22 @@ function RunView({
                     <li className="text-sm text-muted">正在执行第一步…</li>
                   )}
                 </ol>
+
+                {run.status === 'done' && run.outputs?.length > 0 && (
+                  <>
+                    <h5 className="mt-md font-display text-sm font-medium">流程产出</h5>
+                    <div className="mt-2xs flex flex-col gap-2xs">
+                      {run.outputs.map((o) => (
+                        <div key={o.name} className="flex items-center gap-sm text-sm">
+                          <span className="chip">{o.name}</span>
+                          <span className="text-xs text-muted">
+                            {o.outputs.length} 个产物
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
               </div>
             )}
           </>
@@ -673,6 +691,11 @@ function EditView({
                             循环 {step.count || 'N'} 次
                           </span>
                         )}
+                        {step.type === 'flow' && (
+                          <span className="chip shrink-0" data-tone="accent">
+                            子流程
+                          </span>
+                        )}
                         <span className="min-w-0 flex-1">
                           <span className="block truncate text-sm font-medium">
                             {step.title?.trim() || cap?.name || '（未选节点）'}
@@ -924,6 +947,7 @@ function EditView({
           steps={draft.steps}
           caps={caps}
           inputFields={draft.input_schema?.fields ?? []}
+          flows={flows.filter((f) => f.id !== draft.id)}
           onClose={() => setEditing(null)}
           onDelete={() => {
             removeStep(editing.id)
