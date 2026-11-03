@@ -407,6 +407,8 @@ class FlowRunResponse(BaseModel):
     progress: float = 0.0
     params: dict = Field(default_factory=dict)
     steps: list = Field(default_factory=list)
+    # 流程级产出 [{name, pick, outputs}] —— 按流程的 outputs 声明解析
+    outputs: list = Field(default_factory=list)
     error_msg: str = ""
     created_at: datetime
     finished_at: datetime | None = None

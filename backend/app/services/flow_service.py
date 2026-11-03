@@ -78,7 +78,7 @@ async def submit_flow(db, flow: Flow, params: dict, user) -> FlowRun:
     return run
 
 
-async def _execute_flow(run_id: str) -> None:
+async def _execute_flow(run_id: str, _depth: int = 0) -> None:
     """后台执行一条流程。出错把原因写进 FlowRun，不往上抛。
 
     **开头用短会话读完就释放**：整个执行过程可能跑几分钟，长会话会把
@@ -124,8 +124,42 @@ async def _execute_flow(run_id: str) -> None:
 
         # ── 先把整层都提交出去（这一步不等待，任务在后台跑）──
         # 循环步骤在这一层展开成 N 个实例（N 个任务一起提交，并行跑）
+        # 子流程步骤在这一层整体执行（它内部自己分层）
         started: list[tuple[str, str, int]] = []
+        subflow_done: list[tuple[str, dict]] = []
         for step_id, step in layer_steps:
+            step_type = str(step.get("type") or "template")
+            if step_type == "flow":
+                # ── 子流程：整条流程作为一步 ──
+                try:
+                    sub_ctx, sub_state = await _run_subflow(
+                        run, step, step_id, ctx, depth=_depth
+                    )
+                except FlowError as exc:
+                    await _fail_run(run_id, f"{step_label(steps, step_id)}：{exc}", state)
+                    return
+                # 只把「产物」暴露给父流程 —— 子流程的 input / steps 是它
+                # 内部的事，父流程不该读到（读了也没意义，引用路径也不同）。
+                # 具名产出直接摊在这一层：父流程写 {{ steps.sub.final_image }}
+                # 就能拿到，不必再经一层 named。
+                exposed: dict = {"outputs": _subflow_outputs(sub_ctx)}
+                exposed.update(sub_ctx.get("named") or {})
+                ctx["steps"][step_id] = exposed
+                subflow_done.append((step_id, sub_state))
+                state.append(
+                    {
+                        "step_id": step_id,
+                        "task_id": "",
+                        "status": "done",
+                        "layer": layer_index,
+                        "iteration": 0,
+                        "outputs": _subflow_outputs(sub_ctx),
+                        "subflow": sub_state,
+                    }
+                )
+                done_count += 1
+                continue
+
             try:
                 instances = await _expand_instances(step, step_id, ctx)
             except (FlowError, FlowExprError) as exc:
@@ -195,7 +229,249 @@ async def _execute_flow(run_id: str) -> None:
             )
             return
 
-    await _update_run(run_id, status="done", progress=100.0, steps=state)
+    # 流程级产出：按声明解析（outputs 声明此前只是存着，执行器从不消费它）
+    final_outputs = _resolve_flow_outputs(flow.outputs or [], ctx)
+    await _update_run(
+        run_id,
+        status="done",
+        progress=100.0,
+        steps=state,
+        outputs=final_outputs,
+    )
+
+
+def _resolve_flow_outputs(declarations: list, ctx: dict) -> list[dict]:
+    """按流程的输出声明解析出流程级产物。
+
+    声明形如 `{name, from_step, pick}`：
+    - name      产出名（父流程按这个名字引用）
+    - from_step 来源步骤 id
+    - pick      取哪部分：all / first / last
+
+    **没声明时默认交付最后一步的产物** —— 大多数流程就是「跑完拿结果」，
+    逼用户先声明一遍才能用是本末倒置。
+    """
+    if not declarations:
+        # 默认：最后一步的产物
+        step_outputs = ctx.get("steps") or {}
+        for step_id in reversed(list(step_outputs.keys())):
+            outs = step_outputs[step_id].get("outputs") or []
+            if outs:
+                return [
+                    {
+                        "name": "output",
+                        "pick": "all",
+                        "outputs": outs,
+                    }
+                ]
+        return []
+
+    resolved: list[dict] = []
+    step_outputs = ctx.get("steps") or {}
+    for decl in declarations:
+        name = str(decl.get("name") or "").strip()
+        src = str(decl.get("from_step") or decl.get("from") or "").strip()
+        pick = str(decl.get("pick") or "all").strip()
+        if not name or not src:
+            continue
+        outs = (step_outputs.get(src) or {}).get("outputs") or []
+        if pick == "first" and outs:
+            outs = outs[:1]
+        elif pick == "last" and outs:
+            outs = outs[-1:]
+        resolved.append({"name": name, "pick": pick, "outputs": outs})
+    return resolved
+
+
+# 子流程嵌套的最大深度 —— 防流程 A 调 B、B 又调 A 的无限递归。
+# 5 层够覆盖「主流程 → 集子流程 → 分镜子流程 → 镜头子流程」这类结构。
+MAX_SUBFLOW_DEPTH = 5
+
+
+def _subflow_outputs(sub_ctx: dict) -> list[dict]:
+    """子流程的产物汇总 —— 它的每个具名产出都摊平成列表。"""
+    outs: list[dict] = []
+    for value in (sub_ctx.get("named") or {}).values():
+        if isinstance(value, list):
+            outs.extend(value)
+        elif value:
+            outs.append(value)
+    return outs
+
+
+async def _run_subflow(
+    run: FlowRun,
+    step: dict,
+    step_id: str,
+    parent_ctx: dict,
+    depth: int,
+) -> tuple[dict, list[dict]]:
+    """执行一条子流程。返回 (子流程的上下文, 子流程的步骤状态)。
+
+    **输入怎么传**：同名自动取作默认，显式绑定作覆盖 —— 和步骤字段一个规则，
+    不引入新概念。子流程的输入字段叫「风格」，父流程的输入里也有「风格」
+    就自动对上；父流程想传别的值，就在这一步的 params 里显式写。
+
+    **输出怎么被引用**：子流程的 outputs 声明（{name, from_step, pick}）
+    解析出来的具名产出，放进 ctx["named"][name]。父流程写
+    `{{ steps.<步骤id>.final_image }}` 就能拿到。
+    """
+    if depth >= MAX_SUBFLOW_DEPTH:
+        raise FlowError(
+            f"子流程嵌套超过 {MAX_SUBFLOW_DEPTH} 层"
+            "（可能是流程互相调用形成了环）"
+        )
+
+    flow_id = str(step.get("flow_id") or "")
+    if not flow_id:
+        raise FlowError("子流程步骤没有指定要调用哪条流程")
+
+    async with async_session() as db:
+        sub_flow = await db.get(Flow, flow_id)
+        if sub_flow is None:
+            raise FlowError(f"子流程不存在：{flow_id}")
+        if sub_flow.id == run.flow_id:
+            raise FlowError("子流程不能调用自己")
+        sub_steps = list(sub_flow.steps or [])
+        sub_outputs_decl = list(sub_flow.outputs or [])
+        sub_input_schema = dict(sub_flow.input_schema or {})
+        sub_name = sub_flow.name
+
+    # ── 组装子流程的输入 ──
+    sub_params = _build_subflow_params(sub_input_schema, step, parent_ctx)
+
+    # 子流程在自己的上下文里跑 —— 步骤 id 与父流程独立
+    sub_ctx: dict = {"input": sub_params, "steps": {}, "named": {}}
+    sub_state: list[dict] = []
+
+    layers, cycle = compute_layers(sub_steps)
+    if cycle:
+        raise FlowError(f"子流程「{sub_name}」内部存在循环依赖")
+    if not layers:
+        return sub_ctx, sub_state
+
+    by_id = {str(s.get("id") or ""): s for s in sub_steps}
+    done_count = 0
+
+    for layer_index, layer_ids in enumerate(layers):
+        layer_steps = [(sid, by_id[sid]) for sid in layer_ids if sid in by_id]
+        if not layer_steps:
+            continue
+
+        started: list[tuple[str, str, int]] = []
+        for sid, sstep in layer_steps:
+            if str(sstep.get("type") or "template") == "flow":
+                sub2_ctx, sub2_state = await _run_subflow(
+                    run, sstep, sid, sub_ctx, depth=depth + 1
+                )
+                sub_ctx["steps"][sid] = sub2_ctx
+                sub_state.append(
+                    {
+                        "step_id": sid,
+                        "task_id": "",
+                        "status": "done",
+                        "layer": layer_index,
+                        "iteration": 0,
+                        "outputs": _subflow_outputs(sub2_ctx),
+                        "subflow": sub2_state,
+                    }
+                )
+                done_count += 1
+                continue
+
+            try:
+                instances = await _expand_instances(sstep, sid, sub_ctx)
+            except (FlowError, FlowExprError) as exc:
+                raise FlowError(f"子流程「{sub_name}」的{step_label(sub_steps, sid)}：{exc}") from exc
+
+            for iteration, iteration_ctx in instances:
+                try:
+                    resolved = await _resolve_step_params(sstep, iteration_ctx)
+                except (FlowError, FlowExprError) as exc:
+                    raise FlowError(
+                        f"子流程「{sub_name}」的{step_label(sub_steps, sid)}第 {iteration + 1} 次：{exc}"
+                    ) from exc
+                try:
+                    task_id = await _start_step(run, sstep, sid, resolved)
+                except FlowError as exc:
+                    raise FlowError(
+                        f"子流程「{sub_name}」的{step_label(sub_steps, sid)}第 {iteration + 1} 次：{exc}"
+                    ) from exc
+                started.append((sid, task_id, iteration))
+
+        finished: list[tuple[str, Task, int]] = []
+        for sid, task_id, iteration in started:
+            try:
+                finished.append((sid, await _wait_task(task_id), iteration))
+            except FlowError as exc:
+                raise FlowError(f"子流程「{sub_name}」的{step_label(sub_steps, sid)}：{exc}") from exc
+
+        failed = [(sid, t) for sid, t, _ in finished if t.status != "done"]
+        merged: dict[str, list[dict]] = {}
+        for sid, task, iteration in finished:
+            outs = await _collect_outputs(task.id)
+            merged.setdefault(sid, []).extend(outs)
+            sub_state.append(
+                {
+                    "step_id": sid,
+                    "task_id": task.id,
+                    "status": task.status,
+                    "layer": layer_index,
+                    "iteration": iteration,
+                    "outputs": outs,
+                }
+            )
+            done_count += 1
+        for sid, outs in merged.items():
+            sub_ctx["steps"][sid] = {"outputs": outs}
+
+        if failed:
+            sid, task = failed[0]
+            detail = task.error_msg or f"任务状态 {task.status}"
+            raise FlowError(f"子流程「{sub_name}」的{step_label(sub_steps, sid)}失败：{detail}")
+
+    # ── 子流程的具名产出 ──
+    for item in _resolve_flow_outputs(sub_outputs_decl, sub_ctx):
+        sub_ctx["named"][item["name"]] = item["outputs"]
+    if not sub_ctx["named"]:
+        # 没声明产出 → 默认最后一步的产物，名字就叫 output
+        last = _resolve_flow_outputs([], sub_ctx)
+        if last:
+            sub_ctx["named"]["output"] = last[0]["outputs"]
+    return sub_ctx, sub_state
+
+
+def _build_subflow_params(input_schema: dict, step: dict, parent_ctx: dict) -> dict:
+    """组装传给子流程的参数。
+
+    **同名自动取作默认，显式绑定作覆盖**：
+    - 子流程的输入字段叫「风格」，父流程上下文里也有「风格」→ 自动对上
+    - 父流程想传别的 → 在这一步的 params 里显式写 `{"风格": "{{ input.画风 }}"}`
+
+    和步骤字段用同一套规则，不引入新概念。
+    """
+    fields = input_schema.get("fields") if isinstance(input_schema, dict) else []
+    fields = fields if isinstance(fields, list) else []
+    parent_input = parent_ctx.get("input") or {}
+
+    params: dict = {}
+    for f in fields:
+        if not isinstance(f, dict):
+            continue
+        name = str(f.get("name") or "")
+        if not name:
+            continue
+        # 同名自动取
+        if name in parent_input:
+            params[name] = parent_input[name]
+
+    # 显式绑定覆盖
+    for field, expr in (step.get("params") or {}).items():
+        try:
+            params[field] = resolve_value(expr, parent_ctx)
+        except FlowExprError as exc:
+            raise FlowError(f"子流程参数「{field}」算不出来：{exc}") from exc
+    return params
 
 
 async def _expand_instances(step: dict, step_id: str, ctx: dict) -> list[tuple[int, dict]]:
@@ -304,6 +580,7 @@ async def _update_run(
     status: str | None = None,
     progress: float | None = None,
     steps: list[dict] | None = None,
+    outputs: list[dict] | None = None,
 ) -> None:
     async with async_session() as db:
         run = await db.get(FlowRun, run_id)
@@ -315,6 +592,8 @@ async def _update_run(
             run.progress = progress
         if steps is not None:
             run.steps = steps
+        if outputs is not None:
+            run.outputs = outputs
         if run.status in ("done", "error", "cancelled"):
             run.finished_at = utcnow()
         await db.commit()

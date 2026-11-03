@@ -76,6 +76,9 @@ _COLUMN_MIGRATIONS = [
     # 非流程任务这两列为空，走原来的单任务逻辑。
     ("tasks", "flow_run_id", "ALTER TABLE tasks ADD COLUMN flow_run_id VARCHAR(32) DEFAULT ''"),
     ("tasks", "step_id", "ALTER TABLE tasks ADD COLUMN step_id VARCHAR(32) DEFAULT ''"),
+    # 流程级产出（2026-11-03）：按流程的 outputs 声明解析出来的产物。
+    # 子流程嵌套时，父流程按产出名引用子流程的结果。
+    ("flow_runs", "outputs", "ALTER TABLE flow_runs ADD COLUMN outputs TEXT NOT NULL DEFAULT '[]'"),
 ]
 
 # SQLite 不支持 ALTER COLUMN，改 task_id 可空只能重建表。列顺序与 models.Asset 对齐。

@@ -238,6 +238,9 @@ class FlowRun(Base):
     params: Mapped[dict] = mapped_column(JSONStore, default=dict, comment="流程输入快照")
     # 每步状态 [{step_id, task_id, status, error}]，运行台据此显示进度
     steps: Mapped[list] = mapped_column(JSONStore, default=list, comment="每步执行状态")
+    # 流程级产出 [{name, pick, outputs}]，按流程的 outputs 声明解析。
+    # 父流程引用子流程时，子流程的产出名就是这里的 name。
+    outputs: Mapped[list] = mapped_column(JSONStore, default=list, comment="流程级产出")
 
     error_msg: Mapped[str] = mapped_column(Text, default="", comment="失败原因")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

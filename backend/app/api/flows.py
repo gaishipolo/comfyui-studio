@@ -107,11 +107,17 @@ async def validate_flow(
         t.id: t
         for t in (await db.execute(select(Template))).scalars().all()
     }
+    # 所有可调用的流程 —— 用来检查子流程引用是否存在
+    flows = {
+        f.id: f.name
+        for f in (await db.execute(select(Flow))).scalars().all()
+    }
     return validate_flow_config(
         steps=[s.model_dump() for s in payload.steps],
         input_schema=payload.input_schema,
         outputs=[o.model_dump() for o in payload.outputs],
         templates=templates,
+        flows=flows,
     )
 
 

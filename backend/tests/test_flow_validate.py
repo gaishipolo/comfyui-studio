@@ -339,6 +339,92 @@ def test_loop_var_in_loop_step_ok() -> None:
     assert result["ok"], result["errors"]
 
 
+def test_subflow_must_exist() -> None:
+    """子流程引用不存在的流程要报错。"""
+    steps = [
+        {"id": "sub", "type": "flow", "title": "调子流程", "flow_id": "nope", "params": {}}
+    ]
+    result = validate_flow_config(
+        steps=steps,
+        input_schema={"fields": []},
+        outputs=[],
+        templates=TEMPLATES,
+        flows={"other": "别的流程"},
+    )
+    assert not result["ok"]
+    assert any("子流程不存在" in e for e in result["errors"]), result["errors"]
+
+
+def test_subflow_cannot_call_itself() -> None:
+    """子流程调用自己要被拦住 —— 那是无限递归。"""
+    steps = [
+        {"id": "sub", "type": "flow", "title": "调自己", "flow_id": "self_id", "params": {}}
+    ]
+    result = validate_flow_config(
+        steps=steps,
+        input_schema={"fields": []},
+        outputs=[],
+        templates=TEMPLATES,
+        flows={"self_id": "我自己"},
+        flow_id="self_id",
+    )
+    assert not result["ok"]
+    assert any("自己" in e for e in result["errors"]), result["errors"]
+
+
+def test_subflow_without_flow_id_errors() -> None:
+    """子流程没指定调哪条流程要报错。"""
+    steps = [{"id": "sub", "type": "flow", "title": "空的", "flow_id": "", "params": {}}]
+    result = validate_flow_config(
+        steps=steps,
+        input_schema={"fields": []},
+        outputs=[],
+        templates=TEMPLATES,
+        flows={},
+    )
+    assert not result["ok"]
+    assert any("没指定" in e for e in result["errors"]), result["errors"]
+
+
+def test_subflow_params_reference_checked() -> None:
+    """子流程的显式参数也要校验引用的流程输入存在。"""
+    steps = [
+        {
+            "id": "sub",
+            "type": "flow",
+            "title": "调子流程",
+            "flow_id": "sub_id",
+            "params": {"prompt": "{{ input.nope }}"},
+        }
+    ]
+    result = validate_flow_config(
+        steps=steps,
+        input_schema={"fields": []},
+        outputs=[],
+        templates=TEMPLATES,
+        flows={"sub_id": "子流程"},
+    )
+    assert not result["ok"]
+    assert any("流程输入" in e for e in result["errors"]), result["errors"]
+
+
+def test_subflow_reference_creates_dependency() -> None:
+    """引用子流程的具名产出 → 那一步依赖子流程这一步。"""
+    steps = [
+        {"id": "sub", "type": "flow", "title": "子流程", "flow_id": "sub_id", "params": {}},
+        {
+            "id": "down",
+            "type": "template",
+            "title": "下游",
+            "template_id": "t2",
+            "params": {"image": "{{ steps.sub.final_image }}"},
+        },
+    ]
+    layers, cycle = compute_layers(steps)
+    assert not cycle
+    assert layers == [["sub"], ["down"]]
+
+
 def main() -> int:
     tests = [
         test_step_label_prefers_title,
@@ -358,6 +444,11 @@ def main() -> int:
         test_loop_zero_count_without_list_source_errors,
         test_loop_var_in_non_loop_step_errors,
         test_loop_var_in_loop_step_ok,
+        test_subflow_must_exist,
+        test_subflow_cannot_call_itself,
+        test_subflow_without_flow_id_errors,
+        test_subflow_params_reference_checked,
+        test_subflow_reference_creates_dependency,
     ]
     failures: list[str] = []
     for test in tests:

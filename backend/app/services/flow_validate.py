@@ -105,8 +105,15 @@ def validate_flow_config(
     input_schema: dict,
     outputs: list[dict],
     templates: dict[str, Template],
+    flows: dict[str, str] | None = None,
+    flow_id: str = "",
 ) -> dict:
-    """校验一份流程配置。返回 {ok, errors, warnings, layers}。"""
+    """校验一份流程配置。返回 {ok, errors, warnings, layers}。
+
+    flows 是「所有可调用的流程」{流程id: 流程名}，用来检查子流程引用。
+    flow_id 是当前流程自己的 id（用来发现「调用自己」）。
+    """
+    flows = flows or {}
     errors: list[str] = []
     warnings: list[str] = []
 
@@ -128,9 +135,23 @@ def validate_flow_config(
         label = step_label(steps, sid)
         step_type = step.get("type") or "template"
         if step_type == "flow":
-            warnings.append(
-                f"{label}是子流程 —— 还没实现，先按普通步骤跳过"
-            )
+            # 子流程：检查它存在、不是自己
+            sub_id = str(step.get("flow_id") or "")
+            if not sub_id:
+                errors.append(f"{label}是子流程，但没指定调用哪条流程")
+            elif sub_id == flow_id:
+                errors.append(f"{label}调用了自己（子流程不能调用自己）")
+            elif sub_id not in flows:
+                errors.append(f"{label}调用的子流程不存在：{sub_id}")
+            # 子流程的参数也要能算出来（跟普通步骤一样校验引用）
+            for _field, expr in (step.get("params") or {}).items():
+                for ref in collect_base_refs(expr):
+                    if ref.startswith("input."):
+                        name = ref.split(".", 1)[1]
+                        if name not in input_names:
+                            errors.append(
+                                f"{label}引用了流程输入「{name}」，但流程输入里没有这个字段"
+                            )
             continue
         if step_type not in ("template", "repeat"):
             errors.append(f"{label}的类型 {step_type} 不认识")
