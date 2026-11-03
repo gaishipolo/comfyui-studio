@@ -5,6 +5,7 @@
 按 **asset_id** 定位，而不是 (task_id, filename)。
 """
 import asyncio
+import logging
 import tempfile
 import uuid
 import zipfile
@@ -20,10 +21,12 @@ from starlette.background import BackgroundTask
 
 from app.asset_media import serve_asset_file, serve_asset_thumb
 from app.asset_names import unique_asset_name
+from app.asset_retention import purge_matching
 from app.database import get_db
 from app.download_tickets import registry as download_ticket_registry
 from app.media import guess_mime
 from app.models.models import Asset, Task, Template, User
+from app.quota import ensure_quota, usage_summary
 from app.schemas.schemas import AssetResponse, AssetShareRequest
 from app.auth import get_current_user
 from app.filestore import (
@@ -33,24 +36,17 @@ from app.filestore import (
     save_asset_file,
 )
 from app.upload_rules import FILE_KINDS, kind_for_filename, read_upload_bounded
-from app.thumbs import (
-    asset_lifecycle_key,
-    cleanup_asset_files,
-    task_lifecycle_key,
-    thumb_key,
-    thumbnail_lifecycle,
-    wait_for_task_completion,
-)
-from app.timeutils import parse_day_or_400 as _parse_day
+from app.thumbs import cleanup_asset_files, make_image_thumb, thumb_key
+from app.timeutils import parse_day_or_400 as _parse_day, utcnow
 from app.access import (
     can_modify_asset,
-    can_modify_asset_identity,
     can_view_asset,
     creator_display_names,
     is_admin,
 )
 
 router = APIRouter(prefix="/api/assets", tags=["assets"])
+logger = logging.getLogger(__name__)
 
 # 批量下载护城河：数量与总字节都封顶；真实字节数在打包循环里再兜一道
 # （防 file_size 元数据失真）。ZIP 落临时文件，避免整包常驻内存。
@@ -216,10 +212,15 @@ async def list_assets(
 
     用户隔离：普通用户只见「自己提交的 + 已共享给团队的」，admin 可见全部。
     """
-    # 归属过滤和按创建人筛选都读 assets.owner_id —— 素材自带归属，不用再 join 任务表。
+    # 回收站里的不进列表（deleted_at 非空）。归属过滤和按创建人筛选都读
+    # assets.owner_id —— 素材自带归属，不用再 join 任务表。
     # 只有「按模板筛选」必须过任务表，且用 outerjoin：上传素材没有来源任务，
     # 筛模板时自然落选（inner join 结果相同，但 outer 语义更准确）。
-    query = select(Asset).order_by(Asset.created_at.desc())
+    query = (
+        select(Asset)
+        .where(Asset.deleted_at.is_(None))
+        .order_by(Asset.created_at.desc())
+    )
 
     if not is_admin(user):
         query = query.where(
@@ -327,9 +328,15 @@ async def upload_assets(
 
     created_ids: list[str] = []
     saved: list[tuple[str, str]] = []  # (存储键, 文件名) —— 失败时回滚磁盘
+    # 本批次累计新增字节。一次传多个文件要按总量判断配额，不能逐个放行
+    # （否则 10 个各 500MB 的文件在「还剩 600MB」时全能通过）。
+    pending_bytes = 0
     try:
         for upload, raw_name, rules in staged:
             data = await read_upload_bounded(upload, rules)
+            # 配额检查在落盘之前：超限时当前文件还没写，之前写过的由 finally 回滚
+            pending_bytes += len(data)
+            await ensure_quota(db, user, pending_bytes)
             mime = guess_mime(raw_name, data)
             safe_name = unique_asset_name(raw_name, used_names)
             used_names.add(safe_name)
@@ -339,6 +346,25 @@ async def upload_assets(
             # to_thread：视频可达 200MB，同步写盘会冻住事件循环
             await asyncio.to_thread(save_asset_file, rel_path, data, content_type=mime)
             saved.append((rel_path, safe_name))
+
+            # 图片顺手生成缩略图（视频的抽帧在任务落盘那边做，上传路径不处理）。
+            # 不预生成的话，卡片首次访问要现场解码 2MB 原图，而 /thumb 只等 3 秒
+            # 就回退原图 —— 人多时等于一直拉原图。失败就跳过，不影响素材本身；
+            # 回滚时 cleanup_asset_files 会连缩略图一起删，不留孤儿文件。
+            if mime.startswith("image/"):
+                try:
+                    thumb = await asyncio.to_thread(make_image_thumb, data)
+                    if thumb:
+                        await asyncio.to_thread(
+                            save_asset_file,
+                            thumb_key(rel_path),
+                            thumb,
+                            content_type="image/jpeg",
+                        )
+                except Exception:  # noqa: BLE001 —— 缩略图是锦上添花
+                    logger.warning(
+                        "上传图片缩略图生成失败，跳过：%s", safe_name, exc_info=True
+                    )
 
             db.add(
                 Asset(
@@ -373,12 +399,14 @@ async def list_tags(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """获取所有标签及计数。用户隔离：普通用户只统计自己可见素材（自己的 + 共享的）"""
-    query = select(Asset.tags)
+    """获取所有标签及计数。用户隔离：普通用户只统计自己可见素材（自己的 + 共享的）
+
+    归属读 `assets.owner_id`（上传素材没有任务，join 任务表会漏掉它们的标签），
+    回收站里的素材不计入 —— 列表里看不到的标签不该出现在筛选器上。
+    """
+    query = select(Asset.tags).where(Asset.deleted_at.is_(None))
     if not is_admin(user):
-        query = query.join(Task, Asset.task_id == Task.id).where(
-            or_(Task.created_by == user.id, Asset.is_shared.is_(True))
-        )
+        query = query.where(or_(Asset.owner_id == user.id, Asset.is_shared.is_(True)))
     result = await db.execute(query)
     all_tags = result.scalars().all()
 
@@ -402,6 +430,133 @@ async def list_tags(
     ]
 
 
+# ── 回收站 ──────────────────────────────────────────────
+# 路由顺序有讲究：/trash 必须注册在 /{asset_id} 之前，否则 "trash" 会被当成
+# asset_id 匹配走（FastAPI 按注册顺序匹配，先注册先命中）。
+
+
+@router.get("/quota")
+async def get_quota(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """当前用户的存储配额概览。`used_bytes` **含回收站** —— 文件还在磁盘上。
+
+    前端在素材库顶部展示；超限时上传按钮应置灰。
+    """
+    return await usage_summary(db, user)
+
+
+@router.get("/trash", response_model=list[AssetResponse])
+async def list_trash(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """回收站列表。普通用户只看自己删的，管理员看全部。
+
+    共享素材进回收站后只有作者和管理员看得到 —— 共享的是「看正常素材」的
+    权限，不是「看别人删掉的东西」。
+    """
+    query = (
+        select(Asset)
+        .where(Asset.deleted_at.is_not(None))
+        .order_by(Asset.deleted_at.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    if not is_admin(user):
+        query = query.where(Asset.owner_id == user.id)
+    result = await db.execute(query)
+    return await _annotate(db, list(result.scalars().all()))
+
+
+@router.delete("/trash")
+async def empty_trash(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """清空回收站：记录 + 磁盘文件一起删，不可恢复。
+
+    普通用户只清自己的，管理员清全部。走 `purge_matching` 分批（每批 50 个），
+    与启动时的保留期清理同一套逻辑 —— 一次删几千个文件会撞上本机 unlink 的
+    批量守卫（SystemExit），也会让请求长时间不返回。批次用尽还没清完时，
+    `remaining` 会告诉前端"还剩多少，请再执行一次"。
+    """
+    conditions: list = [Asset.deleted_at.is_not(None)]
+    if not is_admin(user):
+        conditions.append(Asset.owner_id == user.id)
+
+    stats = await purge_matching(db, conditions)
+    return {
+        "deleted": stats["purged"],
+        "files_removed": stats["files_removed"],
+        "file_errors": stats["errors"],
+        "remaining": stats["remaining"],
+    }
+
+
+@router.post("/{asset_id}/restore", response_model=AssetResponse)
+async def restore_asset(
+    asset_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """从回收站恢复。仅本人或管理员。"""
+    asset = await db.get(Asset, asset_id)
+    if asset is None or asset.deleted_at is None:
+        raise HTTPException(status_code=404, detail="回收站里没有这个素材")
+    if not can_modify_asset(user, asset.owner_id):
+        raise HTTPException(status_code=403, detail="只能恢复自己的素材（或联系管理员）")
+
+    asset.deleted_at = None
+    await db.commit()
+    return (await _annotate(db, [asset]))[0]
+
+
+@router.delete("/{asset_id}/purge")
+async def purge_asset(
+    asset_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """彻底删除：记录 + 磁盘文件，不可恢复。只对回收站里的素材生效。
+
+    要求「先在回收站」是刻意的：正常素材必须走一次软删除，避免误点直接把
+    文件删掉。想一步到位就调两次接口，代价是一次多余的点击。
+    """
+    asset = await db.get(Asset, asset_id)
+    if asset is None:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    if asset.deleted_at is None:
+        raise HTTPException(status_code=409, detail="素材不在回收站里，请先删除")
+    if not can_modify_asset(user, asset.owner_id):
+        raise HTTPException(status_code=403, detail="只能删除自己的素材（或联系管理员）")
+
+    file_path = asset.file_path
+    file_name = asset.file_name
+    await db.delete(asset)
+    await db.commit()
+
+    try:
+        (file_removed, file_error), (thumbnail_removed, thumbnail_error) = (
+            await asyncio.to_thread(cleanup_asset_files, file_path, file_name)
+        )
+    except (OSError, RuntimeError, SystemExit) as exc:
+        file_removed, thumbnail_removed = False, False
+        file_error = thumbnail_error = f"{type(exc).__name__}: {exc}"
+
+    return {
+        "message": "已彻底删除",
+        "id": asset_id,
+        "file_removed": file_removed,
+        "file_error": file_error,
+        "thumbnail_removed": thumbnail_removed,
+        "thumbnail_error": thumbnail_error,
+    }
+
+
 @router.get("/{asset_id}", response_model=AssetResponse)
 async def get_asset(
     asset_id: str,
@@ -409,8 +564,10 @@ async def get_asset(
     db: AsyncSession = Depends(get_db),
 ):
     asset = await db.get(Asset, asset_id)
-    # 用户隔离：看不见的一律 404，不泄露「存在但无权」
-    if not asset:
+    # 用户隔离：看不见的一律 404，不泄露「存在但无权」。
+    # 回收站里的也按 404 处理 —— 详情页/预览是「正常素材」的入口，
+    # 回收站有自己的列表接口。
+    if not asset or asset.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Asset not found")
     if not can_view_asset(user, asset.owner_id, asset.is_shared):
         raise HTTPException(status_code=404, detail="Asset not found")
@@ -429,7 +586,8 @@ async def download_asset_file(
     `/api/tasks/{task_id}/assets/{filename}` 已废弃。
     """
     asset = await db.get(Asset, asset_id)
-    if not asset or not can_view_asset(user, asset.owner_id, asset.is_shared):
+    # 回收站里的不给取文件 —— 否则「删除」只是从列表消失，链接仍能下载
+    if not asset or asset.deleted_at is not None or not can_view_asset(user, asset.owner_id, asset.is_shared):
         raise HTTPException(status_code=404, detail="Asset file not found")
     return await serve_asset_file(asset)
 
@@ -443,7 +601,7 @@ async def download_asset_thumb(
 ):
     """素材缩略图。图片首访懒生成后落盘，视频在落盘时就已抽帧。"""
     asset = await db.get(Asset, asset_id)
-    if not asset or not can_view_asset(user, asset.owner_id, asset.is_shared):
+    if not asset or asset.deleted_at is not None or not can_view_asset(user, asset.owner_id, asset.is_shared):
         raise HTTPException(status_code=404, detail="Asset file not found")
     return await serve_asset_thumb(asset, request)
 
@@ -455,9 +613,12 @@ async def add_tag(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """给素材添加标签。仅本人或管理员（共享出去的素材别人只能看，不能改）"""
+    """给素材添加标签。仅本人或管理员（共享出去的素材别人只能看，不能改）
+
+    回收站里的素材一律 404 —— 已经"删掉"的东西还能被改标签，语义上是错的。
+    """
     asset = await db.get(Asset, asset_id)
-    if not asset:
+    if not asset or asset.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Asset not found")
     if not can_modify_asset(user, asset.owner_id):
         raise HTTPException(
@@ -488,7 +649,7 @@ async def remove_tag(
 ):
     """移除素材标签。仅本人或管理员"""
     asset = await db.get(Asset, asset_id)
-    if not asset:
+    if not asset or asset.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Asset not found")
     if not can_modify_asset(user, asset.owner_id):
         raise HTTPException(
@@ -524,9 +685,12 @@ async def share_asset(
     db: AsyncSession = Depends(get_db),
 ):
     """共享开关：true = 共享给团队（全员可见可下载），false = 收回。
-    仅本人或管理员可操作。共享的是「看」的权限 —— 别人拿不到编辑/删除权。"""
+    仅本人或管理员可操作。共享的是「看」的权限 —— 别人拿不到编辑/删除权。
+
+    回收站里的素材不能共享：否则会变成「删掉了但对全员可见」的幽灵条目。
+    """
     asset = await db.get(Asset, asset_id)
-    if not asset:
+    if not asset or asset.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Asset not found")
     if not can_modify_asset(user, asset.owner_id):
         raise HTTPException(
@@ -545,66 +709,31 @@ async def delete_asset(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """删除单个素材（记录 + 磁盘文件）。仅本人或管理员可删。
+    """把素材移入回收站（软删除）。仅本人或管理员可删。
 
-    归属读 `assets.owner_id` —— 素材可以没有来源任务（用户上传），不能再借道
-    task.created_by。锁也相应改成素材级：生成素材额外叠加任务锁，避免和
-    「删任务级联删素材」同时动手。
+    软删除只打 `deleted_at` 时间戳，**不动磁盘文件** —— 误删能恢复，但配额
+    不会因此释放（文件还在盘上）。要真腾空间走 `DELETE /{id}/purge`，或等
+    超过保留期被自动清理。
+
+    这里不加任务级联锁：不碰文件系统，纯 DB 事务；同一素材重复删除会在第二次
+    发现 `deleted_at` 非空而返回 404，天然幂等。
     """
-    requester_id = user.id
-    requester_role = user.role
+    asset = await db.get(Asset, asset_id)
+    if asset is None or asset.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    if not can_modify_asset(user, asset.owner_id):
+        raise HTTPException(
+            status_code=403,
+            detail="只能删除自己提交的素材（或联系管理员）",
+        )
 
-    async def delete_operation() -> tuple[tuple[bool, str], tuple[bool, str]]:
-        # 先只读一列拿「来源任务」提示，随即结束读事务 —— 要拿任务锁得先知道
-        # 锁哪个任务。**权威状态必须等锁拿到之后再读**：锁外读到的快照可能是
-        # retry / 删任务动手之前的，据此删除会删掉一条别人已经删掉的记录。
-        hint = await db.execute(select(Asset.task_id).where(Asset.id == asset_id))
-        task_hint = hint.scalar_one_or_none()
-        await db.rollback()
-
-        lock_keys = [asset_lifecycle_key(asset_id)]
-        if task_hint:
-            lock_keys.append(task_lifecycle_key(task_hint))
-        async with thumbnail_lifecycle(lock_keys):
-            asset = await db.get(Asset, asset_id)
-            if asset is None or asset.task_id != task_hint:
-                raise HTTPException(status_code=404, detail="Asset not found")
-            if not can_modify_asset_identity(
-                requester_id,
-                requester_role,
-                asset.owner_id,
-            ):
-                raise HTTPException(
-                    status_code=403,
-                    detail="只能删除自己提交的素材（或联系管理员）",
-                )
-
-            # 缩略图键锁住派生文件（源文件和缩略图同处一个生命周期）
-            async with thumbnail_lifecycle([thumb_key(asset.file_path)]):
-                # 记录是主体，文件清理是附带 —— 文件删不掉也要把记录删掉，如实上报原因
-                cleanup_result = await asyncio.to_thread(
-                    cleanup_asset_files,
-                    asset.file_path,
-                    asset.file_name,
-                )
-                await db.delete(asset)
-                await db.commit()
-                return cleanup_result
-
-    operation = asyncio.create_task(
-        delete_operation(),
-        name=f"delete-asset:{asset_id}",
-    )
-    cleanup_result = await wait_for_task_completion(operation)
-    (file_removed, file_error), (thumbnail_removed, thumbnail_error) = cleanup_result
-
+    now = utcnow()
+    asset.deleted_at = now
+    await db.commit()
     return {
-        "message": "Asset deleted",
+        "message": "已移入回收站",
         "id": asset_id,
-        "file_removed": file_removed,
-        "file_error": file_error,
-        "thumbnail_removed": thumbnail_removed,
-        "thumbnail_error": thumbnail_error,
+        "deleted_at": now.isoformat(),
     }
 
 
@@ -639,7 +768,9 @@ async def _prepare_archive(asset_ids: list[str], user: User, db: AsyncSession) -
             detail=f"一次最多打包 {BATCH_DOWNLOAD_MAX_FILES} 个素材，请分批下载",
         )
 
-    result = await db.execute(select(Asset).where(Asset.id.in_(asset_ids)))
+    result = await db.execute(
+        select(Asset).where(Asset.id.in_(asset_ids), Asset.deleted_at.is_(None))
+    )
     assets = result.scalars().all()
 
     assets = [a for a in assets if can_view_asset(user, a.owner_id, a.is_shared)]

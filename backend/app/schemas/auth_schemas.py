@@ -28,10 +28,12 @@ class ResetPasswordRequest(BaseModel):
 
 
 class UserUpdateRequest(BaseModel):
-    """管理员调整账号：角色 / 启用停用 / 显示名。留空的字段不改"""
+    """管理员调整账号：角色 / 启用停用 / 显示名 / 存储配额。留空的字段不改"""
     role: Literal["admin", "member"] | None = None
     is_active: bool | None = None
     display_name: str | None = Field(None, max_length=64)
+    # 存储配额（字节）。0 = 不限。上限 10 TiB，防止手滑多打几个零。
+    storage_quota_bytes: int | None = Field(None, ge=0, le=10 * 1024**4)
 
 
 class TokenResponse(BaseModel):
@@ -46,6 +48,7 @@ class UserResponse(BaseModel):
     display_name: str
     role: str
     is_active: bool
+    storage_quota_bytes: int = 0  # 0 = 不限
     created_at: datetime
 
     class Config:

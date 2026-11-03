@@ -5,13 +5,14 @@
  * 共享开关仍是作者或管理员的权利 —— 界面上直接把没有权限的操作藏掉。 */
 import { useState, useEffect, useCallback, useRef } from 'react'
 import type { ChangeEvent } from 'react'
-import type { Asset, Template, AssetTag, User } from '../types'
+import type { Asset, Template, AssetTag, User, StorageQuota } from '../types'
 import {
   listAssets, listAssetTags, addAssetTag, removeAssetTag, shareAsset,
   prepareBatchDownload, getAssetUrl, getAssetThumbUrl, downloadAsset, deleteAsset, listUsers,
-  uploadAssets,
+  uploadAssets, listTrash, restoreAsset, purgeAsset, emptyTrash, getQuota,
 } from '../api/client'
 import { reportError, subscribeAssetsChanged } from '../notify'
+import { formatDate, formatDateTime } from '../time'
 import { alertDialog, confirmDialog } from './dialog'
 import AuthMedia from './AuthMedia'
 import { assetListViewState, createLatestRequestGate } from './listViewState'
@@ -23,10 +24,13 @@ interface Props {
   user: User
 }
 
-const formatSize = (bytes: number) =>
-  bytes > 1024 * 1024
-    ? `${(bytes / 1024 / 1024).toFixed(1)} MB`
-    : `${(bytes / 1024).toFixed(0)} KB`
+const formatSize = (bytes: number) => {
+  if (!bytes) return '0 B'
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KB`
+  return `${bytes} B`
+}
 
 /** 文件大类分栏。'' = 全部；其余按 mime 前缀过滤，由后端做，不拉回来再筛 */
 type KindFilter = '' | 'image' | 'video' | 'audio'
@@ -88,6 +92,15 @@ export default function AssetGallery({ templates, user }: Props) {
   const [uploadPercent, setUploadPercent] = useState(0)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
+  /** 素材库 / 回收站两个视图。回收站独立拉数据，因为后端把软删除素材
+   *  从正常列表里彻底排除了 —— 不单独请求就等于「删了就再也看不见」 */
+  const [view, setView] = useState<'library' | 'trash'>('library')
+  const [trash, setTrash] = useState<Asset[]>([])
+  const [trashLoading, setTrashLoading] = useState(false)
+  const [trashBusy, setTrashBusy] = useState(false)
+  /** 存储配额（含回收站占用）。上传超额时后端 403，这里提前展示并置灰按钮 */
+  const [quota, setQuota] = useState<StorageQuota | null>(null)
+
   // 搜索防抖 300ms
   useEffect(() => {
     const timer = setTimeout(() => setDebouncedKeyword(keyword.trim()), 300)
@@ -129,6 +142,13 @@ export default function AssetGallery({ templates, user }: Props) {
       if (!assetRequests.current.isLatest(request)) return
       setAssets(Array.isArray(data) ? data : [])
       setLoadFailed(false)
+      // 别处删掉的素材还在 selected 里的话，批量删除会对已消失的 id 逐个 404
+      setSelected((prev) => {
+        if (prev.size === 0) return prev
+        const alive = new Set((Array.isArray(data) ? data : []).map((a) => a.id))
+        const next = new Set([...prev].filter((id) => alive.has(id)))
+        return next.size === prev.size ? prev : next
+      })
     } catch {
       if (!assetRequests.current.isLatest(request)) return
       setAssets([])
@@ -147,17 +167,50 @@ export default function AssetGallery({ templates, user }: Props) {
     }
   }, [])
 
+  /** 配额概览。任何改变占用大小的操作之后都要重拉 —— 回收站里的文件仍占空间，
+   *  「移入回收站」不会让这个数字变小，只有「彻底删除」才会。 */
+  const fetchQuota = useCallback(async () => {
+    try {
+      setQuota(await getQuota())
+    } catch {
+      // 配额拿不到不影响浏览：静默降级成"不展示配额条"
+      setQuota(null)
+    }
+  }, [])
+
+  const fetchTrash = useCallback(async () => {
+    setTrashLoading(true)
+    try {
+      const data = await listTrash(200)
+      setTrash(Array.isArray(data) ? data : [])
+    } catch (err) {
+      reportError('回收站加载失败', err)
+      setTrash([])
+    } finally {
+      setTrashLoading(false)
+    }
+  }, [])
+
   useEffect(() => {
     fetchAssets()
     fetchTags()
-  }, [fetchAssets, fetchTags])
+    fetchQuota()
+    // 进页面就拉一次回收站：一是让「回收站 (N)」有数，二是删完东西后
+    // 用户能立刻看到"东西还在、可以找回"，而不是以为永久没了。
+    fetchTrash()
+  }, [fetchAssets, fetchTags, fetchQuota, fetchTrash])
   // 任务跑完后素材库自动刷新 —— App 层全局任务轮询发的事件，不用切页面才看得见新素材
   useEffect(() => {
     return subscribeAssetsChanged(() => {
       fetchAssets()
       fetchTags()
+      fetchQuota()
     })
-  }, [fetchAssets, fetchTags])
+  }, [fetchAssets, fetchTags, fetchQuota])
+
+  useEffect(() => {
+    if (view === 'trash') fetchTrash()
+  }, [view, fetchTrash])
 
   const toggleSelect = (id: string) => {
     setSelected((prev) => {
@@ -184,7 +237,7 @@ export default function AssetGallery({ templates, user }: Props) {
     setUploadPercent(0)
     try {
       await uploadAssets(files, setUploadPercent)
-      await Promise.all([fetchAssets(), fetchTags()])
+      await Promise.all([fetchAssets(), fetchTags(), fetchQuota()])
     } catch (err) {
       reportError('上传失败', err)
     } finally {
@@ -211,17 +264,17 @@ export default function AssetGallery({ templates, user }: Props) {
     }
   }
 
-  /** 删除单个素材（详情面板）。不可逆，会连磁盘文件一起删 */
+  /** 删除单个素材（详情面板）→ **移入回收站**，可恢复；空间不释放 */
   const handleDeleteAsset = async (asset: Asset) => {
     const ok = await confirmDialog({
-      title: '删除这个素材？',
-      message: `文件：${asset.file_name}\n\n此操作不可撤销，文件会一并从磁盘删除。`,
+      title: '移入回收站？',
+      message: `文件：${asset.file_name}\n\n可以在「回收站」里恢复。空间不会立即释放 —— 需要彻底删除才会腾出配额。`,
       tone: 'danger',
-      confirmText: '删除',
+      confirmText: '移入回收站',
     })
     if (!ok) return
     try {
-      const res = await deleteAsset(asset.id)
+      await deleteAsset(asset.id)
       setDetail(null)
       // 单删的这张若正被选中，从选中集摘掉 —— 别让「删除 (N)」虚高
       setSelected((prev) => {
@@ -232,20 +285,13 @@ export default function AssetGallery({ templates, user }: Props) {
       })
       fetchAssets()
       fetchTags()
-      // 记录一定已删，但磁盘文件可能没清掉 —— 如实告知，别笼统说"已删除"
-      if (!res.file_removed) {
-        await alertDialog({
-          title: '记录已删除，但磁盘文件未能清理',
-          message: `不影响素材库的正常使用。\n原因：${res.file_error || '未知'}\n\n如需释放磁盘空间，请联系管理员处理。`,
-          tone: 'error',
-        })
-      }
+      fetchQuota()
     } catch (err) {
       reportError('删除失败', err)
     }
   }
 
-  /** 批量删除已选素材。不可逆，会连磁盘文件一起删 */
+  /** 批量删除已选素材 → 全部移入回收站 */
   const handleBatchDelete = async () => {
     // 确认框是异步的，弹着的时候按钮还没禁用 —— 没有这道同步守卫，
     // 连点两次会排两个确认框，用户各确认一次就把同一批删了两遍。
@@ -253,20 +299,18 @@ export default function AssetGallery({ templates, user }: Props) {
     batchDeleteBusy.current = true
     try {
       const ok = await confirmDialog({
-        title: `删除选中的 ${selected.size} 个素材？`,
-        message: '此操作不可撤销，文件会一并从磁盘删除。',
+        title: `将选中的 ${selected.size} 个素材移入回收站？`,
+        message: '可以在「回收站」里逐个恢复。空间不会立即释放 —— 需要彻底删除才会腾出配额。',
         tone: 'danger',
-        confirmText: `删除 ${selected.size} 个`,
+        confirmText: `移入回收站（${selected.size}）`,
       })
       if (!ok) return
       setDeleting(true)
       const ids = [...selected]
       const failed: string[] = []
-      const fileLeft: string[] = []
       for (const id of ids) {
         try {
-          const res = await deleteAsset(id)
-          if (!res.file_removed) fileLeft.push(`${id.slice(0, 8)}: ${res.file_error || '未知'}`)
+          await deleteAsset(id)
         } catch (err) {
           failed.push(err instanceof Error ? err.message : String(err))
         }
@@ -275,23 +319,93 @@ export default function AssetGallery({ templates, user }: Props) {
       setDetail(null)
       fetchAssets()
       fetchTags()
-      const lines: string[] = []
+      fetchQuota()
       if (failed.length) {
-        lines.push(`有 ${failed.length} 个删除失败（多为非本人提交，需管理员操作）：\n${failed.join('\n')}`)
-      }
-      if (fileLeft.length) {
-        lines.push(`${fileLeft.length} 个记录已删除，但磁盘文件未能清理：\n${fileLeft.join('\n')}`)
-      }
-      if (lines.length) {
         await alertDialog({
-          title: '部分素材未能完全删除',
-          message: lines.join('\n\n'),
+          title: '部分素材未能移入回收站',
+          message: `有 ${failed.length} 个删除失败（多为非本人提交，需管理员操作）：\n${failed.join('\n')}`,
           tone: 'error',
         })
       }
     } finally {
       batchDeleteBusy.current = false
       setDeleting(false)
+    }
+  }
+
+  /** 从回收站恢复 */
+  const handleRestore = async (asset: Asset) => {
+    if (trashBusy) return
+    setTrashBusy(true)
+    try {
+      await restoreAsset(asset.id)
+      await Promise.all([fetchTrash(), fetchAssets(), fetchTags(), fetchQuota()])
+    } catch (err) {
+      reportError('恢复失败', err)
+    } finally {
+      setTrashBusy(false)
+    }
+  }
+
+  /** 彻底删除单个素材（记录 + 磁盘文件）。这是唯一真正释放配额的操作 */
+  const handlePurge = async (asset: Asset) => {
+    if (trashBusy) return
+    const ok = await confirmDialog({
+      title: '彻底删除这个素材？',
+      message: `文件：${asset.file_name}\n\n记录和磁盘文件都会被删除，无法恢复，但会释放它占用的空间。`,
+      tone: 'danger',
+      confirmText: '彻底删除',
+    })
+    if (!ok) return
+    setTrashBusy(true)
+    try {
+      const res = await purgeAsset(asset.id)
+      await Promise.all([fetchTrash(), fetchQuota()])
+      // 记录一定已删，但磁盘文件可能没清掉 —— 如实告知，别笼统说"已删除"
+      if (!res.file_removed) {
+        await alertDialog({
+          title: '记录已删除，但磁盘文件未能清理',
+          message: `原因：${res.file_error || '未知'}\n\n如需释放磁盘空间，请联系管理员处理。`,
+          tone: 'error',
+        })
+      }
+    } catch (err) {
+      reportError('彻底删除失败', err)
+    } finally {
+      setTrashBusy(false)
+    }
+  }
+
+  /** 清空回收站。后端分批（每批 50），没清完会回 remaining>0 */
+  const handleEmptyTrash = async () => {
+    if (trashBusy || trash.length === 0) return
+    const ok = await confirmDialog({
+      title: `彻底删除回收站里的 ${trash.length} 个素材？`,
+      message: '这些记录和磁盘文件都会被删除，无法恢复。',
+      tone: 'danger',
+      confirmText: '全部彻底删除',
+    })
+    if (!ok) return
+    setTrashBusy(true)
+    try {
+      const res = await emptyTrash()
+      await Promise.all([fetchTrash(), fetchQuota()])
+      const lines: string[] = [`已彻底删除 ${res.deleted} 个素材。`]
+      if (res.remaining > 0) {
+        lines.push(`还有 ${res.remaining} 个未清理（单次有上限），请再执行一次。`)
+      }
+      if (res.file_errors.length) {
+        lines.push(`有 ${res.file_errors.length} 个磁盘文件未能清理：\n${res.file_errors.join('\n')}`)
+      }
+      await alertDialog({
+        title: res.file_errors.length ? '部分文件未能清理' : '回收站已清空',
+        message: lines.join('\n\n'),
+        tone: res.file_errors.length ? 'error' : 'success',
+      })
+    } catch (err) {
+      reportError('清空回收站失败', err)
+    } finally {
+      setTrashBusy(false)
     }
   }
 
@@ -337,6 +451,9 @@ export default function AssetGallery({ templates, user }: Props) {
     count: assets.length,
   })
 
+  /** 配额用尽：上传和提交任务都会被后端 403，界面提前置灰并说明原因 */
+  const quotaFull = !!quota && !quota.unlimited && quota.used_bytes >= quota.quota_bytes
+
   return (
     <section>
       {/* 页头：标题 + 主操作。上传是这一页的主动作，放右上角与其他页对齐 */}
@@ -344,38 +461,162 @@ export default function AssetGallery({ templates, user }: Props) {
         <div>
           <h2 className="page-title">素材库</h2>
           <p className="page-sub">
-            {assets.length === 0
-              ? '生成产物与上传的文件都会收在这里'
-              : `共 ${assets.length} 个素材`}
+            {view === 'trash'
+              ? trash.length === 0
+                ? '回收站是空的'
+                : `回收站里有 ${trash.length} 个素材，可恢复或彻底删除`
+              : assets.length === 0
+                ? '生成产物与上传的文件都会收在这里'
+                : `共 ${assets.length} 个素材`}
           </p>
         </div>
         <div className="flex items-center gap-xs">
           <button
             type="button"
-            onClick={() => fileInputRef.current?.click()}
-            className="btn-primary"
-            disabled={uploading}
+            onClick={() => setView(view === 'trash' ? 'library' : 'trash')}
+            className="btn"
+            aria-pressed={view === 'trash'}
           >
-            {uploading ? `上传中 ${uploadPercent}%` : '上传素材'}
+            {view === 'trash' ? '返回素材库' : `回收站${trash.length > 0 ? ` (${trash.length})` : ''}`}
           </button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            multiple
-            accept="image/*,audio/*,video/*"
-            className="hidden"
-            onChange={handleUpload}
-          />
-          {assets.length > 0 && (
-            <button onClick={toggleSelectAll} className="btn">
-              {allVisibleSelected ? '取消全选' : `全选 (${assets.length})`}
-            </button>
+          {view === 'library' && (
+            <>
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="btn-primary"
+                disabled={uploading || quotaFull}
+                title={quotaFull ? '存储配额已满，请先彻底删除回收站里的素材' : undefined}
+              >
+                {uploading ? `上传中 ${uploadPercent}%` : '上传素材'}
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                accept="image/*,audio/*,video/*"
+                className="hidden"
+                onChange={handleUpload}
+              />
+              {assets.length > 0 && (
+                <button onClick={toggleSelectAll} className="btn">
+                  {allVisibleSelected ? '取消全选' : `全选 (${assets.length})`}
+                </button>
+              )}
+            </>
           )}
         </div>
       </div>
 
+      {/* 配额条。注意「已用」包含回收站 —— 软删除不动磁盘文件，删了不会变小；
+          只有彻底删除才释放。这也是为什么超限时的提示要指向回收站。 */}
+      {quota && (
+        <div className="panel mb-md px-md py-sm">
+          <div className="flex flex-wrap items-baseline justify-between gap-xs text-xs">
+            <span className="text-muted">
+              {quota.unlimited
+                ? `已用 ${formatSize(quota.used_bytes)} · 不限配额`
+                : `已用 ${formatSize(quota.used_bytes)} / ${formatSize(quota.quota_bytes)}`}
+            </span>
+            {!quota.unlimited && (
+              <span className={quotaFull ? 'font-medium text-error' : 'text-muted'}>
+                {quota.percent ?? 0}%
+                {quotaFull ? ' · 已满，上传与提交任务会被拒绝' : ''}
+              </span>
+            )}
+          </div>
+          {!quota.unlimited && (
+            <div
+              className="mt-2xs h-1.5 overflow-hidden rounded-pill bg-paper-2"
+              role="progressbar"
+              aria-label="存储配额使用率"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={Math.min(100, quota.percent ?? 0)}
+            >
+              <div
+                className={`h-full rounded-pill transition-[width] duration-short ${
+                  quotaFull ? 'bg-error' : 'bg-accent'
+                }`}
+                style={{ width: `${Math.min(100, Math.max(0, quota.percent ?? 0))}%` }}
+              />
+            </div>
+          )}
+        </div>
+      )}
+
       {/* 筛选栏：第一行是搜索与范围，第二行是分类 chips —— 控件不再挤成一长条 */}
-      <div className="panel mb-md p-md">
+      {view === 'trash' ? (
+        <div className="panel">
+          <div className="flex flex-wrap items-center justify-between gap-sm border-b border-rule px-md py-sm">
+            <div>
+              <h3 className="text-title">回收站</h3>
+              <p className="mt-2xs text-xs text-muted">
+                这里的素材不出现在列表和统计里，但文件仍在磁盘上、仍占配额。
+                恢复即可继续使用；「彻底删除」才会真正释放空间，且不可撤销。
+              </p>
+            </div>
+            <button
+              type="button"
+              className="btn btn-danger"
+              onClick={handleEmptyTrash}
+              disabled={trashBusy || trash.length === 0}
+            >
+              {trashBusy ? '处理中…' : '清空回收站'}
+            </button>
+          </div>
+
+          {trashLoading ? (
+            <div className="p-md text-sm text-muted">加载中…</div>
+          ) : trash.length === 0 ? (
+            <div className="p-lg text-center text-sm text-muted">
+              回收站是空的。删除的素材会先放到这里，随时可以恢复。
+            </div>
+          ) : (
+            <ul>
+              {trash.map((asset) => (
+                <li
+                  key={asset.id}
+                  className="flex flex-wrap items-center justify-between gap-sm border-t border-rule px-md py-sm first:border-t-0"
+                >
+                  <div className="min-w-0">
+                    <div className="truncate text-sm text-ink" title={asset.file_name}>
+                      {asset.file_name}
+                    </div>
+                    <div className="mt-2xs text-xs text-muted">
+                      {formatSize(asset.file_size)} · 删除于{' '}
+                      {formatDateTime(asset.deleted_at ?? '')}
+                      {!isMine(asset) && asset.creator_name
+                        ? ` · 来自 ${asset.creator_name}`
+                        : ''}
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 gap-xs">
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={() => handleRestore(asset)}
+                      disabled={trashBusy}
+                    >
+                      恢复
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-danger"
+                      onClick={() => handlePurge(asset)}
+                      disabled={trashBusy}
+                    >
+                      彻底删除
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ) : (
+        <>
+          <div className="panel mb-md p-md">
         <div className="flex flex-wrap items-center gap-xs">
           <input
             type="text"
@@ -491,7 +732,7 @@ export default function AssetGallery({ templates, user }: Props) {
             {downloading ? '打包中…' : `下载 (${selected.size})`}
           </button>
           <button onClick={handleBatchDelete} className="btn btn-danger" disabled={deleting}>
-            {deleting ? '删除中…' : `删除 (${selected.size})`}
+            {deleting ? '删除中…' : `移入回收站 (${selected.size})`}
           </button>
           <button onClick={() => setSelected(new Set())} className="btn-quiet">
             清除选择
@@ -618,7 +859,7 @@ export default function AssetGallery({ templates, user }: Props) {
                     {asset.file_name}
                   </span>
                   <span className="mt-2xs block truncate text-xs text-muted">
-                    {new Date(asset.created_at).toLocaleDateString('zh-CN')}
+                    {formatDate(asset.created_at)}
                     {asset.file_size ? ` · ${formatSize(asset.file_size)}` : ''}
                   </span>
                 </span>
@@ -626,6 +867,8 @@ export default function AssetGallery({ templates, user }: Props) {
             </div>
           ))}
         </div>
+      )}
+        </>
       )}
 
       {/* 详情面板 */}
@@ -679,7 +922,7 @@ export default function AssetGallery({ templates, user }: Props) {
                 <div className="flex items-baseline justify-between gap-sm border-b border-rule py-xs">
                   <dt className="shrink-0 text-xs text-muted">生成时间</dt>
                   <dd className="num text-right text-ink">
-                    {new Date(detail.created_at).toLocaleString('zh-CN')}
+                    {formatDateTime(detail.created_at)}
                   </dd>
                 </div>
                 <div className="flex items-baseline justify-between gap-sm border-b border-rule py-xs">

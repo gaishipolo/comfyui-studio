@@ -121,7 +121,9 @@ async def upload_from_asset(
     读取字节数为准，避免陈旧元数据绕过上传限制。
     """
     asset = await db.get(Asset, body.asset_id)
-    if asset is None:
+    # 回收站里的素材不能当参考输入：用户已经"删"了它，还能继续拿它喂引擎，
+    # 等于删除没有生效。按 404 处理，与 get_asset 口径一致。
+    if asset is None or asset.deleted_at is not None:
         raise HTTPException(status_code=404, detail="素材不存在")
 
     # 用户隔离：只能拿自己可见的素材当输入（自己的 + 已共享的），看不见的报同款 404

@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models.models import User
 from app import login_guard
+from app.quota import default_quota_bytes
 from app.schemas.auth_schemas import (
     RegisterRequest, LoginRequest, TokenResponse, UserResponse,
     ChangePasswordRequest, ResetPasswordRequest, UserUpdateRequest,
@@ -34,6 +35,9 @@ async def register(
         password_hash=hash_password(data.password),
         display_name=data.display_name or data.username,
         role=data.role,
+        # 默认配额：不设就永远是 0（不限），磁盘写满是整站故障而不是个人问题。
+        # 管理员在想调整时再改，见 UserUpdateRequest.storage_quota_bytes。
+        storage_quota_bytes=default_quota_bytes(),
     )
     db.add(user)
     await db.commit()
@@ -133,10 +137,13 @@ async def update_user(
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """管理员调整账号：角色 / 启用停用 / 显示名。
+    """管理员调整账号：角色 / 启用停用 / 显示名 / 存储配额。
 
     有一条硬规则：**不能把自己关掉或把自己降级**。
     否则最后一个 admin 一点「停用」就再也登不进来了，只能去改数据库。
+
+    配额只对普通用户生效：管理员豁免准入检查（否则他连进管理页调配额都要
+    先删素材）。给管理员设的值会存下来，但不会拦他。
     """
     user = await db.get(User, user_id)
     if not user:
@@ -165,6 +172,8 @@ async def update_user(
         user.is_active = data.is_active
     if data.display_name is not None:
         user.display_name = data.display_name
+    if data.storage_quota_bytes is not None:
+        user.storage_quota_bytes = data.storage_quota_bytes
 
     await db.commit()
     await db.refresh(user)

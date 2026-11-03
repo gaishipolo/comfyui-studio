@@ -54,12 +54,12 @@ async def get_usage(
         )
     ).all()
 
-    # 素材：join 任务表拿归属（素材本身没有归属字段）
+    # 素材：归属直接读 assets.owner_id —— 用户上传的素材没有 task_id，
+    # 早先 join 任务表的写法会把它们整批漏掉（存储占用偏低）。
+    # 不过滤 deleted_at：回收站里的文件还在磁盘上，口径必须和配额一致。
     a_rows = (
         await db.execute(
-            select(Task.created_by, Asset.file_size)
-            .join(Task, Asset.task_id == Task.id)
-            .where(*asset_conds)
+            select(Asset.owner_id, Asset.file_size, Asset.deleted_at).where(*asset_conds)
         )
     ).all()
 
@@ -77,6 +77,8 @@ async def get_usage(
                 "durations": [],
                 "storage_bytes": 0,
                 "asset_count": 0,
+                "trash_storage_bytes": 0,
+                "trash_asset_count": 0,
             },
         )
 
@@ -93,10 +95,14 @@ async def get_usage(
         elif status == "cancelled":
             b["task_cancelled"] += 1
 
-    for uid, fsize in a_rows:
+    for uid, fsize, deleted_at in a_rows:
         b = bucket(uid or "")
-        b["storage_bytes"] += int(fsize or 0)
+        size = int(fsize or 0)
+        b["storage_bytes"] += size
         b["asset_count"] += 1
+        if deleted_at is not None:
+            b["trash_storage_bytes"] += size
+            b["trash_asset_count"] += 1
 
     # ── 补用户名/显示名（无主任务归到「无主数据」）──────────
     user_ids = {uid for uid in per_user if uid}
@@ -128,6 +134,8 @@ async def get_usage(
             ),
             storage_bytes=agg["storage_bytes"],
             asset_count=agg["asset_count"],
+            trash_storage_bytes=agg["trash_storage_bytes"],
+            trash_asset_count=agg["trash_asset_count"],
         )
 
     by_user = [to_row(uid, agg) for uid, agg in sorted(per_user.items())]
@@ -147,6 +155,8 @@ async def get_usage(
         ),
         storage_bytes=sum(r.storage_bytes for r in by_user),
         asset_count=sum(r.asset_count for r in by_user),
+        trash_storage_bytes=sum(r.trash_storage_bytes for r in by_user),
+        trash_asset_count=sum(r.trash_asset_count for r in by_user),
     )
 
     return UsageResponse(

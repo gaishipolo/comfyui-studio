@@ -48,6 +48,11 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, comment="是否启用")
     # 改密/重置密码时 +1，让旧 JWT 立即失效（JWT 无状态，靠版本号对账）
     token_version: Mapped[int] = mapped_column(Integer, default=0, comment="令牌版本，改密递增以吊销旧 token")
+    # 存储配额（字节）。0 = 不限。只统计素材文件大小，回收站里的也计入
+    # —— 软删除不释放磁盘，配额跟着磁盘走才诚实。
+    storage_quota_bytes: Mapped[int] = mapped_column(
+        Integer, default=0, comment="存储配额（字节），0 表示不限"
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
@@ -93,7 +98,8 @@ class Task(Base):
 
     status: Mapped[str] = mapped_column(
         String(16), default="pending", index=True,
-        comment="状态：pending/running/done/error"
+        # cancelled 是独立终态（不是 error）：用户主动取消和引擎失败要分得开
+        comment="状态：pending/running/done/error/cancelled"
     )
     progress: Mapped[float] = mapped_column(Float, default=0.0, comment="进度 0~100")
 
@@ -152,6 +158,12 @@ class Asset(Base):
     # 用户隔离（2026-10-29）：默认仅作者（走 task.created_by）与管理员可见；
     # is_shared=True 后全团队可见可下载，但**不可改**（打标签/删除/共享开关仍是作者或管理员）
     is_shared: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否共享给团队")
+
+    # 回收站（2026-11-03）：软删除。非空 = 已进回收站，列表/统计/下载默认过滤掉，
+    # 但**磁盘文件仍在**，所以配额照算。只有「彻底删除」才真删文件。
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, index=True, comment="进回收站的时间；NULL 表示正常"
+    )
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 

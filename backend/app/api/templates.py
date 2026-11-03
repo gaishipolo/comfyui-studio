@@ -390,10 +390,11 @@ async def export_template(
     """导出单个模板为 JSON 文件（含内嵌工作流）。
 
     读模板本来就不需要管理员权限（生成页人人都要读），导出只是换个格式，
-    不额外提权。
+    不额外提权 —— 但**停用模板要和详情接口一个口径**：导出包里带完整配置和
+    内嵌工作流，普通用户不能靠它绕过 `get_template` 的停用拦截。
     """
     tpl = await db.get(Template, template_id)
-    if not tpl:
+    if not tpl or (not tpl.is_active and user.role != "admin"):
         raise HTTPException(status_code=404, detail="Template not found")
 
     workflow = _read_workflow_for_export(tpl.workflow_file)

@@ -12,6 +12,69 @@ import { useCallback, useEffect, useState } from 'react'
 import type { User } from '../../types'
 import { listUsers, registerUser, resetUserPassword, updateUser } from '../../api/client'
 import type { ModuleProps } from '../../modules/registry'
+import { formatDate } from '../../time'
+
+const GB = 1024 ** 3
+
+/** 配额单元格：以 GB 为单位编辑，存回字节。
+ *
+ *  为什么用 onBlur 提交而不是 onChange：每敲一个字符就发一次 PATCH，
+ *  输入 "10" 的过程中会先落一个 "1GB"，中途的错误值也会被写进库。
+ *
+ *  空值 = 0 = 不限。管理员不显示这个输入框（后端豁免准入检查，设了也没用）。 */
+function QuotaCell({
+  target,
+  disabled,
+  onSave,
+}: {
+  target: User
+  disabled: boolean
+  onSave: (bytes: number) => void
+}) {
+  const bytes = target.storage_quota_bytes ?? 0
+  const toDraft = (value: number) => (value > 0 ? String(+(value / GB).toFixed(2)) : '')
+  const [draft, setDraft] = useState(toDraft(bytes))
+
+  // 保存成功后 reload 会带回新值，把输入框同步过去（否则显示的还是旧数）
+  useEffect(() => {
+    setDraft(toDraft(bytes))
+  }, [bytes])
+
+  const commit = () => {
+    const gb = Number(draft)
+    if (draft.trim() === '') {
+      if (bytes !== 0) onSave(0)
+      return
+    }
+    if (!Number.isFinite(gb) || gb < 0) {
+      setDraft(toDraft(bytes))
+      return
+    }
+    const next = Math.round(gb * GB)
+    if (next !== bytes) onSave(next)
+  }
+
+  return (
+    <span className="flex items-center gap-2xs">
+      <input
+        type="number"
+        min={0}
+        step={0.5}
+        className="field w-[6.5rem]"
+        placeholder="不限"
+        aria-label={`${target.username} 的存储配额（GB）`}
+        value={draft}
+        disabled={disabled}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') e.currentTarget.blur()
+        }}
+      />
+      <span className="text-xs text-muted">GB</span>
+    </span>
+  )
+}
 
 export default function UserManager({ user }: ModuleProps) {
   const [users, setUsers] = useState<User[]>([])
@@ -108,7 +171,7 @@ export default function UserManager({ user }: ModuleProps) {
       <div className="page-head">
         <div>
           <h2 className="page-title">用户管理</h2>
-          <p className="page-sub">建号、调整账号角色与启用状态、为忘记密码的成员重置密码。</p>
+          <p className="page-sub">建号、调整角色与启用状态、重置密码、设置个人存储配额。</p>
         </div>
         <div className="flex gap-xs">
           <button
@@ -238,6 +301,7 @@ export default function UserManager({ user }: ModuleProps) {
                 <th scope="col">显示名</th>
                 <th scope="col" className="w-[7.5rem]">角色</th>
                 <th scope="col" className="w-[5.5rem]">状态</th>
+                <th scope="col" className="w-[10rem]">存储配额</th>
                 <th scope="col" className="w-[7rem]">创建时间</th>
                 <th scope="col">操作</th>
               </tr>
@@ -277,8 +341,28 @@ export default function UserManager({ user }: ModuleProps) {
                         {u.is_active ? '启用' : '停用'}
                       </span>
                     </td>
+                    <td>
+                      {/* 管理员豁免准入检查，配额对它们不生效 —— 别给一个改了没用的输入框 */}
+                      {u.role === 'admin' ? (
+                        <span className="text-xs text-muted">不限（管理员）</span>
+                      ) : (
+                        <QuotaCell
+                          target={u}
+                          disabled={busy}
+                          onSave={(bytes) =>
+                            run(
+                              u.id,
+                              () => updateUser(u.id, { storage_quota_bytes: bytes }),
+                              `「${u.display_name || u.username}」的配额已更新为 ${
+                                bytes > 0 ? `${+(bytes / GB).toFixed(2)} GB` : '不限'
+                              }`,
+                            )
+                          }
+                        />
+                      )}
+                    </td>
                     <td className="text-xs text-muted">
-                      {u.created_at ? u.created_at.slice(0, 10) : '—'}
+                      {u.created_at ? formatDate(u.created_at) : '—'}
                     </td>
                     <td>
                       {resetFor === u.id ? (

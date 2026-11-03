@@ -175,8 +175,18 @@ class LocalFileStore:
         target.write_bytes(data)
 
     def exists(self, file_path: str) -> bool:
-        target = self._resolve(file_path)
-        return target is not None and target.is_file()
+        # 与 read_bytes / open 保持同一套错误语义：解析不了的路径是「存储不可用」
+        # （503），不是「文件不存在」（404）
+        try:
+            target = self._resolve(file_path)
+            return target is not None and target.is_file()
+        except OSError as exc:
+            logger.error(
+                "检查本地素材是否存在失败 key=%s",
+                file_path,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+            raise FileStoreUnavailableError() from exc
 
     def read_bytes(self, file_path: str) -> bytes | None:
         try:

@@ -87,6 +87,8 @@ def make_asset() -> SimpleNamespace:
         file_size=4,
         mime_type="image/png",
         is_shared=False,
+        # 软删除上线后，取文件/缩略图会先判这个字段，替身必须跟上
+        deleted_at=None,
     )
 
 

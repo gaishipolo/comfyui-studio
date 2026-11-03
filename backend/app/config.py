@@ -25,6 +25,14 @@ class Settings(BaseSettings):
     # ComfyUI
     COMFYUI_BASE_URL: str = "http://127.0.0.1:8188"
     COMFYUI_TIMEOUT: int = 300  # 生成超时（秒）
+    # 是否让连 ComfyUI 的 HTTP 客户端继承系统代理（httpx trust_env）。
+    # 默认关闭：ComfyUI 几乎总是局域网/本机地址，走代理没意义还会出事 ——
+    # 本机装了 Clash 之类的代理软件时（Windows 下从注册表读代理设置），
+    # 发往内网的请求会被代理接管；而代理端口是随机且会随代理重启变化的，
+    # 进程内缓存的 HTTP 客户端会一直指向旧端口，表现就是「明明能 ping 通
+    # ComfyUI，平台却一直显示离线，且只有重启后端才能恢复」。
+    # 只有 ComfyUI 在需要代理才能访问的网络上时，才把它设为 true。
+    COMFYUI_TRUST_ENV: bool = False
 
     # 文件存储
     # 后端可切换：local = 本机目录（默认）| minio = MinIO / S3 兼容对象存储。
@@ -35,6 +43,15 @@ class Settings(BaseSettings):
     FFMPEG_PATH: str = ""
     # 前端构建产物目录；存在则由后端直接托管，实现单进程部署（免 nginx）
     FRONTEND_DIST: Path = Path("../frontend/dist").resolve()
+    # 素材回收站保留天数。软删除的素材超过这个天数，启动时会被彻底清理
+    # （记录 + 磁盘文件）。0 = 关闭自动清理，只能手动清空回收站。
+    TRASH_RETENTION_DAYS: int = 30
+    # 新用户的默认存储配额（GB）。0 = 不限。
+    #
+    # 不设默认值等于没有防线：50 人 × 每天几十张 2MB 的图，一个月几十 GB，
+    # 磁盘写满时是**整站故障**（所有上传 + 所有生成都失败），不是某个人受影响。
+    # 只作用于新建用户，存量用户不动 —— 别在升级时把人的上传突然掐了。
+    DEFAULT_STORAGE_QUOTA_GB: float = 20.0
 
     # MinIO / S3 兼容对象存储（STORAGE_BACKEND=minio 时生效）
     MINIO_ENDPOINT: str = "127.0.0.1:9000"
@@ -46,6 +63,10 @@ class Settings(BaseSettings):
 
     # 任务
     MAX_CONCURRENT_TASKS: int = 2
+    # 重启时把「排队中、还没提交到引擎」的任务重新排一遍。
+    # 关掉它，重启会把这些任务标成失败让用户手动重试 —— 只在「重提可能造成
+    # 重复计费」的引擎上才需要关。
+    RESUME_PENDING_ON_STARTUP: bool = True
     TASK_POLL_INTERVAL: float = 2.0
     # 单个任务从提交到出结果的最长等待秒数。超时会向引擎发取消，
     # 别让跑飞的 prompt 继续占显存。LTX 121 帧实测约 310 秒，

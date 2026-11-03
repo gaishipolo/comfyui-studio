@@ -1,11 +1,21 @@
-"""Real-SQLite concurrency checks for single-Asset deletion ownership."""
+"""素材软删除 × 任务生命周期 的并发/一致性检查（真实 SQLite）。
+
+背景：素材删除在 2026-11 改成了**软删除**（只打 `deleted_at`）。因此这里
+不再断言"删除素材要抢任务锁、要删文件"——那是旧契约。现在要守的是另一组
+不变量：
+
+- 软删除不碰文件系统，所以不需要任务锁，能立刻返回（拿锁会白等重试流程）
+- 软删除幂等：第二次删同一素材是 404，不会覆盖掉原来的 `deleted_at`
+- 重试 = 重新生成，旧产物必须**连回收站里的**一起清掉，否则磁盘上留孤儿
+- 行已经被重试/删任务清掉后，再删素材必须是 404，不能 500
+- `delete_asset` 只读 `user.id/role`，传 ORM 托管对象也不该触发懒加载异常
+"""
 
 from __future__ import annotations
 
 import asyncio
 import sys
 import tempfile
-import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,12 +33,7 @@ from app.config import settings  # noqa: E402
 from app.filestore import asset_exists, reset_store, save_asset_file  # noqa: E402
 from app.models.models import Asset, Base, Task, Template, User  # noqa: E402
 from app.services import task_service  # noqa: E402
-from app.thumbs import (  # noqa: E402
-    cleanup_asset_files,
-    task_lifecycle_key,
-    thumb_key,
-    thumbnail_lifecycle,
-)
+from app.thumbs import thumb_key  # noqa: E402
 
 
 ADMIN = SimpleNamespace(id="admin", role="admin")
@@ -117,135 +122,117 @@ async def db_counts(sessions, task_id: str) -> tuple[int, int, str | None]:
         return int(assets or 0), int(task is not None), task.status if task else None
 
 
+async def trashed_at(sessions, asset_id: str):
+    async with sessions() as db:
+        asset = await db.get(Asset, asset_id)
+        return None if asset is None else asset.deleted_at
+
+
 async def fake_spawn(_task_id: str, resume: bool = False) -> bool:
     return True
 
 
-async def test_asset_delete_then_retry_serializes_without_stale_rows() -> None:
-    async with fixture("asset-first-") as (sessions, task_id, asset_id):
-        with patch.object(tasks_api, "spawn_task", fake_spawn):
-            async with thumbnail_lifecycle([task_lifecycle_key(task_id)]):
-                delete = asyncio.create_task(call_asset_delete(sessions, asset_id))
-                await asyncio.sleep(0.03)
-                retry = asyncio.create_task(call_retry(sessions, task_id))
-                await asyncio.sleep(0.03)
-                delete_waited_for_task = not delete.done()
-                retry_waited_for_task = not retry.done()
-            deleted, retried = await asyncio.gather(delete, retry)
+async def test_soft_delete_keeps_files_and_does_not_wait_for_task_lock() -> None:
+    # 软删除不碰文件系统，因此不该去抢任务锁：抢了就会在重试流程持锁期间干等。
+    # 这里刻意让外部持锁，删除仍应立刻返回。
+    async with fixture("soft-keep-") as (sessions, task_id, asset_id):
+        deleted = await asyncio.wait_for(
+            call_asset_delete(sessions, asset_id), timeout=2
+        )
 
-        assert delete_waited_for_task, "asset delete bypassed task lifecycle ownership"
-        assert retry_waited_for_task
         assert deleted["id"] == asset_id
-        assert retried.status == "pending"
+        assert deleted["deleted_at"], "软删除必须带上时间戳"
+        assert await trashed_at(sessions, asset_id) is not None
+        # 文件原样留在磁盘上 —— 这是"可恢复"的前提，也是配额不释放的原因
+        assert asset_exists(f"{task_id}/image.png")
+        assert asset_exists(thumb_key(f"{task_id}/image.png"))
+
+
+async def test_soft_delete_is_idempotent() -> None:
+    async with fixture("soft-twice-") as (sessions, _task_id, asset_id):
+        first = await call_asset_delete(sessions, asset_id)
+        assert first["deleted_at"]
+        first_ts = await trashed_at(sessions, asset_id)
+
+        try:
+            await call_asset_delete(sessions, asset_id)
+        except HTTPException as exc:
+            assert exc.status_code == 404, exc.status_code
+        else:
+            raise AssertionError("重复删除同一素材应当 404（幂等）")
+
+        # 首次打的时间戳不能被第二次冲掉
+        assert await trashed_at(sessions, asset_id) == first_ts
+
+
+async def test_retry_purges_trashed_assets() -> None:
+    # 重试会重新生成，旧产物（包括已进回收站的）必须彻底清掉：
+    # 只清正常素材的话，回收站里的文件就再也没人扫得到（孤儿）
+    async with fixture("retry-purge-") as (sessions, task_id, asset_id):
+        await call_asset_delete(sessions, asset_id)
+        with patch.object(tasks_api, "spawn_task", fake_spawn):
+            retried = await call_retry(sessions, task_id)
+
+        assert retried.status == "pending", retried.status
         assert await db_counts(sessions, task_id) == (0, 1, "pending")
         assert not asset_exists(f"{task_id}/image.png")
         assert not asset_exists(thumb_key(f"{task_id}/image.png"))
 
 
-async def test_retry_then_asset_delete_reloads_current_asset() -> None:
+async def test_retry_then_asset_delete_returns_404() -> None:
     async with fixture("retry-first-") as (sessions, task_id, asset_id):
         with patch.object(tasks_api, "spawn_task", fake_spawn):
-            async with thumbnail_lifecycle([task_lifecycle_key(task_id)]):
-                retry = asyncio.create_task(call_retry(sessions, task_id))
-                await asyncio.sleep(0.03)
-                delete = asyncio.create_task(call_asset_delete(sessions, asset_id))
-                await asyncio.sleep(0.03)
-            retried, delete_result = await asyncio.gather(
-                retry,
-                delete,
-                return_exceptions=True,
-            )
+            retried = await call_retry(sessions, task_id)
+        assert retried.status == "pending"
 
-        assert isinstance(retried, Task) and retried.status == "pending", retried
-        assert isinstance(delete_result, HTTPException), delete_result
-        assert delete_result.status_code == 404, delete_result
+        try:
+            await call_asset_delete(sessions, asset_id)
+        except HTTPException as exc:
+            assert exc.status_code == 404, exc.status_code
+        else:
+            raise AssertionError("素材行已被重试清掉，删除应当 404")
+
         assert await db_counts(sessions, task_id) == (0, 1, "pending")
-        assert not asset_exists(f"{task_id}/image.png")
-        assert not asset_exists(thumb_key(f"{task_id}/image.png"))
 
 
 async def test_task_delete_then_asset_delete_returns_404_not_500() -> None:
     async with fixture("task-first-") as (sessions, task_id, asset_id):
-        async with thumbnail_lifecycle([task_lifecycle_key(task_id)]):
-            task_delete = asyncio.create_task(call_task_delete(sessions, task_id))
-            await asyncio.sleep(0.03)
-            asset_delete = asyncio.create_task(call_asset_delete(sessions, asset_id))
-            await asyncio.sleep(0.03)
-        task_result, asset_result = await asyncio.gather(
-            task_delete,
-            asset_delete,
-            return_exceptions=True,
-        )
+        deleted_task = await call_task_delete(sessions, task_id)
+        assert deleted_task["id"] == task_id, deleted_task
 
-        assert task_result["id"] == task_id, task_result
-        assert isinstance(asset_result, HTTPException), asset_result
-        assert asset_result.status_code == 404, asset_result
+        try:
+            await call_asset_delete(sessions, asset_id)
+        except HTTPException as exc:
+            assert exc.status_code == 404, exc.status_code
+        else:
+            raise AssertionError("任务连同素材已删除，再删素材应当 404 而不是成功")
+
         assert await db_counts(sessions, task_id) == (0, 0, None)
         assert not asset_exists(f"{task_id}/image.png")
         assert not asset_exists(thumb_key(f"{task_id}/image.png"))
 
 
-async def test_cancelled_asset_delete_keeps_task_ownership_until_commit() -> None:
-    async with fixture("cancel-parent-") as (sessions, task_id, asset_id):
-        started = threading.Event()
-        release = threading.Event()
-        real_cleanup = cleanup_asset_files
-
-        def blocking_cleanup(file_path: str, file_name: str):
-            started.set()
-            if not release.wait(timeout=5):
-                raise RuntimeError("cleanup gate timed out")
-            return real_cleanup(file_path, file_name)
-
-        acquired = asyncio.Event()
-
-        async def contender() -> None:
-            async with thumbnail_lifecycle([task_lifecycle_key(task_id)]):
-                acquired.set()
-
-        with patch.object(assets_api, "cleanup_asset_files", blocking_cleanup):
-            parent = asyncio.create_task(call_asset_delete(sessions, asset_id))
-            assert await asyncio.to_thread(started.wait, 2), "cleanup did not start"
-            parent.cancel()
-            contender_task = asyncio.create_task(contender())
-            await asyncio.sleep(0.05)
-            retained_ownership = not acquired.is_set() and not parent.done()
-            release.set()
-            try:
-                await asyncio.wait_for(parent, timeout=2)
-            except asyncio.CancelledError:
-                cancelled = True
-            else:
-                cancelled = False
-            await asyncio.wait_for(contender_task, timeout=2)
-
-        assert retained_ownership, "cancelled delete released task ownership before mutation"
-        assert cancelled, "caller cancellation did not propagate after child completion"
-        assert await db_counts(sessions, task_id) == (0, 1, "cancelled")
-        assert not asset_exists(f"{task_id}/image.png")
-        assert not asset_exists(thumb_key(f"{task_id}/image.png"))
-
-
-async def test_session_bound_user_survives_hint_transaction_reset() -> None:
-    async with fixture("orm-user-") as (sessions, task_id, asset_id):
+async def test_session_bound_user_survives_delete() -> None:
+    # delete_asset 只用 user.id / user.role。ORM 托管对象在 commit 后可能被
+    # 置为过期，若函数里读了别的属性就会触发异步懒加载而炸 —— 这条守住它。
+    async with fixture("orm-user-") as (sessions, _task_id, asset_id):
         async with sessions() as db:
             user = await db.get(User, "admin")
             assert user is not None
             result = await assets_api.delete_asset(asset_id, user=user, db=db)
 
         assert result["id"] == asset_id
-        assert await db_counts(sessions, task_id) == (0, 1, "cancelled")
-        assert not asset_exists(f"{task_id}/image.png")
-        assert not asset_exists(thumb_key(f"{task_id}/image.png"))
+        assert await trashed_at(sessions, asset_id) is not None
 
 
 async def main() -> int:
     tests = [
-        test_asset_delete_then_retry_serializes_without_stale_rows,
-        test_retry_then_asset_delete_reloads_current_asset,
+        test_soft_delete_keeps_files_and_does_not_wait_for_task_lock,
+        test_soft_delete_is_idempotent,
+        test_retry_purges_trashed_assets,
+        test_retry_then_asset_delete_returns_404,
         test_task_delete_then_asset_delete_returns_404_not_500,
-        test_cancelled_asset_delete_keeps_task_ownership_until_commit,
-        test_session_bound_user_survives_hint_transaction_reset,
+        test_session_bound_user_survives_delete,
     ]
     failures: list[str] = []
     for test in tests:
