@@ -25,6 +25,8 @@ import {
   validateFlow,
 } from '../api/client'
 import DynamicForm from './DynamicForm'
+import StepEditorDialog from './StepEditorDialog'
+import { nodeVisual, paramSummary, reorderSteps, wouldBreakDependency } from './flowEditor'
 import { notify, reportError } from '../notify'
 import type { ModuleProps } from '../modules/registry'
 
@@ -361,44 +363,70 @@ function EditView({
   const [busy, setBusy] = useState(false)
   const [issues, setIssues] = useState<{ errors: string[]; warnings: string[] } | null>(null)
   const [layers, setLayers] = useState<string[][]>([])
+  const [editing, setEditing] = useState<FlowStep | null>(null)
+  const [showInputs, setShowInputs] = useState(false)
+  // 拖动排序：dragIdx 是被拖的那项，dropIdx 是「插到第几项之前」
+  const [dragIdx, setDragIdx] = useState<number | null>(null)
+  const [dropIdx, setDropIdx] = useState<number | null>(null)
 
   useEffect(() => {
     setDraft(selected)
     setIssues(null)
     setLayers([])
+    setEditing(null)
   }, [selected])
 
   const capOf = (id: string) => caps.find((c) => c.id === id) ?? null
-
   const patch = (next: Flow) => setDraft(next)
 
   const addStep = () => {
     if (!draft) return
-    const cap = caps[0]
-    if (!cap) return
     const n = draft.steps.length + 1
-    const step: FlowStep = {
-      id: `s${n}`,
-      type: 'template',
-      template_id: cap.id,
-      flow_id: '',
-      count: 1,
-      params: {},
-    }
-    patch({ ...draft, steps: [...draft.steps, step] })
-  }
-
-  const patchStep = (id: string, part: Partial<FlowStep>) => {
-    if (!draft) return
     patch({
       ...draft,
-      steps: draft.steps.map((s) => (s.id === id ? { ...s, ...part } : s)),
+      steps: [
+        ...draft.steps,
+        {
+          id: `s${n}`,
+          type: 'template',
+          template_id: '',
+          flow_id: '',
+          count: 1,
+          params: {},
+        },
+      ],
     })
   }
 
   const removeStep = (id: string) => {
     if (!draft) return
     patch({ ...draft, steps: draft.steps.filter((s) => s.id !== id) })
+  }
+
+  // ── 拖动排序 ──
+  const handleDragOver = (e: React.DragEvent, index: number) => {
+    e.preventDefault()
+    const rect = e.currentTarget.getBoundingClientRect()
+    // 落在上半还是下半：决定插到这一项之前还是之后
+    setDropIdx(e.clientY > rect.top + rect.height / 2 ? index + 1 : index)
+  }
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault()
+    if (!draft || dragIdx === null || dropIdx === null) return
+    const toIdx = dropIdx > dragIdx ? dropIdx - 1 : dropIdx
+    if (!wouldBreakDependency(draft.steps, dragIdx, toIdx)) {
+      patch({ ...draft, steps: reorderSteps(draft.steps, dragIdx, toIdx) })
+    } else {
+      notify('这个位置会打断依赖：被引用的上游必须排在前面', 'warning')
+    }
+    setDragIdx(null)
+    setDropIdx(null)
+  }
+
+  const endDrag = () => {
+    setDragIdx(null)
+    setDropIdx(null)
   }
 
   const doValidate = async () => {
@@ -482,7 +510,7 @@ function EditView({
 
   return (
     <div className="flex min-h-0 flex-1 gap-md">
-      <aside className="w-64 shrink-0 overflow-y-auto">
+      <aside className="w-56 shrink-0 overflow-y-auto">
         <button type="button" className="btn btn-quiet mb-sm w-full" onClick={() => void createNew()}>
           新建流程
         </button>
@@ -506,19 +534,19 @@ function EditView({
         </ul>
       </aside>
 
-      <section className="min-w-0 flex-1 overflow-y-auto">
+      <section className="flex min-w-0 flex-1 flex-col overflow-y-auto">
         {!draft ? (
           <div className="empty">
             <p className="empty-title">选一个流程，或者新建一条</p>
             <p className="empty-hint">
-              流程 = 节点的有序编排。每一步用一个节点，上一步的产物自动喂给下一步
+              把节点串起来：拖动调整顺序，双击节点设置它的输入
             </p>
           </div>
         ) : (
           <>
             <div className="panel mb-md">
               <div className="flex flex-wrap items-end gap-sm">
-                <label className="field-label">
+                <label className="field-label w-56">
                   流程名称
                   <input
                     className="field"
@@ -537,101 +565,117 @@ function EditView({
               </div>
             </div>
 
-            <div className="panel mb-md">
-              <h4 className="font-display text-base font-medium">流程输入</h4>
-              <p className="mt-2xs text-xs text-muted">
-                运行时要用户填的东西。步骤里用 {'{{ input.字段名 }}'} 引用
-              </p>
-              <InputFields
-                fields={draft.input_schema.fields ?? []}
-                onChange={(fields) =>
-                  patch({ ...draft, input_schema: { ...draft.input_schema, fields } })
-                }
-              />
+            {/* ── 节点列表：可拖动排序，双击开设置 ── */}
+            <div className="mb-md flex items-center justify-between gap-sm">
+              <h4 className="font-display text-base font-medium">
+                节点
+                <span className="ml-2xs text-xs text-muted">
+                  拖动排序 · 双击设置输入
+                </span>
+              </h4>
+              <button type="button" className="btn btn-quiet" onClick={addStep}>
+                添加节点
+              </button>
             </div>
 
-            <div className="panel mb-md">
-              <div className="flex items-center justify-between gap-sm">
-                <h4 className="font-display text-base font-medium">步骤</h4>
-                <button type="button" className="btn btn-quiet" onClick={addStep}>
-                  添加步骤
-                </button>
+            {draft.steps.length === 0 ? (
+              <div className="empty">
+                <p className="empty-title">还没有节点</p>
+                <p className="empty-hint">点「添加节点」，然后双击它选一个节点</p>
               </div>
-              {draft.steps.length === 0 ? (
-                <p className="mt-sm text-sm text-muted">还没有步骤</p>
-              ) : (
-                <ol className="mt-sm flex flex-col gap-md">
-                  {draft.steps.map((step, index) => {
-                    const cap = capOf(step.template_id)
-                    return (
-                      <li key={step.id} className="rounded-lg border border-tertiary p-sm">
-                        <div className="flex flex-wrap items-end gap-sm">
-                          <span className="chip">{index + 1}</span>
-                          <label className="field-label">
-                            步骤名
-                            <input
-                              className="field"
-                              value={step.id}
-                              onChange={(e) => patchStep(step.id, { id: e.target.value })}
-                            />
-                          </label>
-                          <label className="field-label flex-1">
-                            节点
-                            <select
-                              className="field"
-                              value={step.template_id}
-                              onChange={(e) => {
-                                const next = caps.find((c) => c.id === e.target.value)
-                                patchStep(step.id, {
-                                  template_id: e.target.value,
-                                  params: next
-                                    ? Object.fromEntries(
-                                        next.fields.map((f) => [f.name, '']),
-                                      )
-                                    : {},
-                                })
-                              }}
-                            >
-                              <option value="">选一个节点…</option>
-                              {caps.map((c) => (
-                                <option key={c.id} value={c.id}>
-                                  {c.name}
-                                </option>
-                              ))}
-                            </select>
-                          </label>
-                          <button
-                            type="button"
-                            className="btn btn-danger-quiet"
-                            onClick={() => removeStep(step.id)}
-                          >
-                            删除
-                          </button>
-                        </div>
-
-                        {cap && cap.fields.length > 0 && (
-                          <div className="mt-sm flex flex-col gap-2xs">
-                            {cap.fields.map((f) => (
-                              <ParamRow
-                                key={f.name}
-                                field={f}
-                                value={step.params[f.name] ?? ''}
-                                stepId={step.id}
-                                steps={draft.steps}
-                                inputFields={draft.input_schema.fields ?? []}
-                                onChange={(v) =>
-                                  patchStep(step.id, {
-                                    params: { ...step.params, [f.name]: v },
-                                  })
-                                }
-                              />
-                            ))}
-                          </div>
+            ) : (
+              <ol className="flex flex-col">
+                {draft.steps.map((step, index) => {
+                  const cap = capOf(step.template_id)
+                  const visual = nodeVisual(cap)
+                  const layer = layers.findIndex((l) => l.includes(step.id))
+                  return (
+                    <div key={step.id}>
+                      {dropIdx === index && <div className="my-2xs h-0.5 rounded bg-accent" />}
+                      <li
+                        draggable
+                        onDragStart={() => setDragIdx(index)}
+                        onDragOver={(e) => handleDragOver(e, index)}
+                        onDrop={handleDrop}
+                        onDragEnd={endDrag}
+                        onDoubleClick={() => setEditing(step)}
+                        className={`group flex cursor-pointer items-center gap-sm rounded-lg border px-sm py-sm ${
+                          dragIdx === index
+                            ? 'border-accent bg-secondary opacity-60'
+                            : 'border-tertiary hover:border-rule-strong hover:bg-secondary'
+                        }`}
+                      >
+                        <span
+                          aria-hidden="true"
+                          className="cursor-grab text-muted active:cursor-grabbing"
+                          title="拖动排序"
+                        >
+                          ⠿
+                        </span>
+                        <span className="chip">{index + 1}</span>
+                        <span aria-hidden="true" className="text-ink-2">
+                          {visual.icon}
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-sm font-medium">
+                            {cap?.name ?? '（未选节点）'}
+                          </span>
+                          <span className="block truncate text-xs text-muted">
+                            {paramSummary(step, cap)}
+                          </span>
+                        </span>
+                        {layer >= 0 && (
+                          <span className="text-xs text-muted shrink-0">第 {layer + 1} 层</span>
                         )}
+                        <button
+                          type="button"
+                          className="btn btn-danger-quiet shrink-0 opacity-0 transition-opacity group-hover:opacity-100"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            removeStep(step.id)
+                          }}
+                          aria-label={`删除步骤 ${step.id}`}
+                        >
+                          删除
+                        </button>
                       </li>
-                    )
-                  })}
-                </ol>
+                    </div>
+                  )
+                })}
+                {dropIdx === draft.steps.length && (
+                  <div className="my-2xs h-0.5 rounded bg-accent" />
+                )}
+              </ol>
+            )}
+
+            {/* ── 流程输入（流程级，收起来） ── */}
+            <div className="panel mt-md mb-md">
+              <button
+                type="button"
+                className="flex w-full items-center justify-between gap-sm"
+                onClick={() => setShowInputs(!showInputs)}
+                aria-expanded={showInputs}
+              >
+                <span className="font-display text-base font-medium">
+                  流程输入
+                  <span className="ml-2xs text-xs text-muted">
+                    {(draft.input_schema?.fields ?? []).length} 个字段
+                  </span>
+                </span>
+                <span className="text-xs text-muted">{showInputs ? '▾ 收起' : '▸ 展开'}</span>
+              </button>
+              {showInputs && (
+                <p className="mt-2xs text-xs text-muted">
+                  运行时要用户填的东西。节点里用 {'{{ input.字段名 }}'} 引用
+                </p>
+              )}
+              {showInputs && (
+                <InputFields
+                  fields={draft.input_schema?.fields ?? []}
+                  onChange={(fields) =>
+                    patch({ ...draft, input_schema: { ...draft.input_schema, fields } })
+                  }
+                />
               )}
             </div>
 
@@ -639,7 +683,7 @@ function EditView({
               <div className="panel mb-md">
                 <h4 className="font-display text-base font-medium">并行分组</h4>
                 <p className="mt-2xs text-xs text-muted">
-                  同一组里的步骤互不依赖，会同时开跑；后面的组等前面跑完
+                  同一组里的节点互不依赖，会同时开跑；后面的组等前面跑完
                 </p>
                 <ol className="mt-sm flex flex-col gap-2xs">
                   {layers.map((layer, i) => (
@@ -682,7 +726,7 @@ function EditView({
               </div>
             )}
 
-            <div className="flex items-center gap-sm">
+            <div className="mt-auto flex items-center gap-sm">
               <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void doSave()}>
                 保存
               </button>
@@ -701,61 +745,26 @@ function EditView({
           </>
         )}
       </section>
-    </div>
-  )
-}
 
-/** 参数取值输入框 —— 值是字面量或 {{...}} 表达式 */
-function ParamRow({
-  field,
-  value,
-  stepId,
-  steps,
-  inputFields,
-  onChange,
-}: {
-  field: { name: string; label: string; type: string; required: boolean }
-  value: string
-  stepId: string
-  steps: FlowStep[]
-  inputFields: TemplateField[]
-  onChange: (v: string) => void
-}) {
-  const upstreams = steps.filter((s) => s.id !== stepId)
-  return (
-    <div className="flex flex-wrap items-end gap-xs">
-      <label className="field-label min-w-40 flex-1">
-        <span className="text-xs text-muted">
-          {field.label}
-          {field.required ? ' *' : ''}
-        </span>
-        <input
-          className="field"
-          value={value}
-          placeholder="字面量，或 {{ input.xxx }}"
-          onChange={(e) => onChange(e.target.value)}
-        />
-      </label>
-      {!value && (inputFields.length > 0 || upstreams.length > 0) && (
-        <select
-          className="field w-48"
-          value=""
-          onChange={(e) => {
-            if (e.target.value) onChange(e.target.value)
+      {editing && draft && (
+        <StepEditorDialog
+          step={editing}
+          steps={draft.steps}
+          caps={caps}
+          inputFields={draft.input_schema?.fields ?? []}
+          onClose={() => setEditing(null)}
+          onDelete={() => {
+            removeStep(editing.id)
+            setEditing(null)
           }}
-        >
-          <option value="">插入引用…</option>
-          {inputFields.map((f) => (
-            <option key={`in-${f.name}`} value={`{{ input.${f.name} }}`}>
-              流程输入 · {f.label || f.name}
-            </option>
-          ))}
-          {upstreams.map((s) => (
-            <option key={`up-${s.id}`} value={`{{ steps.${s.id}.outputs }}`}>
-              上游产物 · {s.id}
-            </option>
-          ))}
-        </select>
+          onSave={(next) => {
+            patch({
+              ...draft,
+              steps: draft.steps.map((s) => (s.id === editing.id ? next : s)),
+            })
+            setEditing(null)
+          }}
+        />
       )}
     </div>
   )

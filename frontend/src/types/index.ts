@@ -323,11 +323,12 @@ export interface NodeCapability {
   fields: {
     name: string
     label: string
-    type: string
+    /** 与 TemplateField 同一套控件类型 —— 能力清单要能直接驱动表单渲染 */
+    type: TemplateField['type']
     required: boolean
     options?: (string | number | boolean)[]
     default?: string | number | boolean
-    accept?: string
+    accept?: TemplateField['accept']
     multiple: boolean
   }[]
 }
