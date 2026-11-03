@@ -67,6 +67,11 @@ _COLUMN_MIGRATIONS = [
     # 素材独立化（2026-11-02）：归属从 task.created_by 搬到素材自己身上，
     # 上传素材没有任务也能确定归属。加完列由 _backfill_asset_owner 回填。
     ("assets", "owner_id", "ALTER TABLE assets ADD COLUMN owner_id VARCHAR(32) DEFAULT ''"),
+    # 回收站（2026-11-03）：软删除。非空 = 已进回收站，列表/统计默认过滤，
+    # 但磁盘文件还在，所以配额照算。
+    ("assets", "deleted_at", "ALTER TABLE assets ADD COLUMN deleted_at DATETIME"),
+    # 存储配额（2026-11-03）：0 = 不限。单位字节。
+    ("users", "storage_quota_bytes", "ALTER TABLE users ADD COLUMN storage_quota_bytes INTEGER DEFAULT 0"),
 ]
 
 # SQLite 不支持 ALTER COLUMN，改 task_id 可空只能重建表。列顺序与 models.Asset 对齐。
@@ -82,6 +87,7 @@ CREATE TABLE assets_rebuild (
     tags TEXT NOT NULL,
     meta TEXT NOT NULL,
     is_shared BOOLEAN DEFAULT 0,
+    deleted_at DATETIME,
     created_at DATETIME NOT NULL,
     PRIMARY KEY (id),
     FOREIGN KEY(task_id) REFERENCES tasks (id)
@@ -106,7 +112,8 @@ def _rebuild_assets_optional_task(sync_conn) -> None:
 
     target = [
         "id", "owner_id", "task_id", "file_path", "file_name",
-        "file_size", "mime_type", "tags", "meta", "is_shared", "created_at",
+        "file_size", "mime_type", "tags", "meta", "is_shared",
+        "deleted_at", "created_at",
     ]
     cols = [c for c in target if c in notnull_by_name]
     # 老库可能有 NULL（历史 DDL 与 ORM 不完全一致），逐列给兜底值，别让整表迁移失败

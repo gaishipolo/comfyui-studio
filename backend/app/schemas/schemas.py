@@ -8,7 +8,11 @@ from pydantic import BaseModel, Field, field_validator
 # 注意：type 只描述「用什么控件」，不描述「几个值」—— 基数看 multiple，
 # 元素类型看能力声明（string/int/bool/enum/image/audio/video）。
 # image_upload 是历史名字（当初只有图片能上传），读取时归一成 file_upload。
-_FIELD_TYPES = {"text", "textarea", "number", "select", "file_upload", "image_upload"}
+_FIELD_TYPES = {
+    "text", "textarea", "number", "select", "file_upload", "image_upload",
+    # 数字控件 + 「随机」按钮（典型用途 seed）。值仍是数字，落库后按数字下发
+    "random_number",
+}
 # 上传控件放行的文件种类
 _FILE_KINDS = {"image", "audio", "video"}
 
@@ -72,6 +76,13 @@ def normalize_input_schema(value: Any) -> dict:
             field["default"] = item["default"]
         if item.get("advanced"):
             field["advanced"] = True
+        # 数值范围：只对数值类控件有意义（随机数靠它定取值区间）。
+        # 注意 bool 是 int 的子类，必须显式排除，否则 True 会变成 min=1。
+        if field_type in ("number", "random_number"):
+            for key in ("min", "max"):
+                raw_bound = item.get(key)
+                if isinstance(raw_bound, (int, float)) and not isinstance(raw_bound, bool):
+                    field[key] = raw_bound
         # 基数：任何类型都可以是列表（音频列表、参考图列表、甚至多行文本）。
         # 之前把 multiple 限定在 image_upload 上，导致「列表参数」只能靠
         # audio/audio2/audio3 这种槽位硬凑 —— 那正是这次要拆掉的东西
@@ -181,6 +192,8 @@ class AssetResponse(BaseModel):
     created_by: str = ""  # 归属人 id（assets.owner_id）
     creator_name: str = ""  # 归属人显示名（展示「来自谁」）
     created_at: datetime
+    # 回收站时间：非空表示已软删除（只在回收站列表里出现）
+    deleted_at: datetime | None = None
 
     class Config:
         from_attributes = True
@@ -270,8 +283,12 @@ class UsageByUser(BaseModel):
     task_error: int = 0
     task_cancelled: int = 0
     avg_duration_seconds: float | None = None  # 仅算已完成任务；没有完成任务则 null
+    # 存储口径：storage_bytes 含回收站（文件还在磁盘上，与配额口径一致），
+    # trash_* 是其中的回收站部分 —— 让管理员明白「删了为什么没释放空间」。
     storage_bytes: int = 0
     asset_count: int = 0
+    trash_storage_bytes: int = 0
+    trash_asset_count: int = 0
 
 
 class UsageResponse(BaseModel):
