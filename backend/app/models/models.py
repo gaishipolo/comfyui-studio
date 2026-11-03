@@ -216,7 +216,13 @@ class Flow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
-    runs: Mapped[list["FlowRun"]] = relationship(back_populates="flow")
+    # 删除流程时**保留运行记录**（它们是历史，不是流程的一部分）。
+    # 不加 passive_deletes 的话，SQLAlchemy 的默认 cascade 会试图把
+    # flow_runs.flow_id 置空 —— 而那列是 NOT NULL，删流程直接 500。
+    # 这个坑从流程骨架起就埋着，之前没人删过「有运行记录的流程」所以没暴露。
+    runs: Mapped[list["FlowRun"]] = relationship(
+        back_populates="flow", passive_deletes=True
+    )
 
 
 class FlowRun(Base):

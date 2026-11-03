@@ -8,15 +8,18 @@
 """
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
+from app.disposition import attachment_disposition
 from app.models.models import Flow, FlowRun, Template, User
-from app.auth import get_current_user
+from app.auth import get_current_user, require_admin
 from app.schemas.schemas import (
     FlowCreate,
+    FlowImportPayload,
+    FlowImportResponse,
     FlowResponse,
     FlowRunResponse,
     FlowUpdate,
@@ -25,7 +28,17 @@ from app.schemas.schemas import (
     NodeCapability,
 )
 from app.services.flow_service import FlowError, submit_flow
+from app.timeutils import utcnow
 from app.services.flow_validate import validate_flow_config
+from app.services.flow_portability import (
+    FLOW_EXPORT_FORMAT,
+    FLOW_EXPORT_VERSION,
+    build_export_doc,
+    collect_references,
+    dumps_doc,
+    resolve_references,
+    rewrite_references,
+)
 
 router = APIRouter(prefix="/api/flows", tags=["flows"])
 logger = logging.getLogger(__name__)
@@ -235,3 +248,123 @@ async def run_flow(
     except FlowError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return FlowRunResponse.model_validate(run)
+
+
+@router.get("/{flow_id}/export")
+async def export_flow(
+    flow_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """导出流程为 JSON 文件。
+
+    包里带上引用的节点与子流程快照 —— 流程不只有自己的配置，它引用了别的
+    东西，导到另一台机器上那些引用可能不存在。子流程是递归收集的。
+
+    导出只是换个格式，不提权 —— 读流程本来就不需要管理员权限。
+    """
+    flow = await db.get(Flow, flow_id)
+    if flow is None:
+        raise HTTPException(status_code=404, detail="流程不存在")
+
+    templates, flows, missing = await collect_references(db, flow)
+    if missing:
+        # 引用了但本机已经没有的东西 —— 导出的包会残缺，导入到别处得到空壳流程
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"流程引用的{'、'.join(missing)}在本机已不存在，无法导出"
+                "（先把这些引用修好，或删掉相关步骤）"
+            ),
+        )
+    doc = build_export_doc(
+        flow,
+        templates,
+        flows,
+        exported_at=utcnow().isoformat(timespec="seconds") + "Z",
+    )
+    filename = f"{flow.name}.flow.json"
+    return Response(
+        content=dumps_doc(doc),
+        media_type="application/json",
+        headers={
+            "Content-Disposition": attachment_disposition(filename),
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@router.post("/import", response_model=FlowImportResponse)
+async def import_flow(
+    payload: FlowImportPayload,
+    overwrite: bool = Query(False, description="同名流程已存在时覆盖它"),
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """导入流程导出文件。
+
+    **引用怎么解析**：本机有同 id 的节点/子流程 → 用本机的（对方可能改过，
+    本机的才是当前真相）；没有 → 按包里的快照创建一个。
+
+    导入会往系统里加流程（可能连带加节点），所以只给 admin。
+    """
+    if payload.format != FLOW_EXPORT_FORMAT:
+        raise HTTPException(
+            status_code=400,
+            detail=f"不是本系统导出的流程文件（format={payload.format or '空'}）",
+        )
+    if payload.version > FLOW_EXPORT_VERSION:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"该文件由更新版本导出（v{payload.version}），"
+                f"当前只支持到 v{FLOW_EXPORT_VERSION}，请先升级后端"
+            ),
+        )
+    if not isinstance(payload.flow, dict) or not payload.flow.get("name"):
+        raise HTTPException(status_code=400, detail="流程内容不合法：缺少 name")
+
+    warnings: list[str] = []
+
+    # 引用解析：先建/复用节点与子流程，拿到 id 映射
+    id_map, ref_warnings = await resolve_references(db, payload.model_dump(), user.id)
+    warnings.extend(ref_warnings)
+
+    name = str(payload.flow.get("name") or "").strip()
+    steps = rewrite_references(payload.flow.get("steps") or [], id_map)
+
+    existing = (
+        await db.execute(select(Flow).where(Flow.name == name))
+    ).scalars().first()
+    if existing is not None and not overwrite:
+        raise HTTPException(
+            status_code=409,
+            detail=f"流程「{name}」已存在（可以传 overwrite=true 覆盖它）",
+        )
+
+    data = {
+        "name": name,
+        "description": str(payload.flow.get("description") or ""),
+        "category": str(payload.flow.get("category") or "image"),
+        "icon": str(payload.flow.get("icon") or ""),
+        "input_schema": payload.flow.get("input_schema") or {},
+        "outputs": payload.flow.get("outputs") or [],
+        "steps": steps,
+        "status": str(payload.flow.get("status") or "active"),
+    }
+
+    if existing is not None:
+        for key, value in data.items():
+            setattr(existing, key, value)
+        existing.version = (existing.version or 1) + 1
+        await db.commit()
+        await db.refresh(existing)
+        return FlowImportResponse(
+            id=existing.id, name=existing.name, created=False, warnings=warnings
+        )
+
+    flow = Flow(created_by=user.id, **data)
+    db.add(flow)
+    await db.commit()
+    await db.refresh(flow)
+    return FlowImportResponse(id=flow.id, name=flow.name, created=True, warnings=warnings)

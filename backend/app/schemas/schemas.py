@@ -416,6 +416,32 @@ class FlowRunResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class FlowImportPayload(BaseModel):
+    """流程导出文件的内容。
+
+    导入时用：模板引用（template_id / flow_id）在别的机器上可能不存在，
+    所以包里带着这些引用的快照，导入时按「本机有同 id 的就用本机的，
+    没有就按快照创建」解析。
+    """
+
+    format: str = Field(default="", description="导出格式标识")
+    version: int = Field(default=1, description="导出版本")
+    exported_at: str = Field(default="", description="导出时间")
+    source: dict = Field(default_factory=dict)
+    flow: dict = Field(default_factory=dict, description="流程本体")
+    templates: list = Field(default_factory=list, description="引用的节点快照")
+    flows: list = Field(default_factory=list, description="引用的子流程快照")
+
+
+class FlowImportResponse(BaseModel):
+    """导入结果。"""
+
+    id: str
+    name: str
+    created: bool = True
+    warnings: list[str] = Field(default_factory=list)
+
+
 class FlowValidateRequest(BaseModel):
     """校验一份流程配置（不落库）。编排器保存前、Agent 生成后都走这里。"""
 
