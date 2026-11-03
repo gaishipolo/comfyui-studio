@@ -9,7 +9,8 @@
  * 2. 步骤间的依赖解析（谁吃了谁的产物）
  * 3. 拖动排序的合法性 —— **拖动不能破坏依赖**
  */
-import type { FlowStep, NodeCapability } from '../types'
+import type { FlowStep, NodeCapability, TemplateField } from '../types'
+import { describeSource, parseParamSource } from './flowSource'
 
 /** 引用上游产物的写法：{{ steps.s1.outputs }} */
 const STEP_REF = /\{\{\s*steps\.([A-Za-z0-9_]+)\.outputs\s*\}\}/g
@@ -95,16 +96,23 @@ export function nodeVisual(cap: NodeCapability | null): NodeVisual {
 
 /**
  * 节点卡片的参数摘要 —— 一两行说清「这一步吃什么」。
- * 引用和字面量要能一眼分开：引用是链路，字面量是固定值。
+ *
+ * 摘要里不该出现 `input.prompt_a` 这种内部表示 —— 内容同事看到「流程输入 ·
+ * 初始画面」才知道这一步在吃什么。
  */
-export function paramSummary(step: FlowStep, cap: NodeCapability | null): string {
+export function paramSummary(
+  step: FlowStep,
+  cap: NodeCapability | null,
+  inputs: TemplateField[] = [],
+  stepTitles: Record<string, string> = {},
+): string {
   const fields = cap?.fields ?? []
   const parts: string[] = []
   for (const f of fields) {
     const raw = step.params?.[f.name]
     if (raw === undefined || raw === '') continue
-    const isRef = typeof raw === 'string' && raw.includes('{{')
-    const text = isRef ? raw.replace(/\{\{|\}\}/g, '').trim() : String(raw)
+    const parsed = parseParamSource(raw)
+    const text = describeSource(parsed.source, parsed.isCustom, inputs, stepTitles)
     parts.push(`${f.label || f.name}：${text}`)
     if (parts.length >= 3) break
   }

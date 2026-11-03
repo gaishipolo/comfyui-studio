@@ -27,6 +27,7 @@ import {
 import DynamicForm from './DynamicForm'
 import StepEditorDialog from './StepEditorDialog'
 import { nodeVisual, paramSummary, reorderSteps, wouldBreakDependency } from './flowEditor'
+import { stepTitle } from './flowSource'
 import { notify, reportError } from '../notify'
 import type { ModuleProps } from '../modules/registry'
 
@@ -272,8 +273,8 @@ function RunView({
                 {selected.steps.map((s, i) => (
                   <li key={s.id} className="flex items-center gap-sm text-sm">
                     <span className="chip">{i + 1}</span>
-                    <code className="text-xs text-muted">{s.id}</code>
                     <span>{nodeName(s.template_id)}</span>
+                    {s.title && <span className="text-muted">{s.title}</span>}
                     <span className="text-xs text-muted">{STEP_TYPE_LABEL[s.type] ?? s.type}</span>
                   </li>
                 ))}
@@ -308,7 +309,12 @@ function RunView({
                       {typeof s.layer === 'number' && (
                         <span className="text-xs text-muted">第 {s.layer + 1} 层</span>
                       )}
-                      <code className="text-xs text-muted">{s.step_id}</code>
+                      <span>
+                        {selected.steps.find((st) => st.id === s.step_id)?.title ||
+                          nodeName(
+                            selected.steps.find((st) => st.id === s.step_id)?.template_id ?? '',
+                          )}
+                      </span>
                       <span
                         className={
                           s.status === 'done'
@@ -364,7 +370,8 @@ function EditView({
   const [issues, setIssues] = useState<{ errors: string[]; warnings: string[] } | null>(null)
   const [layers, setLayers] = useState<string[][]>([])
   const [editing, setEditing] = useState<FlowStep | null>(null)
-  const [showInputs, setShowInputs] = useState(false)
+  // 默认展开：流程输入是内容同事编排时最需要看的东西（运行时运营要填什么）
+  const [showInputs, setShowInputs] = useState(true)
   // 拖动排序：dragIdx 是被拖的那项，dropIdx 是「插到第几项之前」
   const [dragIdx, setDragIdx] = useState<number | null>(null)
   const [dropIdx, setDropIdx] = useState<number | null>(null)
@@ -376,18 +383,37 @@ function EditView({
     setEditing(null)
   }, [selected])
 
-  const capOf = (id: string) => caps.find((c) => c.id === id) ?? null
+  const capOf = useCallback(
+    (id: string) => caps.find((c) => c.id === id) ?? null,
+    [caps],
+  )
   const patch = (next: Flow) => setDraft(next)
+
+  // 流程输入字段 —— 参数摘要里要说「流程输入 · 初始画面」而不是字段名
+  const inputFields = draft?.input_schema?.fields ?? []
+
+  // 步骤显示名 —— 引用别的步骤时要说「生成参考图」而不是裸 id（gen）
+  const stepTitleMap = useMemo(() => {
+    const map: Record<string, string> = {}
+    draft?.steps.forEach((s, i) => {
+      map[s.id] = stepTitle(s, i, capOf(s.template_id)?.name)
+    })
+    return map
+  }, [draft?.steps, capOf])
 
   const addStep = () => {
     if (!draft) return
-    const n = draft.steps.length + 1
+    // id 是内部标识，不能和已有的重复 —— 删过步骤再加会让 s{n} 撞号
+    let n = draft.steps.length + 1
+    const taken = new Set(draft.steps.map((s) => s.id))
+    while (taken.has(`s${n}`)) n += 1
     patch({
       ...draft,
       steps: [
         ...draft.steps,
         {
           id: `s${n}`,
+          title: '',
           type: 'template',
           template_id: '',
           flow_id: '',
@@ -400,6 +426,24 @@ function EditView({
 
   const removeStep = (id: string) => {
     if (!draft) return
+    // 删掉被引用的步骤会断链 —— 说清是谁在用它，别让人以为删干净了
+    const users = draft.steps.filter((s) =>
+      Object.values(s.params ?? {}).some((v) =>
+        typeof v === 'string' && v.includes(`steps.${id}.outputs`),
+      ),
+    )
+    if (users.length > 0) {
+      const idx = draft.steps.findIndex((s) => s.id === id)
+      const names = users
+        .map((u) =>
+          stepTitle(u, draft.steps.findIndex((s) => s.id === u.id), capOf(u.template_id)?.name),
+        )
+        .join('、')
+      notify(
+        `「${stepTitle(draft.steps[idx], idx, capOf(draft.steps[idx]?.template_id)?.name)}」的产物正被${names}使用，删了那些步骤就拿不到产物了`,
+        'warning',
+      )
+    }
     patch({ ...draft, steps: draft.steps.filter((s) => s.id !== id) })
   }
 
@@ -618,10 +662,12 @@ function EditView({
                         </span>
                         <span className="min-w-0 flex-1">
                           <span className="block truncate text-sm font-medium">
-                            {cap?.name ?? '（未选节点）'}
+                            {step.title?.trim() || cap?.name || '（未选节点）'}
                           </span>
                           <span className="block truncate text-xs text-muted">
-                            {paramSummary(step, cap)}
+                            {cap?.name && step.title?.trim()
+                              ? `${cap.name} · ${paramSummary(step, cap, inputFields, stepTitleMap)}`
+                              : paramSummary(step, cap, inputFields, stepTitleMap)}
                           </span>
                         </span>
                         {layer >= 0 && (
@@ -634,7 +680,7 @@ function EditView({
                             e.stopPropagation()
                             removeStep(step.id)
                           }}
-                          aria-label={`删除步骤 ${step.id}`}
+                          aria-label={`删除步骤 ${step.title?.trim() || step.id}`}
                         >
                           删除
                         </button>
@@ -666,7 +712,7 @@ function EditView({
               </button>
               {showInputs && (
                 <p className="mt-2xs text-xs text-muted">
-                  运行时要用户填的东西。节点里用 {'{{ input.字段名 }}'} 引用
+                  运行时要用户填的东西。在节点参数里选「流程输入 · 字段名」就能引用
                 </p>
               )}
               {showInputs && (
@@ -676,6 +722,118 @@ function EditView({
                     patch({ ...draft, input_schema: { ...draft.input_schema, fields } })
                   }
                 />
+              )}
+            </div>
+
+            {/* ── 流程产出：跑完交付什么 ── */}
+            <div className="panel mt-md mb-md">
+              <div className="flex items-center justify-between gap-sm">
+                <h4 className="font-display text-base font-medium">
+                  流程产出
+                  <span className="ml-2xs text-xs text-muted">
+                    {draft.outputs.length} 项
+                  </span>
+                </h4>
+                <button
+                  type="button"
+                  className="btn btn-quiet"
+                  onClick={() =>
+                    patch({
+                      ...draft,
+                      outputs: [
+                        ...draft.outputs,
+                        {
+                          name: '',
+                          from_step: draft.steps[draft.steps.length - 1]?.id ?? '',
+                          pick: 'all',
+                        },
+                      ],
+                    })
+                  }
+                >
+                  添加产出
+                </button>
+              </div>
+              <p className="mt-2xs text-xs text-muted">
+                跑完之后交付什么。留空则默认交付最后一步的产物。
+              </p>
+              {draft.outputs.length === 0 ? (
+                <p className="mt-sm text-sm text-muted">还没声明产出</p>
+              ) : (
+                <div className="mt-sm flex flex-col gap-2xs">
+                  {draft.outputs.map((out, i) => (
+                    <div key={i} className="flex flex-wrap items-end gap-xs">
+                      <label className="field-label flex-1">
+                        名称
+                        <input
+                          className="field"
+                          value={out.name}
+                          placeholder="例如：成片"
+                          onChange={(e) =>
+                            patch({
+                              ...draft,
+                              outputs: draft.outputs.map((o, j) =>
+                                j === i ? { ...o, name: e.target.value } : o,
+                              ),
+                            })
+                          }
+                        />
+                      </label>
+                      <label className="field-label flex-1">
+                        来自
+                        <select
+                          className="field"
+                          value={out.from_step}
+                          onChange={(e) =>
+                            patch({
+                              ...draft,
+                              outputs: draft.outputs.map((o, j) =>
+                                j === i ? { ...o, from_step: e.target.value } : o,
+                              ),
+                            })
+                          }
+                        >
+                          {draft.steps.map((s, si) => (
+                            <option key={s.id} value={s.id}>
+                              {stepTitle(s, si)}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="field-label w-32">
+                        取哪部分
+                        <select
+                          className="field"
+                          value={out.pick}
+                          onChange={(e) =>
+                            patch({
+                              ...draft,
+                              outputs: draft.outputs.map((o, j) =>
+                                j === i ? { ...o, pick: e.target.value } : o,
+                              ),
+                            })
+                          }
+                        >
+                          <option value="all">全部</option>
+                          <option value="first">第 1 张</option>
+                          <option value="last">最后一张</option>
+                        </select>
+                      </label>
+                      <button
+                        type="button"
+                        className="btn btn-danger-quiet"
+                        onClick={() =>
+                          patch({
+                            ...draft,
+                            outputs: draft.outputs.filter((_, j) => j !== i),
+                          })
+                        }
+                      >
+                        删除
+                      </button>
+                    </div>
+                  ))}
+                </div>
               )}
             </div>
 
@@ -779,11 +937,16 @@ function InputFields({
   onChange: (fields: TemplateField[]) => void
 }) {
   const add = () => {
+    // 字段名是内部标识（引用靠它），由系统生成 —— 用户只管「标签」，
+    // 标签才是他在节点参数里看到的东西。
+    let n = fields.length + 1
+    const taken = new Set(fields.map((f) => f.name))
+    while (taken.has(`input${n}`)) n += 1
     onChange([
       ...fields,
       {
-        name: `input${fields.length + 1}`,
-        label: `输入 ${fields.length + 1}`,
+        name: `input${n}`,
+        label: `输入 ${n}`,
         type: 'textarea',
         required: true,
       } as TemplateField,
@@ -799,19 +962,12 @@ function InputFields({
       {fields.length === 0 && <p className="text-sm text-muted">还没有输入字段</p>}
       {fields.map((f) => (
         <div key={f.name} className="flex flex-wrap items-end gap-xs">
-          <label className="field-label">
-            字段名
-            <input
-              className="field"
-              value={f.name}
-              onChange={(e) => patch(f.name, { name: e.target.value })}
-            />
-          </label>
           <label className="field-label flex-1">
             标签
             <input
               className="field"
               value={f.label}
+              placeholder="例如：初始画面"
               onChange={(e) => patch(f.name, { label: e.target.value })}
             />
           </label>
@@ -833,6 +989,7 @@ function InputFields({
             type="button"
             className="btn btn-danger-quiet"
             onClick={() => remove(f.name)}
+            aria-label={`删除输入字段 ${f.label || f.name}`}
           >
             删除
           </button>

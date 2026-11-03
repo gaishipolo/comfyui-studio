@@ -258,8 +258,10 @@ export interface EnginePluginInfo {
 // prompt），同名自动取会把同一个值喂给两步。
 
 export interface FlowStep {
-  /** 步骤别名 —— 绑定引用它，不引用数组下标 */
+  /** 步骤别名 —— 绑定引用它，不引用数组下标。内部标识，不开放编辑 */
   id: string
+  /** 步骤显示名 —— 给人看的标签，随便改 */
+  title?: string
   type: 'template' | 'flow' | 'repeat'
   template_id: string
   flow_id: string
@@ -271,7 +273,8 @@ export interface FlowStep {
 export interface FlowOutput {
   name: string
   from_step: string
-  pick: 'all' | 'first' | 'last'
+  /** 取哪部分：全部 / 第 1 张 / 最后一张 */
+  pick: string
 }
 
 export interface Flow {

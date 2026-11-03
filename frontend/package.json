@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "test:state": "tsx --test tests/task5_state.test.ts tests/list_view_state.test.ts tests/modal_a11y.test.ts tests/random_field.test.ts tests/flow_editor.test.ts",
+    "test:state": "tsx --test tests/task5_state.test.ts tests/list_view_state.test.ts tests/modal_a11y.test.ts tests/random_field.test.ts tests/flow_editor.test.ts tests/flow_source.test.ts",
     "test:ui": "npm run build && node tests/verify_task5_ui.mjs",
     "lint": "eslint src",
     "lint:fix": "eslint src --fix"

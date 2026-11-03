@@ -96,9 +96,14 @@ test('paramSummary 摘出参数摘要', () => {
     ],
   }
   const s = step('gen', { prompt: '{{ input.prompt }}', width: '1024' })
-  const summary = paramSummary(s, cap)
+  // 摘要用「流程输入 · 标签」的说法，不露 input.prompt 这种内部标识
+  const inputs = [
+    { name: 'prompt', label: '初始画面', type: 'textarea' as const, required: true },
+  ]
+  const summary = paramSummary(s, cap, inputs, {})
   assert.ok(summary.includes('提示词'))
-  assert.ok(summary.includes('input.prompt'))
+  assert.ok(summary.includes('流程输入 · 初始画面'))
+  assert.ok(!summary.includes('input.prompt'))
   assert.ok(summary.includes('1024'))
   // 没设参数时要说清楚
   assert.equal(paramSummary(step('x'), cap), '未设置参数')
