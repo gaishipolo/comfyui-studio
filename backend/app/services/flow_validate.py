@@ -15,7 +15,7 @@ import re
 
 from app.models.models import Template
 from app.services.field_types import is_file_field, normalized_field_map
-from app.services.flow_expr import collect_base_refs, collect_refs
+from app.services.flow_expr import collect_base_refs, collect_refs, expr_problems
 
 
 # 循环步骤里才有的变量
@@ -50,6 +50,15 @@ def _refs_upstream(expr) -> bool:
     if not isinstance(expr, str):
         return False
     return any(ref.startswith("steps.") for ref in collect_refs(expr))
+
+
+def _expr_errors(expr) -> list[str]:
+    """表达式本身的问题（语法错、函数不存在、参数个数不对）。
+
+    以前这些错误只在跑到那一步时才暴露 —— 引擎都花钱了才发现白跑。
+    现在挪到保存流程时，配置写错当场就能改。
+    """
+    return expr_problems(expr)
 
 
 def step_label(steps: list[dict], sid: str) -> str:
@@ -145,6 +154,8 @@ def validate_flow_config(
                 errors.append(f"{label}调用的子流程不存在：{sub_id}")
             # 子流程的参数也要能算出来（跟普通步骤一样校验引用）
             for _field, expr in (step.get("params") or {}).items():
+                for problem in _expr_errors(expr):
+                    errors.append(f"{label}的参数写法有问题：{problem}")
                 for ref in collect_base_refs(expr):
                     if ref.startswith("input."):
                         name = ref.split(".", 1)[1]
@@ -174,6 +185,9 @@ def validate_flow_config(
                 continue
             spec = fields[field]
             is_ref = isinstance(expr, str) and "{{" in expr
+
+            for problem in _expr_errors(expr):
+                errors.append(f"{label}的字段「{spec.get('label') or field}」写法有问题：{problem}")
 
             if is_file_field(spec) and not is_ref:
                 errors.append(
