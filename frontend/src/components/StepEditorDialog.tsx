@@ -17,8 +17,15 @@ import type { Flow, FlowStep, NodeCapability, TemplateField } from '../types'
 import { useModalKeyboard } from './useModalKeyboard'
 import { nodeVisual, paramSummary, stepDependencies } from './flowEditor'
 import {
+  COND_OPS,
+  TRANSFORMS,
+  type CondOp,
+  type ExprTransform,
+} from './flowExpr'
+import {
   buildSourceOptions,
-  formatParamSource,
+  describeParam,
+  formatParsedParam,
   optionPick,
   optionToSource,
   parseParamSource,
@@ -97,6 +104,10 @@ export default function StepEditorDialog({
    * - 流程输入 → 列出流程输入字段，选一个
    * - 上一步产物 → 列出能作为上游的步骤，选一个（可选取第几张）
    *
+   * 外加两块可选的进阶设置：
+   * - **再加工**：取到值之后做处理（去空格、截断字数…）
+   * - **按条件取值**：满足条件用一边、不满足用另一边
+   *
    * 用户看不到 {{ }}，但底层存的还是表达式。
    */
   const ParamControl = ({
@@ -136,6 +147,12 @@ export default function StepEditorDialog({
     const inputFieldName =
       parsed.source.kind === 'input' ? parsed.source.field : ''
 
+    /** 写回：任何改动都要经过这里，保证「加工链/条件」不丢 */
+    const write = (next: Partial<typeof parsed>) => {
+      const merged = { ...parsed, ...next }
+      setParam(field.name, formatParsedParam(merged))
+    }
+
     const applyOption = (optionValue: string) => {
       const p = optionPick(optionValue)
       const src = optionToSource(optionValue, literal)
@@ -144,16 +161,37 @@ export default function StepEditorDialog({
         return
       }
       if (src.kind === 'upstream') {
-        setParam(field.name, formatParamSource({ ...src, pick: p }))
+        write({ source: { ...src, pick: p } })
         return
       }
       if (src.kind === 'input') {
-        setParam(field.name, formatParamSource(src))
+        write({ source: src })
         return
       }
       // 固定值：保留已输入的字面量
-      setParam(field.name, literal)
+      write({ source: src })
     }
+
+    // ── 再加工 ──
+    const setTransform = (index: number, next: ExprTransform) => {
+      const transforms = parsed.transforms.map((t, i) => (i === index ? next : t))
+      write({ transforms })
+    }
+    const removeTransform = (index: number) => {
+      write({ transforms: parsed.transforms.filter((_, i) => i !== index) })
+    }
+    const addTransform = (fn: string) => {
+      const spec = TRANSFORMS.find((t) => t.fn === fn)
+      const item: ExprTransform = spec?.argLabel
+        ? { fn, arg: spec.argPlaceholder ?? '' }
+        : { fn }
+      write({ transforms: [...parsed.transforms, item] })
+    }
+
+    // ── 按条件取值 ──
+    const cond = parsed.condition
+    const setCondition = (next: NonNullable<typeof cond>) => write({ condition: next })
+    const clearCondition = () => write({ condition: undefined })
 
     return (
       <div className="flex flex-col gap-2xs">
@@ -198,7 +236,7 @@ export default function StepEditorDialog({
               <LiteralControl
                 field={field}
                 value={literal}
-                onChange={(v) => setParam(field.name, v)}
+                onChange={(v) => write({ source: { kind: 'literal', value: v } })}
               />
             )}
           </label>
@@ -225,6 +263,203 @@ export default function StepEditorDialog({
             <span className="text-xs text-muted">留空则用节点自己的默认值</span>
           )}
         </div>
+
+        {!parsed.isCustom && (
+          <div className="flex flex-col gap-2xs border-l-2 border-rule pl-sm">
+            <div className="flex flex-wrap items-center gap-xs">
+              <span className="text-xs text-muted">取到之后再处理</span>
+              {parsed.transforms.length === 0 && (
+                <span className="text-xs text-muted">（不用处理）</span>
+              )}
+              {parsed.transforms.map((t, i) => {
+                const spec = TRANSFORMS.find((s) => s.fn === t.fn)
+                return (
+                  <span
+                    key={`${t.fn}-${i}`}
+                    className="inline-flex items-center gap-2xs rounded border border-rule bg-paper-2 px-2xs py-1-xs"
+                  >
+                    <select
+                      className="field h-7 w-auto py-0 text-xs"
+                      value={t.fn}
+                      aria-label={`第 ${i + 1} 道处理的函数`}
+                      onChange={(e) => {
+                        const nextSpec = TRANSFORMS.find((s) => s.fn === e.target.value)
+                        setTransform(i, {
+                          fn: e.target.value,
+                          ...(nextSpec?.argLabel
+                            ? { arg: t.arg ?? nextSpec.argPlaceholder ?? '' }
+                            : {}),
+                        })
+                      }}
+                    >
+                      {TRANSFORMS.map((s) => (
+                        <option key={s.fn} value={s.fn}>
+                          {s.label}
+                        </option>
+                      ))}
+                    </select>
+                    {spec?.argLabel && (
+                      <input
+                        className="field h-7 w-28 py-0 text-xs"
+                        value={t.arg ?? ''}
+                        placeholder={spec.argPlaceholder}
+                        aria-label={`${spec.argLabel}`}
+                        onChange={(e) => setTransform(i, { ...t, arg: e.target.value })}
+                      />
+                    )}
+                    <button
+                      type="button"
+                      className="text-xs text-muted hover:text-danger"
+                      aria-label={`去掉第 ${i + 1} 道处理`}
+                      onClick={() => removeTransform(i)}
+                    >
+                      ✕
+                    </button>
+                  </span>
+                )
+              })}
+              <select
+                className="field h-7 w-32 py-0 text-xs"
+                value=""
+                aria-label="添加一道处理"
+                onChange={(e) => {
+                  if (e.target.value) addTransform(e.target.value)
+                }}
+              >
+                <option value="">＋ 处理…</option>
+                {TRANSFORMS.map((s) => (
+                  <option key={s.fn} value={s.fn}>
+                    {s.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-xs">
+              <span className="text-xs text-muted">按条件取值</span>
+              {!cond ? (
+                <button
+                  type="button"
+                  className="btn-quiet text-xs"
+                  onClick={() =>
+                    setCondition({
+                      field: inputFields[0]?.name ?? '',
+                      op: '==',
+                      value: '',
+                      then: {
+                        source: { kind: 'literal', value: literal },
+                        transforms: [],
+                      },
+                      otherwise: {
+                        source: parsed.source,
+                        transforms: parsed.transforms,
+                      },
+                    })
+                  }
+                >
+                  ＋ 加一个条件
+                </button>
+              ) : (
+                <span className="flex flex-wrap items-center gap-xs text-xs">
+                  <span>当流程输入「</span>
+                  <select
+                    className="field h-7 w-32 py-0 text-xs"
+                    value={cond.field}
+                    aria-label="条件判断的流程输入"
+                    onChange={(e) => setCondition({ ...cond, field: e.target.value })}
+                  >
+                    {inputFields.map((f) => (
+                      <option key={f.name} value={f.name}>
+                        {f.label || f.name}
+                      </option>
+                    ))}
+                  </select>
+                  <span>」</span>
+                  <select
+                    className="field h-7 w-24 py-0 text-xs"
+                    value={cond.op}
+                    aria-label="条件的运算符"
+                    onChange={(e) =>
+                      setCondition({ ...cond, op: e.target.value as CondOp })
+                    }
+                  >
+                    {COND_OPS.map((o) => (
+                      <option key={o.op} value={o.op}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    className="field h-7 w-28 py-0 text-xs"
+                    value={cond.value}
+                    placeholder="比较的值"
+                    aria-label="条件的比较值"
+                    onChange={(e) => setCondition({ ...cond, value: e.target.value })}
+                  />
+                  <span>」时用</span>
+                  <input
+                    className="field h-7 w-40 py-0 text-xs"
+                    value={
+                      cond.then.source.kind === 'literal'
+                        ? cond.then.source.value
+                        : describeParam(
+                            { ...parsed, source: cond.then.source, transforms: cond.then.transforms },
+                            inputFields,
+                            stepTitles,
+                          )
+                    }
+                    placeholder="固定值"
+                    aria-label="条件成立时用的值"
+                    onChange={(e) =>
+                      setCondition({
+                        ...cond,
+                        then: {
+                          ...cond.then,
+                          source: { kind: 'literal', value: e.target.value },
+                        },
+                      })
+                    }
+                  />
+                  <span>，否则用</span>
+                  <input
+                    className="field h-7 w-40 py-0 text-xs"
+                    value={
+                      cond.otherwise.source.kind === 'literal'
+                        ? cond.otherwise.source.value
+                        : describeParam(
+                            {
+                              ...parsed,
+                              source: cond.otherwise.source,
+                              transforms: cond.otherwise.transforms,
+                            },
+                            inputFields,
+                            stepTitles,
+                          )
+                    }
+                    placeholder="固定值"
+                    aria-label="条件不成立时用的值"
+                    onChange={(e) =>
+                      setCondition({
+                        ...cond,
+                        otherwise: {
+                          ...cond.otherwise,
+                          source: { kind: 'literal', value: e.target.value },
+                        },
+                      })
+                    }
+                  />
+                  <button
+                    type="button"
+                    className="text-xs text-muted hover:text-danger"
+                    onClick={clearCondition}
+                  >
+                    ✕
+                  </button>
+                </span>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     )
   }

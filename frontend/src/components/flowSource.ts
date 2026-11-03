@@ -5,113 +5,173 @@
  * 这套语法对非技术人员（内容同事）不友好，而且**界面暴露的是数据结构的
  * 内部表示** —— 用户不该知道流程内部叫 `input.prompt_a`。
  *
- * 做法：界面层把「这个字段的值从哪来」拆成三个用户能理解的选择：
+ * 做法：界面层把「这个字段的值从哪来」拆成几个用户能理解的选择：
  *   固定值      —— 就写死一个值
  *   流程输入    —— 运行时由运营填（挑一个输入字段）
  *   上一步产物  —— 吃上游的产出（挑一个步骤，可选取第几张）
+ *   再加工      —— 对取到的值做处理（去空格、截断字数…）
+ *   按条件取值  —— 满足条件用一边、不满足用另一边
  *
  * 底层仍然存表达式字符串 —— 后端、Agent 接口、数据模型一行都不用改。
  * **换的是界面，不是数据。**
+ *
+ * **解析只有一处**：`flowExpr.ts` 是唯一真相源（parseValue / formatValue），
+ * 本文件只做「结构化模型 ↔ 界面控件」的映射。两套解析器必然漂移 ——
+ * 后端加了管道，前端正则认不出，用户改一下参数流程行为就悄悄变了。
  *
  * 这个模块是纯逻辑，好测：解析（字符串 → 来源）与生成（来源 → 字符串）
  * 必须严格互逆，否则用户改一下就悄悄改坏流程。
  */
 import type { FlowStep, TemplateField } from '../types'
+import {
+  type ExprBase,
+  type ExprBranch,
+  type ExprTransform,
+  type ExprValue,
+  condOpLabel,
+  formatValue,
+  parseValue,
+  transformLabel,
+} from './flowExpr'
 
-/** 整体就是一个 `{{ ... }}`（前后没有别的文本）→ 求值后保留原始类型 */
-const WHOLE_REF = /^\{\{\s*([^{}]+?)\s*\}\}$/
-
-/** 文本中夹着 `{{ ... }}` → 按字符串插值处理 */
-const PART_REF = /\{\{\s*([^{}]+?)\s*\}\}/g
-
-/** 输入引用：{{ input.xxx }} */
-const INPUT_REF = /^input\.([A-Za-z0-9_]+)$/
-/** 带下标的输入引用：input.prompts[index] */
-const INPUT_INDEX_REF = /^input\.([A-Za-z0-9_]+)\[([A-Za-z0-9_]+)\]$/
-/** 步骤引用：{{ steps.<id>.outputs }} 或 {{ steps.<id>.outputs.first }} */
-const STEP_REF = /^steps\.([A-Za-z0-9_]+)\.outputs(?:\.(first|last|\d+))?$/
-
-/** 参数取值的三种来源 */
+/** 参数取值的三种基础来源 */
 export type ParamSource =
   /** 固定值：直接写死 */
   | { kind: 'literal'; value: string }
   /** 流程输入：运行时由运营填。带 index 表示取列表的第 N 项 */
   | { kind: 'input'; field: string; index?: string }
-  /** 上游产物：吃某一步的产出 */
+  /** 上一步产物：吃某一步的产出 */
   | { kind: 'upstream'; stepId: string; pick: 'all' | 'first' | 'last' | string }
 
+/** 解析出来的取值 */
 export interface ParsedParam {
+  /** 基础来源 */
   source: ParamSource
+  /** 再加工链 */
+  transforms: ExprTransform[]
+  /** 按条件取值（没有则 undefined） */
+  condition?: {
+    field: string
+    op: '==' | '!=' | '>' | '<' | '>=' | '<='
+    value: string
+    then: { source: ParamSource; transforms: ExprTransform[] }
+    otherwise: { source: ParamSource; transforms: ExprTransform[] }
+  }
   /** 原始字符串（用于「自定义表达式」这类无法归类的情形） */
   raw: string
   /** true = 这是混排文本或无法识别的表达式，不是纯引用 */
   isCustom: boolean
 }
 
-/**
- * 把一个取值表达式解析成来源。
- *
- * 认得三种形状：
- *   纯文本            → literal
- *   {{ input.x }}     → input
- *   {{ steps.s.outputs }} / .first / .last → upstream
- *
- * 认不得的（文本里夹着 {{ }}、或手写的复杂表达式）→ isCustom = true，
- * 界面原样交给用户编辑，但**不让它被静默改写**。
- */
-export function parseParamSource(raw: string): ParsedParam {
-  const text = raw ?? ''
-  const whole = text.trim().match(WHOLE_REF)
-  if (whole) {
-    const path = whole[1].trim()
-    const input = path.match(INPUT_REF)
-    if (input) {
-      return { source: { kind: 'input', field: input[1] }, raw: text, isCustom: false }
-    }
-    const indexed = path.match(INPUT_INDEX_REF)
-    if (indexed) {
-      return {
-        source: { kind: 'input', field: indexed[1], index: indexed[2] },
-        raw: text,
-        isCustom: false,
-      }
-    }
-    const step = path.match(STEP_REF)
-    if (step) {
-      return {
-        source: {
-          kind: 'upstream',
-          stepId: step[1],
-          pick: step[2] ?? 'all',
-        },
-        raw: text,
-        isCustom: false,
-      }
-    }
-    // 认不得的引用形状 —— 当自定义处理，别乱改
-    return { source: { kind: 'literal', value: text }, raw: text, isCustom: true }
+/** ExprBase → ParamSource（两个模型字段一致，直接转即可） */
+function toSource(base: ExprBase): ParamSource {
+  switch (base.kind) {
+    case 'input':
+      return base.index
+        ? { kind: 'input', field: base.field, index: base.index }
+        : { kind: 'input', field: base.field }
+    case 'upstream':
+      return { kind: 'upstream', stepId: base.stepId, pick: base.pick }
+    default:
+      return { kind: 'literal', value: base.value }
   }
-  // 文本里夹着 {{ }} —— 插值表达式，同样当自定义
-  if (text.includes('{{')) {
-    return { source: { kind: 'literal', value: text }, raw: text, isCustom: true }
-  }
-  return { source: { kind: 'literal', value: text }, raw: text, isCustom: false }
 }
 
-/** 来源 → 表达式字符串。parseParamSource 的逆运算。 */
-export function formatParamSource(source: ParamSource): string {
+/** ParamSource → ExprBase */
+function fromSource(source: ParamSource): ExprBase {
   switch (source.kind) {
     case 'input':
       return source.index
-        ? `{{ input.${source.field}[${source.index}] }}`
-        : `{{ input.${source.field} }}`
-    case 'upstream': {
-      const suffix = source.pick && source.pick !== 'all' ? `.${source.pick}` : ''
-      return `{{ steps.${source.stepId}.outputs${suffix} }}`
-    }
+        ? { kind: 'input', field: source.field, index: source.index }
+        : { kind: 'input', field: source.field }
+    case 'upstream':
+      return { kind: 'upstream', stepId: source.stepId, pick: source.pick }
     default:
-      return source.value
+      return { kind: 'literal', value: source.value }
   }
+}
+
+/**
+ * 把一个取值表达式解析成来源。
+ *
+ * 认得这些形状（其余一律 isCustom = true，界面原样保留，不静默改写）：
+ *   纯文本            → literal
+ *   {{ input.x }}     → input
+ *   {{ steps.s.outputs }} / .first / .last → upstream
+ *   {{ input.x | trim | truncate(80) }}  → input + 加工链
+ *   {{ input.a == "写实" ? input.b : input.c }} → 条件
+ */
+export function parseParamSource(raw: string): ParsedParam {
+  const text = raw ?? ''
+  const value = parseValue(text)
+  if (!value) {
+    return {
+      source: { kind: 'literal', value: text },
+      transforms: [],
+      raw: text,
+      isCustom: true,
+    }
+  }
+  const parsed: ParsedParam = {
+    source: toSource(value.base),
+    transforms: value.transforms,
+    raw: text,
+    isCustom: false,
+  }
+  if (value.condition) {
+    parsed.condition = {
+      field: value.condition.field,
+      op: value.condition.op,
+      value: value.condition.value,
+      then: {
+        source: toSource(value.condition.then.base),
+        transforms: value.condition.then.transforms,
+      },
+      otherwise: {
+        source: toSource(value.condition.otherwise.base),
+        transforms: value.condition.otherwise.transforms,
+      },
+    }
+  }
+  return parsed
+}
+
+/**
+ * 来源 → 表达式字符串。parseParamSource 的逆运算。
+ *
+ * **带加工或带条件时不能只靠 source 还原** —— 所以这个函数接受完整的
+ * ParsedParam 而不是单个 source。旧的 `formatParamSource(source)` 保留给
+ * 只关心基础来源的调用方（它会丢掉加工链，所以只在明确知道没有加工时用）。
+ */
+export function formatParsedParam(parsed: ParsedParam): string {
+  const value: ExprValue = {
+    base: fromSource(parsed.source),
+    transforms: parsed.transforms,
+  }
+  if (parsed.condition) {
+    value.condition = {
+      field: parsed.condition.field,
+      op: parsed.condition.op,
+      value: parsed.condition.value,
+      then: branchValue(parsed.condition.then),
+      otherwise: branchValue(parsed.condition.otherwise),
+    }
+  }
+  return formatValue(value)
+}
+
+function branchValue(branch: { source: ParamSource; transforms: ExprTransform[] }): ExprBranch {
+  return { base: fromSource(branch.source), transforms: branch.transforms }
+}
+
+/**
+ * 来源 → 表达式字符串（只处理基础来源）。
+ *
+ * **只给「确定没有加工链」的调用方用** —— 传进来的 source 若来自带加工的
+ * 表达式，格式化结果会丢掉加工链。要保留加工链就用 formatParsedParam。
+ */
+export function formatParamSource(source: ParamSource): string {
+  return formatValue({ base: fromSource(source), transforms: [] })
 }
 
 /**
@@ -285,25 +345,55 @@ export function describeSource(
 }
 
 /**
+ * 取值的完整描述 —— 摘要里要把「加工」和「条件」也说清楚。
+ *
+ * 只说来源不说加工会骗人：「取流程输入 · 画面甲」但实际截断了 80 字，
+ * 用户看到的和跑出来的不一样。
+ */
+export function describeParam(
+  parsed: ParsedParam,
+  inputs: TemplateField[],
+  stepTitles: Record<string, string>,
+): string {
+  if (parsed.isCustom) return '自定义'
+  if (parsed.condition) {
+    const c = parsed.condition
+    const field = inputs.find((f) => f.name === c.field)
+    const fieldLabel = field ? inputTitle(field) : '某个输入'
+    const thenText = describeSource(c.then.source, false, inputs, stepTitles)
+    const elseText = describeSource(c.otherwise.source, false, inputs, stepTitles)
+    return `当${fieldLabel}${condOpLabel(c.op)}「${c.value}」→ ${thenText}，否则 → ${elseText}`
+  }
+  const base = describeSource(parsed.source, false, inputs, stepTitles)
+  if (!parsed.transforms.length) return base
+  const ops = parsed.transforms
+    .map((t) => (t.arg !== undefined ? `${transformLabel(t.fn)} ${t.arg}` : transformLabel(t.fn)))
+    .join('、')
+  return `${base} → ${ops}`
+}
+
+/**
  * 判断一个引用是不是「纯引用」（整个字符串就是一个 {{...}}）。
  *
  * 界面据此决定「固定值」输入框要不要跟着显示。
  */
 export function isWholeReference(raw: string): boolean {
-  return WHOLE_REF.test((raw ?? '').trim())
+  const text = (raw ?? '').trim()
+  return text.startsWith('{{') && text.endsWith('}}')
 }
 
 /** 文本里夹着 {{ }} 的引用 —— 界面提示「这是插值表达式」 */
 export function hasEmbeddedReference(raw: string): boolean {
   const text = raw ?? ''
   if (!text.includes('{{')) return false
-  return !WHOLE_REF.test(text.trim())
+  return !isWholeReference(text)
 }
 
 /** 从一段文本里抽出所有 {{...}} 里的路径 —— 用于提示「这段文字引用了 N 个变量」 */
 export function embeddedRefs(raw: string): string[] {
   const out: string[] = []
-  for (const m of (raw ?? '').matchAll(PART_REF)) {
+  const re = /\{\{\s*([^{}]+?)\s*\}\}/g
+  for (const m of (raw ?? '').matchAll(re)) {
     out.push(m[1].trim())
   }
   return out

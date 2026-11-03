@@ -10,7 +10,7 @@
  * 3. 拖动排序的合法性 —— **拖动不能破坏依赖**
  */
 import type { FlowStep, NodeCapability, TemplateField } from '../types'
-import { describeSource, parseParamSource } from './flowSource'
+import { describeParam, parseParamSource } from './flowSource'
 
 /** 引用上游产物的写法：{{ steps.s1.outputs }} */
 const STEP_REF = /\{\{\s*steps\.([A-Za-z0-9_]+)\.outputs\s*\}\}/g
@@ -112,7 +112,7 @@ export function paramSummary(
     const raw = step.params?.[f.name]
     if (raw === undefined || raw === '') continue
     const parsed = parseParamSource(raw)
-    const text = describeSource(parsed.source, parsed.isCustom, inputs, stepTitles)
+    const text = describeParam(parsed, inputs, stepTitles)
     parts.push(`${f.label || f.name}：${text}`)
     if (parts.length >= 3) break
   }
