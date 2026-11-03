@@ -153,13 +153,22 @@ cd ../deploy/windows && .\install-service.ps1
 
 ### 单元测试（离线一条命令跑完，不碰任何真实资源）
 
-`backend/tests/test_*.py`（36 个，不依赖 pytest）：鉴权吊销、请求准入、任务终态竞态、插件恢复守卫、输入校验、下载票据、登录限速、启动配置自检、清理脚本守卫、live 脚本自检、端口匹配、整应用 ASGI 冒烟（登录→建模板→提交→列素材）等。逐个直接运行即可：
+`backend/tests/test_*.py`（44 个，不依赖 pytest）：鉴权吊销、请求准入、任务终态竞态、插件恢复守卫、输入校验、下载票据、登录限速、启动配置自检、清理脚本守卫、live 脚本自检、端口匹配、素材回收站、存储配额与默认配额、按引擎分组的并发闸门、重启后排队任务重排、图片缩略图预生成、随机数字段 schema 与 -1 哨兵展开、整应用 ASGI 冒烟（登录→建模板→提交→列素材）等。逐个直接运行即可：
 
 ```powershell
 Get-ChildItem tests\test_*.py | ForEach-Object { & .\.venv\Scripts\python.exe $_.FullName; if ($LASTEXITCODE -ne 0) { exit 1 } }
 ```
 
 全部用临时 SQLite / 假 Provider / 假 HTTP，不连真实服务、不碰 `workbench.db`。
+
+### 持续集成（CI）
+
+`.github/workflows/ci.yml`：push 到 `main` 和每个 PR 自动触发，两个 job 并行，约 2–3 分钟。
+
+- `backend / py3.13`（ubuntu，与生产镜像同版本）：装 `requirements.txt`，逐个跑 `tests/test_*.py`。脚本会跑完**全部**再汇总失败，不会第一个失败就中断 —— 一次构建能看到所有问题。
+- `frontend / node22`：`npm ci` → `npm run test:state` → `npm run build`（`build` 内含 `tsc -b`，类型错误在这里挂）。
+
+只跑离线单元测试。`verify_*.py` 里需要真实 ComfyUI、需要起 FastAPI 服务的那些仍在本地回归，不进 CI。
 
 ### verify 脚本（38 个 `verify_*.py`）
 
