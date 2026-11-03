@@ -24,6 +24,24 @@ async def test_existing_dist_without_index_is_503() -> None:
                 raise AssertionError("empty dist returned FileResponse instead of 503")
 
 
+async def test_dist_path_is_absolute() -> None:
+    # 相对路径会让 spa() 里的 is_relative_to 恒为 False，静态资源全部回落成
+    # index.html —— 浏览器按严格 MIME 拒载 JS，页面白屏
+    assert app_main._DIST.is_absolute(), app_main._DIST
+
+
+async def test_static_asset_is_served_before_index_fallback() -> None:
+    with tempfile.TemporaryDirectory(prefix="dist-") as raw_dir:
+        root = Path(raw_dir)
+        (root / "index.html").write_text("<!doctype html>", encoding="utf-8")
+        (root / "assets").mkdir()
+        script = root / "assets" / "app.js"
+        script.write_text("console.log(1)", encoding="utf-8")
+        with patch.object(app_main, "_DIST", root.resolve()):
+            resp = await app_main.spa("assets/app.js")
+        assert Path(getattr(resp, "path", "")).resolve() == script.resolve(), resp
+
+
 async def test_wildcard_cors_never_enables_credentials() -> None:
     origins, credentials = app_main._cors_options("*")
     assert origins == ["*"]
@@ -39,14 +57,18 @@ async def test_wildcard_cors_never_enables_credentials() -> None:
 async def main() -> int:
     try:
         await test_existing_dist_without_index_is_503()
+        await test_dist_path_is_absolute()
+        await test_static_asset_is_served_before_index_fallback()
         await test_wildcard_cors_never_enables_credentials()
     except BaseException as exc:
-        print(f"[FAIL] test_existing_dist_without_index_is_503: {type(exc).__name__}: {exc}")
-        print("\nRESULT: 0 passed / 2 failed")
+        print(f"[FAIL] {type(exc).__name__}: {exc}")
+        print("\nRESULT: 0 passed / 4 failed")
         return 1
     print("[PASS] test_existing_dist_without_index_is_503")
+    print("[PASS] test_dist_path_is_absolute")
+    print("[PASS] test_static_asset_is_served_before_index_fallback")
     print("[PASS] test_wildcard_cors_never_enables_credentials")
-    print("\nRESULT: 2 passed / 0 failed")
+    print("\nRESULT: 4 passed / 0 failed")
     return 0
 
 

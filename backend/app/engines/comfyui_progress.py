@@ -172,10 +172,16 @@ class ProgressTracker:
         """惰性拉起后台 WS 监听。失败不影响主流程（get_status 会降级）。"""
         if self._closed or self._task is not None:
             return
+        # 探测的必须是真正会用到的符号。只 import websockets 的话，装了 12.x
+        # 也能通过，随后 _run 在 `websockets.asyncio.client` 处 ImportError，
+        # 后台任务静默死掉、进度永远停在粗粒度 —— 这种失败要在这里就拦住。
         try:
-            import websockets  # noqa: F401
+            from websockets.asyncio.client import connect  # noqa: F401
         except ImportError:
-            log.warning("websockets 未安装，无法获取实时进度，只能给粗粒度进度")
+            log.warning(
+                "websockets 版本过低或不支持 asyncio 客户端（需要 >=13.0），"
+                "无法获取实时进度，只能给粗粒度进度"
+            )
             return
         self._task = asyncio.get_running_loop().create_task(self._run())
 
@@ -192,7 +198,14 @@ class ProgressTracker:
     # ── WS 监听 ─────────────────────────────────────────
 
     async def _run(self) -> None:
-        from websockets.asyncio.client import connect
+        # 导入放在这里是为了让模块本身在没有 websockets 时也能加载；但必须
+        # 兜住 ImportError —— 该协程是 create_task 起的，抛出去只会留下一条
+        # "Task exception was never retrieved"，调用方完全感知不到。
+        try:
+            from websockets.asyncio.client import connect
+        except ImportError:
+            log.warning("websockets.asyncio.client 不可用，实时进度监听放弃启动")
+            return
 
         backoff = 1.0
         while not self._closed:

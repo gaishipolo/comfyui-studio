@@ -1,5 +1,6 @@
 """FastAPI 应用入口"""
 import asyncio
+import mimetypes
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -11,6 +12,11 @@ from app.config import settings
 from app.database import init_db, async_session
 from app.api import templates, tasks, health, assets, auth_api, uploads, stats, plugins
 from app.request_limits import ProtectedBodyLimitMiddleware
+
+# Windows 的注册表常把 .svg 登记成非标准的 `image/svg`，浏览器只认标准写法
+# `image/svg+xml` —— 不纠正的话 favicon 和任何 <img src="*.svg"> 都静默不渲染
+# （HTTP 200、内容也对，就是不显示，极难排查）。FileResponse 走的是这里。
+mimetypes.add_type("image/svg+xml", ".svg")
 
 
 async def create_default_admin():
@@ -108,13 +114,26 @@ async def lifespan(app: FastAPI):
         if loaded or failed:
             print(f"[Plugin] 引擎插件恢复：加载 {loaded or '无'}，失败 {failed or '无'}", flush=True)
         from app.services.task_service import TaskService
-        # 有 prompt_id 的接回去继续跑（别让 5 分钟的视频白跑），没提交成的标成可重试
+        # 有 prompt_id 的接回去继续跑（别让 5 分钟的视频白跑），
+        # 只排了队没提交的重排一遍，提交到一半的标成可重试
         reaped = await TaskService.reap_stale_tasks()
-        if reaped["resumed"] or reaped["failed"]:
+        if reaped["resumed"] or reaped["requeued"] or reaped["failed"]:
             print(
                 f"[Task] 启动收拾遗留任务：接回 {len(reaped['resumed'])} 条"
-                f"（继续等引擎出结果），标记失败 {len(reaped['failed'])} 条",
+                f"（继续等引擎出结果），重新排队 {len(reaped['requeued'])} 条，"
+                f"标记失败 {len(reaped['failed'])} 条",
                 flush=True,  # 启动日志要立刻可见：stdout 重定向到文件时是块缓冲，不刷就查不到
+            )
+        # 回收站超期清理：软删除超过保留期的素材在这里真正删掉（记录 + 文件）。
+        # 放启动阶段而不是定时任务 —— 单机部署不为它引入调度器依赖。
+        from app.asset_retention import purge_expired
+        async with async_session() as db:
+            purged = await purge_expired(db, days=settings.TRASH_RETENTION_DAYS)
+        if purged["purged"]:
+            print(
+                f"[Asset] 回收站超期清理：删除 {purged['purged']} 条记录、"
+                f"{purged['files_removed']} 个文件",
+                flush=True,
             )
         print(f"[{settings.APP_NAME}] v{settings.APP_VERSION} started", flush=True)
         yield
@@ -169,7 +188,12 @@ async def app_info():
 # ── 前端静态托管（单进程部署，免 nginx）─────────────────
 # 注意：这些路由必须放在 /api/* 之后注册 —— Starlette 按注册顺序匹配，
 # 已注册的 API 路由优先命中，此兜底只接管非 API 路径。
-_DIST = Path(settings.FRONTEND_DIST)
+#
+# 必须 resolve() 成绝对路径：下面用 `candidate.is_relative_to(_DIST)` 做防穿越，
+# 而 candidate 是 resolve() 过的绝对路径。FRONTEND_DIST 默认是相对路径
+# （../frontend/dist），绝对 vs 相对永远 False —— 后果是**每个 JS/CSS 请求都
+# 回落到 index.html**，浏览器按严格 MIME 校验拒绝加载，页面直接白屏。
+_DIST = Path(settings.FRONTEND_DIST).resolve()
 
 
 @app.get("/{full_path:path}")

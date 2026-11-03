@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session
 from app.models.models import Task, Template, Asset
-from app.engines.factory import acquire_provider
+from app.engines.factory import acquire_provider, get_provider
 from app.engines.base import GenerationResult, TaskStatus
 from app.config import settings
 from app.asset_names import unique_asset_name
@@ -21,6 +21,7 @@ from app.safe_detail import safe_detail
 from app.timeutils import utcnow
 from app.thumbs import (
     cleanup_asset_files,
+    make_image_thumb,
     make_video_thumb,
     task_lifecycle_key,
     thumb_key,
@@ -63,8 +64,53 @@ _BACKGROUND_STOP_TIMEOUT_SECONDS = 5.0
 # 并发闸门。settings.MAX_CONCURRENT_TASKS 以前是**死配置**（没人读它），
 # 结果一次批量提交 N 个就同时打引擎 N 个 prompt、开 N 个轮询协程。
 # ComfyUI 本来就串行执行，闸门放在我们这边能让排队可预测。
+#
+# 分两层：_run_slots 是「共用槽池」（GPU 类引擎，限量来自同一张卡）；
+# _engine_slots 是「独立槽池」（Provider 声明了 max_concurrency 的，比如
+# 云端 API）。不分层的话，万相出图和 ComfyUI 跑视频会互相堵 —— 一个占
+# 显存、一个只占 HTTP 连接，没有任何理由共享槽位。
 _run_slots = asyncio.Semaphore(max(1, int(settings.MAX_CONCURRENT_TASKS)))
+_engine_slots: dict[str, asyncio.Semaphore] = {}
 _TERMINAL_STATUSES = {"done", "error", "cancelled"}
+
+
+def _slots_for(engine_name: str) -> asyncio.Semaphore:
+    """选出该引擎该排的队。
+
+    声明了 max_concurrency 的引擎拿独立槽池（第一次用到时按声明值创建），
+    没声明、或声明成非正数的（ComfyUI 这类占本地 GPU 的）共用 _run_slots。
+    """
+    limit = 0
+    try:
+        limit = int(getattr(get_provider(engine_name), "max_concurrency", 0) or 0)
+    except Exception:  # noqa: BLE001
+        # 引擎没注册 / 配置坏了都不该在这里抛 —— execute_task 里的
+        # acquire_provider 会给出带上下文的错误并落库，前端能看到原因。
+        # 这里退回共用槽池，让那个错误按原路径暴露。
+        limit = 0
+    if limit <= 0:
+        return _run_slots
+    slots = _engine_slots.get(engine_name)
+    if slots is None:
+        slots = asyncio.Semaphore(limit)
+        _engine_slots[engine_name] = slots
+    return slots
+
+
+async def _peek_engine(task_id: str) -> str | None:
+    """只读一眼任务属于哪个引擎 —— 用来决定排哪个队。
+
+    闸门必须在加载任务**之前**拿到引擎名，但又不能在排队时占着 DB 会话
+    （50 个任务排队 = 50 个连接一直开着）。所以这里开个短会话读两列就走。
+
+    返回 None 表示任务已不存在或已终态，调用方直接返回即可。
+    """
+    async with async_session() as db:
+        task = await db.get(Task, task_id)
+        if task is None or task.status in _TERMINAL_STATUSES:
+            return None
+        template = await db.get(Template, task.template_id)
+        return template.engine if template else ""
 # get_status 连续失败的宽限窗口（秒）：网络抖动/引擎瞬时 busy 不应立刻判任务失败——
 # 引擎侧可能还在正常跑，直接判败 = 白烧一次生成（5 分钟视频也是）
 _POLL_FAIL_GRACE_SECONDS = 60.0
@@ -305,7 +351,13 @@ class TaskService:
     @staticmethod
     async def execute_task(task_id: str):
         """后台执行任务：加载模板 → 注入参数 → 提交引擎 → 轮询结果 → 存储素材"""
-        async with _run_slots:  # 并发闸门：超出 MAX_CONCURRENT_TASKS 的在这里排队
+        engine_name = await _peek_engine(task_id)
+        if engine_name is None:
+            return
+        # 并发闸门：按引擎分队。ComfyUI 这类占本地 GPU 的共用
+        # MAX_CONCURRENT_TASKS 的槽位；声明了 max_concurrency 的云端 API
+        # 用自己的槽池，排队时不会跟 GPU 任务互相堵。
+        async with _slots_for(engine_name):
             async with async_session() as db:
                 try:
                     task = await db.get(Task, task_id)
@@ -420,7 +472,12 @@ class TaskService:
         与 execute_task 的唯一区别是**不再 submit** —— prompt 已经在 ComfyUI 上了，
         我们只是重新挂上去等结果。这样 5 分钟的视频不会因为重启后端就白跑。
         """
-        async with _run_slots:
+        engine_name = await _peek_engine(task_id)
+        if engine_name is None:
+            return
+        # 接回的任务同样要排队：重启后十几个任务同时挂回去，不排队就会
+        # 一起打引擎、开十几个轮询协程 —— 闸门对「新任务」和「接回」一视同仁
+        async with _slots_for(engine_name):
             async with async_session() as db:
                 template: Template | None = None
                 entry_engine = "?"
@@ -504,10 +561,15 @@ class TaskService:
         后台执行是**进程内**的 asyncio 协程，进程一没它们就永远停在 running，
         前端只能一直转圈（前面「结果加载中」那类问题的来源之一）。
 
-        处置分两种：
+        处置分三种：
           - 已经拿到 provider_task_id → 引擎那边多半还在跑或已经跑完，
             **接回去继续等结果**，别浪费那次生成
-          - 连提交都没完成（没有 provider_task_id）→ 接不回去，标成可重试的失败
+          - pending 且没有 provider_task_id → 只是排在闸门后面，协程随进程
+            一起没了。**重新排队提交**（走完整流程），用户不用手动点重试。
+            部署重启不该让几十个排队任务集体作废 —— 那是集体投诉
+          - running 且没有 provider_task_id → 提交请求已经发出、但还没拿到
+            引擎侧 ID，无法确认对方收没收到。重提可能让同一张图跑两遍白烧
+            显存，所以**保守标失败**，让用户自己决定是否重试
 
         只在启动时调用 —— 那时不可能有正在执行的任务，扫到的一定是上个进程遗留的。
         """
@@ -517,6 +579,7 @@ class TaskService:
             )
             stale = list(result.scalars().all())
             resumed: list[str] = []
+            requeued: list[str] = []
             failed: list[str] = []
             stale_ids = [task.id for task in stale]
             await db.rollback()
@@ -529,6 +592,10 @@ class TaskService:
                         continue
                     if task.provider_task_id:
                         resumed.append(task.id)
+                    elif task.status == "pending" and settings.RESUME_PENDING_ON_STARTUP:
+                        # 状态保持 pending 不动 —— 重新 spawn 后 execute_task
+                        # 会自己按 pending→running 的加锁流程推进
+                        requeued.append(task.id)
                     else:
                         task.status = "error"
                         task.error_msg = "服务重启时任务还没提交到引擎，可点击重试"
@@ -539,8 +606,10 @@ class TaskService:
         # 协程在会话外启动，别让启动流程被长任务卡住
         for task_id in resumed:
             await spawn_task(task_id, resume=True)
+        for task_id in requeued:
+            await spawn_task(task_id)
 
-        return {"resumed": resumed, "failed": failed}
+        return {"resumed": resumed, "requeued": requeued, "failed": failed}
 
     @staticmethod
     async def _poll_result(
@@ -599,9 +668,16 @@ class TaskService:
 
             if result.status in (TaskStatus.DONE, TaskStatus.ERROR):
                 return result
-            # 进度回写，前端进度条实时可见
-            if result.progress != task.progress:
-                task.progress = float(result.progress)
+            # 进度回写，前端进度条实时可见。
+            # progress 来自第三方 Provider，可能是 None / 字符串 / 越界值 —— 这里
+            # 一律夹到 0..100，解析失败就保持上一次的值。绝不能因为一个进度字段
+            # 把还在正常跑的任务判成 error。
+            try:
+                progress = min(100.0, max(0.0, float(result.progress)))
+            except (TypeError, ValueError):
+                progress = task.progress
+            if progress != task.progress:
+                task.progress = progress
                 await db.commit()
             await asyncio.sleep(interval)
 
@@ -687,6 +763,22 @@ class TaskService:
                         )
                 except Exception:  # noqa: BLE001 —— 缩略图是锦上添花，不能拖垮存素材
                     logger.warning("视频缩略图生成失败，跳过：%s", safe_name, exc_info=True)
+            elif mime.startswith("image/"):
+                # 图片也落盘即生成缩略图。此前只有视频这样做，图片靠首次访问懒生成
+                # —— 但懒生成在人多时必然退化：/thumb 等 3 秒不出就回退原图（均值
+                # 2MB），而缩略图生成是单并发排队，50 个人同时翻素材库时几乎全部
+                # 超时回退，缩略图等于白做。落盘时多做几十毫秒，换卡片永远命中。
+                try:
+                    thumb = await asyncio.to_thread(make_image_thumb, file_bytes)
+                    if thumb:
+                        await asyncio.to_thread(
+                            save_asset_file,
+                            thumb_key(rel_path),
+                            thumb,
+                            content_type="image/jpeg",
+                        )
+                except Exception:  # noqa: BLE001 —— 同上，缩略图失败不影响素材本身
+                    logger.warning("图片缩略图生成失败，跳过：%s", safe_name, exc_info=True)
 
             asset = Asset(
                 # 归属随素材走：任务提交人就是素材作者。不这么写就得靠回表查任务，

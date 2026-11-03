@@ -1,5 +1,6 @@
 """ComfyUI Provider — 对接本地/远程 ComfyUI API"""
 import json
+import logging
 import uuid
 from pathlib import Path
 
@@ -8,6 +9,8 @@ import httpx
 from app.config import settings
 from app.engines.base import GenerationProvider, GenerationResult, TaskStatus
 from app.engines.comfyui_progress import ProgressTracker, reachable_node_count
+
+log = logging.getLogger("comfyui")
 
 
 def _submit_error_detail(response: httpx.Response) -> str:
@@ -44,6 +47,9 @@ class ComfyUIProvider(GenerationProvider):
             self._client = httpx.AsyncClient(
                 base_url=self.base_url,
                 timeout=httpx.Timeout(settings.COMFYUI_TIMEOUT, connect=10.0),
+                # 默认不吃系统代理：内网地址走代理只会失败，而且代理端口
+                # 随代理软件重启会变，缓存的客户端会永远连到旧端口（见 config 注释）
+                trust_env=settings.COMFYUI_TRUST_ENV,
             )
         return self._client
 
@@ -389,12 +395,30 @@ class ComfyUIProvider(GenerationProvider):
         return name
 
     async def health_check(self) -> bool:
+        """探活：GET /system_stats。
+
+        失败原因必须留在日志里。这个函数只返回 bool，调用方（/api/health、
+        /api/engines）把 False 渲染成「离线」就没了下文 —— 曾经因为这里把
+        异常整个吞掉，界面报离线而日志一条线索都没有，只能靠起对照实例
+        才定位到是进程出网被拦。探活不能抛，但不能不留痕。
+        """
         try:
             client = await self._get_client()
             resp = await client.get("/system_stats", timeout=5.0)
-            return resp.status_code == 200
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 —— 探活不抛，但要记下来
+            log.warning(
+                "ComfyUI 探活失败 base_url=%s error=%s: %s",
+                self.base_url, type(exc).__name__, exc,
+            )
             return False
+        if resp.status_code != 200:
+            # 非 200 也算失败，但和连不上是两回事：多半是反代挂了或指错了端口
+            log.warning(
+                "ComfyUI 探活返回异常状态 status=%s base_url=%s",
+                resp.status_code, self.base_url,
+            )
+            return False
+        return True
 
     async def close(self):
         await self._progress.close()

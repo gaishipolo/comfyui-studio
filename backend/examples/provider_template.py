@@ -28,6 +28,9 @@ class SampleCloudProvider(GenerationProvider):
     # ── ① 类声明：管理页与模板配置读这些 ──────────────────
     name = "sample_cloud"                      # 注册名（唯一；小写字母/数字/下划线/连字符）
     label = "示例云"                            # 展示名
+    # 并发槽位。云端 API 不占显存，给个正整数就能拿到独立槽池，
+    # 不用跟 ComfyUI 抢那 2 个 GPU 槽位。按上游速率限制估，见开发规范的说明。
+    max_concurrency = 4
 
     capabilities = {
         "text_to_image": CapabilitySpec(

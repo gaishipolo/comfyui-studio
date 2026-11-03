@@ -42,6 +42,28 @@ class MyProvider(GenerationProvider):
 | `label` | 界面展示名 |
 | `capabilities` | `{kind: CapabilitySpec}`。kind 用 `text_to_image` / `image_to_image` / `text_to_video` 这类蛇形命名 |
 | `config_schema` | `list[FieldSpec]`。运行配置项声明，**机密放这里，不要写死在代码里** |
+| `max_concurrency` | 并发槽位数。`0`（默认）= 与全局 `MAX_CONCURRENT_TASKS` 共用槽池；正整数 = 本引擎独立的槽池 |
+
+### `max_concurrency`：别跟 GPU 抢槽位
+
+平台有一个全局并发闸门 `MAX_CONCURRENT_TASKS`（默认 2），它本来是为 ComfyUI
+这种**占本地显存**的引擎设的 —— 一张卡同时跑两个 prompt 会 OOM。
+
+你的引擎如果是**云服务 API**，限制来自 HTTP 连接数和上游速率，不占显存。
+保持默认 `0` 会让你的任务和 ComfyUI 排同一条队：「ComfyUI 在跑 5 分钟视频」
+时，你的出图请求要等 5 分钟才开始，完全没有理由。
+
+```python
+class MyApiProvider(GenerationProvider):
+    name = "myapi"
+    label = "某云 API"
+    max_concurrency = 8   # 本引擎最多同时跑 8 个，不占用也不被占 GPU 槽位
+```
+
+取值的经验判断：按上游的 QPS 限制 ÷ 单次生成耗时来估。给得太大会把上游打限流
+（返回 429，任务直接失败），太小又浪费等待时间。不确定就先给 4，观察错误率再调。
+
+`comfyui` 内置引擎刻意不声明（保持 `0`），因为它的限制来自本地显卡。
 
 `FieldSpec` 字段：`name`（=API 参数名）、`label`、`type`、`required`、`default`、`options`（enum 选项，**值直接用 API 原生值**）、`description`、`multiple`。
 

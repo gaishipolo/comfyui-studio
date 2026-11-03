@@ -71,6 +71,14 @@ class GenerationProvider(ABC):
     capabilities: dict[str, CapabilitySpec] = {}    # 能力表：kind -> 声明
     config_schema: list[FieldSpec] = []             # 需要的配置项（base_url/api_key/...）
 
+    # 并发上限。0 = 与全局 MAX_CONCURRENT_TASKS 共用同一槽池。
+    #
+    # 默认 0 是给**本地 GPU 类引擎**（ComfyUI）用的：一张卡同时跑不了两个
+    # prompt，所以所有引擎必须排队抢同一批槽位。云端 API 供应商不占显存，
+    # 它的限制来自上游速率限制，应该声明一个正整数拿独立槽池 —— 否则
+    # 「ComfyUI 在跑视频」和「万相在出图」会互相堵，明明互不相干。
+    max_concurrency: int = 0
+
     def __init__(self, config: dict | None = None):
         # 运行配置由插件管理 API 存 DB、factory 注入 —— 机密不进上传的代码文件
         self.config = config or {}

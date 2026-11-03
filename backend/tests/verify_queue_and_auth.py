@@ -260,13 +260,14 @@ async def main():
     t3 = await reload(Task, "tr3")
     report("终态任务不被接回改写", t3.status == "done", f"status={t3.status}")
 
-    # ════ D. reap_stale_tasks：启动收拾两分支 ═══════════════
+    # ════ D. reap_stale_tasks：启动收拾三分支 ═══════════════
     print("=== D. reap_stale_tasks（启动收拾遗留任务） ===")
 
     db = await fresh_db()
     await add_template(db, "tpl-reap", "收拾模板")
     await add_task(db, "rp1", "tpl-reap", status="running", provider_task_id="p-reap")
     await add_task(db, "rp2", "tpl-reap", status="pending", provider_task_id="")
+    await add_task(db, "rp6", "tpl-reap", status="running", provider_task_id="")
     await add_task(db, "rp3", "tpl-reap", status="done", provider_task_id="p-done")
     await add_task(db, "rp4", "tpl-reap", status="error", provider_task_id="")
     await add_task(db, "rp5", "tpl-reap", status="cancelled", provider_task_id="")
@@ -286,12 +287,21 @@ async def main():
 
     report("有 prompt_id 的归入「接回」", outcome["resumed"] == ["rp1"], str(outcome))
     report("接回要走 resume=True（不能重走提交）", ("rp1", True) in spawned, str(spawned))
-    report("没提交成的归入「失败」", outcome["failed"] == ["rp2"], str(outcome))
+    report("只排了队的归入「重排」（不再集体作废）",
+           outcome["requeued"] == ["rp2"], str(outcome))
+    report("重排要走 resume=False（完整重新提交）", ("rp2", False) in spawned, str(spawned))
+    report("提交到一半的（running 无 prompt_id）才标失败",
+           outcome["failed"] == ["rp6"], str(outcome))
 
     rp2 = await reload(Task, "rp2")
-    report("没提交成的标成 error", rp2.status == "error", f"status={rp2.status}")
-    report("失败文案要说清可以重试", "重试" in (rp2.error_msg or ""), rp2.error_msg)
-    report("失败任务要有收尾时间", rp2.finished_at is not None)
+    report("重排的任务状态保持 pending", rp2.status == "pending", f"status={rp2.status}")
+    report("重排的任务不写错误信息", not rp2.error_msg, rp2.error_msg or "")
+    report("重排的任务不收尾（还等着跑）", rp2.finished_at is None, str(rp2.finished_at))
+
+    rp6 = await reload(Task, "rp6")
+    report("提交到一半的标成 error", rp6.status == "error", f"status={rp6.status}")
+    report("失败文案要说清可以重试", "重试" in (rp6.error_msg or ""), rp6.error_msg)
+    report("失败任务要有收尾时间", rp6.finished_at is not None)
 
     rp3 = await reload(Task, "rp3")
     rp4 = await reload(Task, "rp4")
@@ -417,8 +427,10 @@ async def main():
 
     esrc = inspect.getsource(TaskService.execute_task)
     rsrc = inspect.getsource(TaskService.resume_task)
-    report("execute_task 必须套在 _run_slots 里", "_run_slots" in esrc)
-    report("resume_task 必须套在 _run_slots 里（否则接回能绕过闸门）", "_run_slots" in rsrc)
+    report("execute_task 必须过并发闸门（_slots_for）", "_slots_for(" in esrc)
+    report("resume_task 也必须过闸门（否则接回能绕过）", "_slots_for(" in rsrc)
+    report("闸门必须按引擎选池（不能写死 _run_slots）",
+           "_run_slots" not in esrc and "_run_slots" not in rsrc)
     report("两个入口都走 _finish_task（收尾不变量只写一处）",
            "_finish_task" in esrc and "_finish_task" in rsrc)
 
