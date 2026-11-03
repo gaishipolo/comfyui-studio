@@ -86,16 +86,27 @@ npm run dev        # http://localhost:5173，/api 自动代理到 :8000
 
 ### 3. 生产部署
 
+**单机单进程**（任务执行、并发闸门、下载票据都在进程内存里，不支持多副本）。两条路径，完整步骤见 [docs/deployment.md](docs/deployment.md)：
+
 ```bash
-cd frontend
-npm ci
-npm run build                  # 产物在 frontend/dist
-# 然后正常启动后端即可 —— dist 存在时由后端直接托管
+# Docker（推荐）
+docker compose up -d --build
+docker logs comfyui-studio | grep "Default admin"   # 首次启动的随机管理员密码
+
+# 或 Windows 服务（需要 NSSM）
+cd frontend && npm ci && npm run build
+cd ../deploy/windows && .\install-service.ps1
 ```
+
+部署时设 `APP_ENV=production`：启动前会做配置自检，`SECRET_KEY` 未配置、前端产物缺失、存储目录不可写等问题会**直接拒绝启动**并给出修复提示（见 `app/preflight.py`）。
+
+两个探针分工不同：`/api/health` 只回答「进程活着」（引擎全挂也返回 ok，给进程守护用），`/api/ready` 检查数据库/存储/前端产物是否可用（给监控和负载均衡用，失败返回 503）。
 
 ### 4. 接入 ComfyUI（可选）
 
 `.env` 里配置 `COMFYUI_BASE_URL`（默认 `http://127.0.0.1:8188`）。不接 ComfyUI 也可以纯用云端引擎插件跑。
+
+> 容器部署时 `127.0.0.1` 指向容器自身，必须改成局域网 IP 或 `host.docker.internal`。
 
 ## 配置
 
@@ -105,12 +116,11 @@ npm run build                  # 产物在 frontend/dist
 
 | 变量 | 说明 | 默认 |
 |---|---|---|
+| `APP_ENV` | `development` / `production`。production 时启动前做配置自检，关键项缺失拒绝启动 | `development` |
 | `SECRET_KEY` | JWT 签名密钥，生产必配 | 空（启动临时生成，重启失效） |
 | `ADMIN_INITIAL_PASSWORD` | 首次启动的管理员密码 | 空（随机生成打印一次） |
 | `DATABASE_URL` | 数据库连接串 | SQLite 本地文件 |
 | `COMFYUI_BASE_URL` | ComfyUI 服务地址 | `http://127.0.0.1:8188` |
-| `GENERIC_API_TIMEOUT` | 通用 HTTP API 提交/轮询超时（秒） | `300` |
-| `GENERIC_API_DOWNLOAD_TIMEOUT` | 通用 HTTP API 产物下载超时（秒） | `60` |
 | `STORAGE_BACKEND` | `local` 或 `minio` | `local` |
 | `MINIO_*` | MinIO 端点/密钥/桶（`minio` 时生效） | — |
 | `MAX_CONCURRENT_TASKS` | 全局生成并发上限 | `2` |
@@ -143,7 +153,7 @@ npm run build                  # 产物在 frontend/dist
 
 ### 单元测试（离线一条命令跑完，不碰任何真实资源）
 
-`backend/tests/test_*.py`（35 个，不依赖 pytest）：鉴权吊销、请求准入、任务终态竞态、插件恢复守卫、输入校验、下载票据、登录限速、清理脚本守卫、live 脚本自检、端口匹配、整应用 ASGI 冒烟（登录→建模板→提交→列素材）等。逐个直接运行即可：
+`backend/tests/test_*.py`（36 个，不依赖 pytest）：鉴权吊销、请求准入、任务终态竞态、插件恢复守卫、输入校验、下载票据、登录限速、启动配置自检、清理脚本守卫、live 脚本自检、端口匹配、整应用 ASGI 冒烟（登录→建模板→提交→列素材）等。逐个直接运行即可：
 
 ```powershell
 Get-ChildItem tests\test_*.py | ForEach-Object { & .\.venv\Scripts\python.exe $_.FullName; if ($LASTEXITCODE -ne 0) { exit 1 } }
@@ -208,12 +218,19 @@ backend/
     services/     # 任务链路（task_service）、工作流解析
     models/       # SQLAlchemy 模型
     filestore.py  # 存储抽象（local / MinIO 双后端）
+    preflight.py  # 启动前配置自检（APP_ENV=production 时严格）
   examples/       # Provider 插件模板与参考实现
+  scripts/        # 运维脚本（backup.py 数据库 + 素材备份）
   tests/          # verify_*.py 验证脚本 + e2e
   workflows/      # 工作流 JSON
 frontend/
   src/            # React + TS 源码
-docs/             # 设计文档、开发规范（provider-dev-guide.md）
+deploy/
+  docker/         # 容器 entrypoint（数据卷初始化）
+  windows/        # NSSM 服务注册、启停、日志、备份
+docs/             # 设计文档、开发规范、部署运维（deployment.md）
+Dockerfile
+docker-compose.yml
 ```
 
 ## 安全说明

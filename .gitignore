@@ -35,6 +35,11 @@ backend/_test*
 # 数据库快照备份（*.db 已覆盖主库，这里补 .bak 后缀）
 *.db.bak*
 
+# 部署运行数据：容器数据卷（数据库/素材/工作流）与备份产物
+/data/
+/backups/
+backend/backups/
+
 # 根目录的工作流源文件：UI 导出格式，仅作本地参考。
 # 运行时用的是 backend/workflows/ 下上传转换后的 API 格式副本（已入库）。
 /LTX-2.3_-_I2V_T2V_Basic_GGUF.json

@@ -8,6 +8,10 @@ class Settings(BaseSettings):
     APP_NAME: str = "ComfyUI Workbench"
     APP_VERSION: str = "0.1.0"
     APP_TIMEZONE: str = "Asia/Shanghai"  # 用户输入的纯日期按此时区解释，数据库仍存 naive UTC
+    # 运行环境：development | production。
+    # 只有 production 会在启动时对缺失的关键配置**拒绝启动**（见 app/preflight.py）；
+    # development 一律降级为警告，避免本地开发被生产要求卡住。
+    APP_ENV: str = "development"
 
     # 安全
     SECRET_KEY: str = ""  # JWT 签名密钥，生产环境必须配置；留空则启动时临时生成（重启后 token 失效）

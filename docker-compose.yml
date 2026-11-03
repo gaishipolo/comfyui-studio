@@ -1,0 +1,56 @@
+# 单机单进程部署。
+#
+# 不要 --scale app=2：任务执行、并发闸门（_run_slots 信号量）、下载票据都在
+# 进程内存里，两个副本会各跑各的队列 —— 任务提交在 A 容器、轮询在 B 容器时
+# 永远查不到状态。要横向扩展得先把执行层拆成独立 worker + 外部队列，
+# 那是另一个量级的改造，不在当前形态内。
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: comfyui-studio:latest
+    container_name: comfyui-studio
+    restart: unless-stopped
+
+    ports:
+      - "8000:8000"
+
+    # 复用 backend/.env 里的 SECRET_KEY、ADMIN_INITIAL_PASSWORD、COMFYUI_BASE_URL 等。
+    # 下面的 environment 会覆盖 .env 中的同名项 —— 容器里的路径和宿主机不同，
+    # 必须在这里改写成卷内路径。
+    env_file:
+      - path: backend/.env
+        required: false
+    environment:
+      APP_ENV: production
+      # 数据库、素材、工作流全部落在 /app/backend/data 一个卷里，备份只需打包它
+      DATABASE_URL: sqlite+aiosqlite:///./data/workbench.db
+      STORAGE_DIR: /app/backend/data/storage
+      WORKFLOW_DIR: /app/backend/data/workflows
+      FRONTEND_DIST: /app/frontend/dist
+
+    volumes:
+      - ./data:/app/backend/data
+
+    # 就绪探针而不是存活探针：数据库/存储/前端产物任一不可用就标记 unhealthy，
+    # 这样 `docker ps` 一眼能看出「容器在跑但不能用」。
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import urllib.request
+          urllib.request.urlopen("http://127.0.0.1:8000/api/ready", timeout=3)
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # 首次启动要建库、恢复插件、收割遗留任务，给足预热时间
+      start_period: 40s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

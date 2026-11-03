@@ -65,6 +65,31 @@ def _cors_options(raw_origins: str) -> tuple[list[str], bool]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 配置自检放在 try 之外：不通过时直接中止启动，不进入 shutdown 流程
+    # （此时数据库、插件、任务运行时都还没初始化，跑清理逻辑没有意义）。
+    from app.preflight import collect_issues, format_issues
+    from app.thumbs import ffmpeg_exe
+
+    issues = collect_issues(
+        env=settings.APP_ENV,
+        secret_key=settings.SECRET_KEY,
+        cors_origins=settings.CORS_ORIGINS,
+        frontend_dist=settings.FRONTEND_DIST,
+        storage_dir=settings.STORAGE_DIR,
+        database_url=settings.DATABASE_URL,
+        max_concurrent=settings.MAX_CONCURRENT_TASKS,
+        ffmpeg_available=ffmpeg_exe() is not None,
+    )
+    report = format_issues(issues, env=settings.APP_ENV)
+    if report:
+        print(report, flush=True)
+    errors = [item for item in issues if item.level == "error"]
+    if errors:
+        raise RuntimeError(
+            f"配置自检未通过（{len(errors)} 项必须修复），已中止启动。"
+            " 详见上方 [Preflight] 输出；把 APP_ENV 改为 development 可跳过强制检查。"
+        )
+
     try:
         # 启动时初始化数据库 + 默认管理员 + 引擎插件 + 收拾上个进程遗留的中断任务
         await init_db()

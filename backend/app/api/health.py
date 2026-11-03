@@ -2,14 +2,19 @@
 import asyncio
 import logging
 import time
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response
+from sqlalchemy import text
 
 from app.auth import get_current_user
+from app.config import settings
+from app.database import async_session
 from app.engines import factory
 from app.engines.base import GenerationProvider
 from app.engines.factory import acquire_provider, list_engines
 from app.models.models import User
+from app.preflight import dir_writable
 from app.safe_detail import safe_detail as _safe_detail
 
 router = APIRouter(prefix="/api", tags=["health"])
@@ -105,6 +110,45 @@ async def health():
     """
     comfyui = await _probe_cached("comfyui")
     return {"status": "ok", "comfyui": comfyui["status"]}
+
+
+# 就绪探针的数据库检查上限。SELECT 1 正常是毫秒级，2 秒还没回来说明
+# 数据库文件被锁死或磁盘 I/O 卡住 —— 这时报 not_ready 比挂着更有用。
+_READY_TIMEOUT = 2.0
+
+
+@router.get("/ready")
+async def ready(response: Response):
+    """就绪探针（匿名可访问）：现在能不能接业务流量。
+
+    与 `/health` 的分工必须分清：
+    - `/health` 只回答「进程活着」，引擎全挂也返回 ok —— 给存活探针用（失败才重启）
+    - `/ready` 回答「依赖都可用」—— 给负载均衡/监控用，not_ready 就不该打业务流量
+
+    三项检查都是真实动作，不是看配置：数据库真跑一次查询、存储真写一个文件、
+    前端产物真找 index.html。只读配置的话，「目录存在但只读」这种故障查不出来。
+
+    匿名可访问是刻意的（监控拿不到 token），所以失败详情必须脱敏。
+    """
+    checks: dict[str, str] = {}
+
+    try:
+        async with async_session() as db:
+            await asyncio.wait_for(db.execute(text("SELECT 1")), timeout=_READY_TIMEOUT)
+        checks["database"] = "ok"
+    except Exception as e:  # noqa: BLE001 —— 探针不能抛，任何异常都收成状态
+        logger.warning("Readiness database check failed", exc_info=True)
+        checks["database"] = f"error: {_safe_detail(e)}"
+
+    storage_err = await asyncio.to_thread(dir_writable, Path(settings.STORAGE_DIR))
+    checks["storage"] = "ok" if storage_err is None else f"error: {storage_err}"
+
+    index = Path(settings.FRONTEND_DIST) / "index.html"
+    checks["frontend"] = "ok" if index.is_file() else f"missing: {index}"
+
+    ok = all(value == "ok" for value in checks.values())
+    response.status_code = 200 if ok else 503
+    return {"status": "ready" if ok else "not_ready", "checks": checks}
 
 
 @router.get("/engines")

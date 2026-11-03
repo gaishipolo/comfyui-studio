@@ -1,0 +1,50 @@
+# 构建上下文裁剪 —— 这个仓库根目录有素材库（数百 MB）和本地密钥，
+# 不加这份文件 `docker build` 会先把它们全塞进上下文再 COPY 进镜像。
+
+# 版本控制与工具缓存
+.git/
+.gitignore
+.workbuddy-ai/
+.hallmark/
+.playwright-cli/
+
+# 依赖与构建产物（前端在镜像里重新构建）
+frontend/node_modules/
+frontend/dist/
+frontend/tsconfig.tsbuildinfo
+**/__pycache__/
+**/*.py[cod]
+.venv/
+venv/
+
+# 本地密钥：绝不能进镜像。运行期由 compose 的 env_file / environment 注入
+backend/.env
+*.env
+!*.env.example
+
+# 运行时数据：素材、数据库、备份都走卷挂载
+backend/storage/
+storage/
+backend/*.db
+backend/*.db-wal
+backend/*.db-shm
+backend/*.db.bak*
+backups/
+
+# 根目录的开发期素材（UI 格式工作流源文件、参考图）
+/*.json
+/images.jfif
+/图像放大.json
+
+# 测试与文档不进运行时镜像（容器里跑不了需要真实 ComfyUI 的脚本）
+backend/tests/
+docs/
+README.md
+SKILL.md
+
+# 部署脚本：docker/ 下的 entrypoint 构建时要用，不能整个排除；
+# windows/ 是给裸机部署的，与镜像无关
+deploy/windows/
+docker-compose*.yml
+Dockerfile
+.dockerignore
