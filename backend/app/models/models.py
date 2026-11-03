@@ -95,6 +95,13 @@ class Task(Base):
     template_id: Mapped[str] = mapped_column(ForeignKey("templates.id"), comment="关联模板")
     created_by: Mapped[str] = mapped_column(String(32), default="", index=True, comment="提交用户 ID")
     batch_id: Mapped[str] = mapped_column(String(32), default="", index=True, comment="批量提交组 ID")
+    # 流程编排：一个 Task 可能属于某次流程运行的某一步。非流程任务为空。
+    flow_run_id: Mapped[str] = mapped_column(
+        String(32), default="", index=True, comment="所属流程运行 ID；非流程任务为空"
+    )
+    step_id: Mapped[str] = mapped_column(
+        String(32), default="", comment="流程内的步骤别名（Flow.steps[].id）"
+    )
 
     status: Mapped[str] = mapped_column(
         String(16), default="pending", index=True,
@@ -168,6 +175,75 @@ class Asset(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     task: Mapped["Task | None"] = relationship(back_populates="assets")
+
+
+class Flow(Base):
+    """流程配置 —— 节点（Template）的有序编排。
+
+    系统只有两层配置，两层都是**数据不是代码**：
+      - 节点配置 = Template：引擎 + 能力 + 一张表单
+      - 流程配置 = Flow（本类）：节点怎么串、每步吃什么、吐出什么
+
+    「两层都是数据」是这套设计能接 Agent 的根本前提：Agent 只能写数据，
+    写不了代码。写出来的配置可以被校验、被试跑、被审批。
+
+    步骤存在 steps（JSON）里，每步形如：
+        { id, type: template|flow|repeat, template_id|flow_id, count,
+          params: { 字段: 字面量 或 "{{...}}" } }
+    绑定按**步骤 id** 引用，不引用数组下标 —— 插入/删除/排序不会打断引用。
+    """
+    __tablename__ = "flows"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=gen_uuid)
+    name: Mapped[str] = mapped_column(String(128), unique=True, comment="流程名称")
+    description: Mapped[str] = mapped_column(Text, default="", comment="流程说明")
+    category: Mapped[str] = mapped_column(String(64), default="image", comment="分类")
+    icon: Mapped[str] = mapped_column(String(256), default="", comment="图标 URL 或 emoji")
+
+    # 流程级输入：运行台让用户填的那些字段。它**独立于首节点** ——
+    # 首节点只要「初始画面」，流程可能还要「镜头数」「每镜头的提示词列表」。
+    input_schema: Mapped[dict] = mapped_column(JSONStore, default=dict, comment="流程输入字段定义")
+    # 流程级输出：显式声明 [{name, from, pick}]，父流程按 name 引用。
+    # 不从尾节点自动推导 —— 尾节点可能产出多张图，流程只该暴露其中一部分。
+    outputs: Mapped[list] = mapped_column(JSONStore, default=list, comment="输出声明 [{name, from, pick}]")
+
+    steps: Mapped[list] = mapped_column(JSONStore, default=list, comment="步骤列表")
+
+    # draft = 草稿（Agent 生成的流程落这里，人审批后才 active）
+    status: Mapped[str] = mapped_column(String(16), default="active", index=True, comment="draft/active/archived")
+    version: Mapped[int] = mapped_column(Integer, default=1, comment="版本号，每次修改 +1")
+    created_by: Mapped[str] = mapped_column(String(32), default="", index=True, comment="创建人 user id")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+    runs: Mapped[list["FlowRun"]] = relationship(back_populates="flow")
+
+
+class FlowRun(Base):
+    """流程运行实例 —— 一次「填参数 + 点运行」。
+
+    每一步对应一个普通 Task（tasks 表里 flow_run_id / step_id 指回来），
+    所以并发闸门、进度轮询、失败重试、任务列表全部复用现有实现。
+    """
+    __tablename__ = "flow_runs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=gen_uuid)
+    flow_id: Mapped[str] = mapped_column(ForeignKey("flows.id"), index=True, comment="流程 ID")
+    flow_name: Mapped[str] = mapped_column(String(128), default="", comment="流程名快照（流程改名后仍可读）")
+    created_by: Mapped[str] = mapped_column(String(32), default="", index=True, comment="提交人 user id")
+
+    status: Mapped[str] = mapped_column(String(16), default="running", index=True, comment="running/done/error/cancelled")
+    progress: Mapped[float] = mapped_column(Float, default=0.0, comment="整体进度 0~100")
+
+    params: Mapped[dict] = mapped_column(JSONStore, default=dict, comment="流程输入快照")
+    # 每步状态 [{step_id, task_id, status, error}]，运行台据此显示进度
+    steps: Mapped[list] = mapped_column(JSONStore, default=list, comment="每步执行状态")
+
+    error_msg: Mapped[str] = mapped_column(Text, default="", comment="失败原因")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    flow: Mapped["Flow"] = relationship(back_populates="runs")
 
 
 class EnginePlugin(Base):

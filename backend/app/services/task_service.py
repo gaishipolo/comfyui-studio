@@ -149,6 +149,35 @@ async def spawn_task(task_id: str, resume: bool = False) -> bool:
     return True
 
 
+async def spawn_background(key: str, coro) -> bool:
+    """登记并启动一个后台协程（去重）。返回是否真的启动了。
+
+    流程编排的执行器也走这里 —— 这样进程停机时，流程执行协程跟普通生成
+    任务一起被 cancel_background_tasks 取消，不会出现「任务停了但流程还
+    在跑、持有引擎租约不放」的情况。
+
+    key 要带前缀区分来源（流程用 "flow:" + run_id），避免和 task_id 撞。
+    """
+    if key in _running_tasks:
+        return False
+    _running_tasks.add(key)
+
+    async def _runner():
+        try:
+            await coro
+        except Exception as e:  # noqa: BLE001 — 后台协程必须自己吞掉异常
+            logger.error(
+                "Background flow failed key=%s", key, exc_info=(type(e), e, e.__traceback__)
+            )
+        finally:
+            _running_tasks.discard(key)
+
+    task = asyncio.create_task(_runner())
+    _background_tasks[task] = task
+    task.add_done_callback(_background_tasks.pop)
+    return True
+
+
 async def cancel_background_tasks(
     timeout: float = _BACKGROUND_STOP_TIMEOUT_SECONDS,
 ) -> dict[str, int]:
@@ -231,12 +260,16 @@ class TaskService:
         batch_id: str = "",
         created_by: str = "",
         commit: bool = True,
+        flow_run_id: str = "",
+        step_id: str = "",
     ) -> Task:
         task = Task(
             template_id=template_id,
             batch_id=batch_id or uuid.uuid4().hex,
             params=params,
             created_by=created_by,
+            flow_run_id=flow_run_id,
+            step_id=step_id,
         )
         db.add(task)
         if commit:

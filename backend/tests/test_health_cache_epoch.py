@@ -14,6 +14,7 @@ from fastapi import HTTPException  # noqa: E402
 
 from app.api import health as health_api  # noqa: E402
 from app.api import uploads as uploads_api  # noqa: E402
+from app.services import engine_input  # noqa: E402
 from provider_test_utils import lease_acquirer  # noqa: E402
 
 
@@ -101,13 +102,15 @@ async def test_upload_failure_logs_raw_traceback_but_returns_safe_detail() -> No
             raise RuntimeError(raw)
 
     records = Records()
-    logger = logging.getLogger(uploads_api.__name__)
+    # 推进引擎的实现搬到了 services/engine_input（上传路径与流程编排共用），
+    # 所以注入点和日志记录方都在那边
+    logger = logging.getLogger(engine_input.__name__)
     logger.addHandler(records)
     old_level = logger.level
     logger.setLevel(logging.ERROR)
     try:
         with patch.object(
-            uploads_api,
+            engine_input,
             "acquire_provider",
             lease_acquirer(lambda _engine: FailingProvider()),
         ):

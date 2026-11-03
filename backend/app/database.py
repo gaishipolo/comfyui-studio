@@ -72,6 +72,10 @@ _COLUMN_MIGRATIONS = [
     ("assets", "deleted_at", "ALTER TABLE assets ADD COLUMN deleted_at DATETIME"),
     # 存储配额（2026-11-03）：0 = 不限。单位字节。
     ("users", "storage_quota_bytes", "ALTER TABLE users ADD COLUMN storage_quota_bytes INTEGER DEFAULT 0"),
+    # 流程编排（2026-11-03）：一个 Task 可能属于某次流程运行的某一步。
+    # 非流程任务这两列为空，走原来的单任务逻辑。
+    ("tasks", "flow_run_id", "ALTER TABLE tasks ADD COLUMN flow_run_id VARCHAR(32) DEFAULT ''"),
+    ("tasks", "step_id", "ALTER TABLE tasks ADD COLUMN step_id VARCHAR(32) DEFAULT ''"),
 ]
 
 # SQLite 不支持 ALTER COLUMN，改 task_id 可空只能重建表。列顺序与 models.Asset 对齐。

@@ -297,3 +297,139 @@ class UsageResponse(BaseModel):
     date_to: str = ""
     by_user: list[UsageByUser] = []
     totals: UsageByUser = UsageByUser()
+
+
+# ───────────────────────────── 流程编排 ─────────────────────────────
+#
+# 流程 = 节点（Template）的有序编排。系统的两层配置都是**数据不是代码**，
+# 这是将来能接 Agent 的前提 —— Agent 只能写数据。
+#
+# steps 的形状：
+#   { id, type: "template", template_id, params: { 字段: 字面量 或 "{{...}}" } }
+# params 的取值是表达式：
+#   "{{ input.xxx }}"          流程输入的字段
+#   "{{ steps.s1.outputs }}"   上游步骤的产物（列表）
+# 字段名必须是目标节点 input_schema 里存在的字段 —— 校验在 validate 接口做。
+
+
+class FlowStep(BaseModel):
+    """流程里的一步。绑定按 id 引用（不引用下标），插入/排序不会打断引用。"""
+
+    id: str = Field(min_length=1, max_length=64, description="步骤别名，流程内唯一")
+    type: str = Field(default="template", description="步骤类型：template（第一刀只支持这个）")
+    template_id: str = Field(default="", description="节点（Template）ID")
+    flow_id: str = Field(default="", description="子流程 ID（type=flow 时用）")
+    count: int = Field(default=1, ge=1, le=999, description="循环次数（type=repeat 时用）")
+    params: dict = Field(default_factory=dict, description="参数取值：字面量或 {{...}} 表达式")
+
+    @field_validator("id")
+    @classmethod
+    def _clean_id(cls, v: str) -> str:
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("步骤 id 不能为空")
+        return cleaned
+
+
+class FlowOutput(BaseModel):
+    """流程输出声明。显式命名，父流程按 name 引用。"""
+
+    name: str = Field(min_length=1, max_length=64)
+    from_step: str = Field(default="", alias="from", description="来源步骤 id")
+    pick: str = Field(default="all", description="取哪部分：all/first/last")
+
+    model_config = {"populate_by_name": True}
+
+
+class FlowBase(BaseModel):
+    """流程配置的公共字段。"""
+
+    name: str = Field(min_length=1, max_length=128, description="流程名称")
+    description: str = Field(default="", description="流程说明")
+    category: str = Field(default="image", max_length=64, description="分类")
+    icon: str = Field(default="", max_length=256, description="图标 URL 或 emoji")
+    input_schema: dict = Field(default_factory=dict, description="流程输入字段定义")
+    outputs: list[FlowOutput] = Field(default_factory=list, description="流程输出声明")
+    steps: list[FlowStep] = Field(default_factory=list, description="步骤列表")
+    status: str = Field(default="active", description="draft/active/archived")
+
+    @field_validator("input_schema")
+    @classmethod
+    def _normalize_schema(cls, v: Any) -> dict:
+        return normalize_input_schema(v)
+
+
+class FlowCreate(FlowBase):
+    pass
+
+
+class FlowUpdate(BaseModel):
+    """局部更新 —— 没传的字段不动。"""
+
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    description: str | None = None
+    category: str | None = Field(default=None, max_length=64)
+    icon: str | None = Field(default=None, max_length=256)
+    input_schema: dict | None = None
+    outputs: list[FlowOutput] | None = None
+    steps: list[FlowStep] | None = None
+    status: str | None = None
+
+    @field_validator("input_schema")
+    @classmethod
+    def _normalize_schema(cls, v: Any) -> dict | None:
+        return None if v is None else normalize_input_schema(v)
+
+
+class FlowResponse(FlowBase):
+    id: str
+    version: int = 1
+    created_by: str = ""
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class FlowRunResponse(BaseModel):
+    """一次流程运行。"""
+
+    id: str
+    flow_id: str
+    flow_name: str = ""
+    status: str = "running"
+    progress: float = 0.0
+    params: dict = Field(default_factory=dict)
+    steps: list = Field(default_factory=list)
+    error_msg: str = ""
+    created_at: datetime
+    finished_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class FlowValidateRequest(BaseModel):
+    """校验一份流程配置（不落库）。编排器保存前、Agent 生成后都走这里。"""
+
+    steps: list[FlowStep] = Field(default_factory=list)
+    input_schema: dict = Field(default_factory=dict)
+    outputs: list[FlowOutput] = Field(default_factory=list)
+
+
+class FlowValidateResponse(BaseModel):
+    ok: bool = True
+    errors: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    layers: list[list[str]] = Field(default_factory=list, description="依赖分层，同层可并行")
+
+
+class NodeCapability(BaseModel):
+    """能力清单里的一项 —— 一个可用节点。"""
+
+    id: str
+    name: str
+    description: str = ""
+    category: str = "image"
+    engine: str = ""
+    capability: str = ""
+    fields: list[dict] = Field(default_factory=list)

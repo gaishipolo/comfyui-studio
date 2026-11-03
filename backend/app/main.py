@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse
 
 from app.config import settings
 from app.database import init_db, async_session
-from app.api import templates, tasks, health, assets, auth_api, uploads, stats, plugins
+from app.api import templates, tasks, health, assets, auth_api, uploads, stats, plugins, flows
 from app.request_limits import ProtectedBodyLimitMiddleware
 
 # Windows 的注册表常把 .svg 登记成非标准的 `image/svg`，浏览器只认标准写法
@@ -177,6 +177,7 @@ app.include_router(assets.router)
 app.include_router(uploads.router)
 app.include_router(stats.router)
 app.include_router(plugins.router)
+app.include_router(flows.router)
 
 
 @app.get("/api/info")

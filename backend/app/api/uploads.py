@@ -14,7 +14,6 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.engines.factory import acquire_provider
 from app.filestore import (
     FILESTORE_UNAVAILABLE_DETAIL,
     FileStoreUnavailableError,
@@ -26,6 +25,7 @@ from app.auth import get_current_user
 from app.safe_detail import safe_detail
 from app.schemas.schemas import AssetUploadRequest
 from app.access import can_view_asset
+from app.services.engine_input import EngineInputError, push_bytes_to_engine
 from app.upload_rules import (
     ALLOWED_MIME_PREFIXES,
     FILE_KINDS,
@@ -40,37 +40,18 @@ logger = logging.getLogger(__name__)
 
 
 async def _forward_to_engine(engine: str, data: bytes, name: str) -> str:
-    """把字节推进引擎，返回引擎侧文件名（表单直接当字段值用）。"""
+    """把字节推进引擎，返回引擎侧文件名（表单直接当字段值用）。
+
+    实现在 services/engine_input.py —— 流程编排的步骤间传产物走同一条路，
+    不在这里复制第二份（引擎不可用 / 不支持上传 / 传失败三种情况各自
+    要不同的 HTTP 状态码，复制一份必然日后走偏）。
+    """
     try:
-        lease = acquire_provider(engine)
-    except ValueError as e:
-        logger.error(
-            "Provider upload acquisition failed engine=%s filename=%s",
-            engine,
-            name,
-            exc_info=(type(e), e, e.__traceback__),
-        )
-        raise HTTPException(status_code=400, detail=safe_detail(e)) from e
-    try:
-        with lease as provider:
-            return await provider.upload_input(data, name)
-    except NotImplementedError as e:
-        logger.error(
-            "Provider upload unsupported engine=%s filename=%s",
-            engine,
-            name,
-            exc_info=(type(e), e, e.__traceback__),
-        )
-        raise HTTPException(status_code=400, detail=safe_detail(e)) from e
-    except Exception as e:  # noqa: BLE001 —— 引擎侧报错统一收成 502
-        # 异常原文可能带上游完整 URL（含 query 里的 key），过脱敏再回 —— 与 /engines 同一道防线
-        logger.error(
-            "Provider upload failed engine=%s filename=%s",
-            engine,
-            name,
-            exc_info=(type(e), e, e.__traceback__),
-        )
-        raise HTTPException(status_code=502, detail=f"上传到生成引擎失败: {safe_detail(e)}") from e
+        return await push_bytes_to_engine(engine, data, name)
+    except EngineInputError as exc:
+        if exc.unsupported:
+            raise HTTPException(status_code=400, detail=safe_detail(exc)) from exc
+        raise HTTPException(status_code=502, detail=f"上传到生成引擎失败: {safe_detail(exc)}") from exc
 
 
 @router.post("/file")
