@@ -30,3 +30,15 @@ frontend/src-backup-*/
 ComfyUI_temp*
 login.yaml
 *.log
+backend/_test*
+
+# 数据库快照备份（*.db 已覆盖主库，这里补 .bak 后缀）
+*.db.bak*
+
+# 根目录的工作流源文件：UI 导出格式，仅作本地参考。
+# 运行时用的是 backend/workflows/ 下上传转换后的 API 格式副本（已入库）。
+/LTX-2.3_-_I2V_T2V_Basic_GGUF.json
+/image_flux2_klein_text_to_image.json
+/image_flux2_klein_text_to_image_ref_face.json
+/图像放大.json
+/images.jfif
