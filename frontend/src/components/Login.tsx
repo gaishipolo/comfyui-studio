@@ -1,6 +1,7 @@
 /** 登录页面 */
 import { useState } from 'react'
 import { login, setToken, setStoredUser } from '../api/client'
+import { BrandLogo } from './BrandLogo'
 
 interface Props {
   onLogin: () => void
@@ -33,21 +34,8 @@ export default function Login({ onLogin }: Props) {
       <main className="flex flex-1 items-center justify-center px-md py-2xl">
         <div className="w-full max-w-form">
           <div className="mb-lg flex flex-col items-center text-center">
-            <span
-              aria-hidden="true"
-              className="mb-md grid h-12 w-12 place-items-center rounded-lg bg-[linear-gradient(135deg,#6d6df0_0%,#5b5bd6_52%,#4646b8_100%)] text-accent-ink shadow-md"
-            >
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <path
-                  d="M12 3.5 20 8v8l-8 4.5L4 16V8l8-4.5Z"
-                  stroke="currentColor"
-                  strokeWidth="1.6"
-                  strokeLinejoin="round"
-                />
-                <circle cx="12" cy="12" r="2.6" fill="currentColor" />
-              </svg>
-            </span>
-            <h1 className="font-display text-xl font-semibold">ComfyUI 工作台</h1>
+            <BrandLogo className="mb-md h-14 w-auto text-ink" />
+            <h1 className="font-display text-xl font-semibold">雨范AI工作台</h1>
             <p className="mt-2xs text-sm text-muted">登录以继续使用</p>
           </div>
 

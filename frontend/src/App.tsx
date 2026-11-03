@@ -18,6 +18,7 @@ import { friendlyError } from './components/FriendlyError'
 import { clearTaskStatusHistory, taskPollDelay } from './components/uiBehavior'
 import type { Toast } from './notify'
 import Login from './components/Login'
+import { BrandLogo } from './components/BrandLogo'
 import ChangePasswordModal from './components/ChangePasswordModal'
 import DialogHost from './components/DialogHost'
 
@@ -198,24 +199,11 @@ export default function App() {
       <header className="sticky top-0 z-sticky-nav border-b border-rule bg-paper">
         <div className="container flex flex-wrap items-center justify-between gap-md py-sm">
           <div className="flex items-center gap-sm">
-            {/* 品牌标记：唯一一处渐变，比纯色方块更有"产品感" */}
-            <span
-              aria-hidden="true"
-              className="grid h-9 w-9 shrink-0 place-items-center rounded-md bg-[linear-gradient(135deg,#6d6df0_0%,#5b5bd6_52%,#4646b8_100%)] text-accent-ink shadow-sm"
-            >
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <path
-                  d="M12 3.5 20 8v8l-8 4.5L4 16V8l8-4.5Z"
-                  stroke="currentColor"
-                  strokeWidth="1.6"
-                  strokeLinejoin="round"
-                />
-                <circle cx="12" cy="12" r="2.6" fill="currentColor" />
-              </svg>
-            </span>
+            {/* 品牌标记：YF 交织字母。图形本身就是识别物，不再套彩色方块压住它 */}
+            <BrandLogo className="h-9 w-auto shrink-0 text-ink" />
             <div className="min-w-0">
               <h1 className="font-display text-xl font-semibold leading-tight tracking-tight">
-                ComfyUI 工作台
+               雨范AI工作台
               </h1>
               <p className="text-xs text-muted">AI 生成集成工作台</p>
             </div>
