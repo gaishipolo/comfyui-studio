@@ -12,25 +12,42 @@
 将来并行时执行器直接用这个分层，不用重新算。
 """
 from app.models.models import Template
+from app.services.field_types import is_file_field, normalized_field_map
 from app.services.flow_expr import collect_refs
 
 
 def _field_map(input_schema) -> dict:
-    if isinstance(input_schema, dict):
-        fields = input_schema.get("fields", [])
-    elif isinstance(input_schema, list):
-        fields = input_schema
-    else:
-        fields = []
-    return {
-        str(f.get("name")): f
-        for f in fields
-        if isinstance(f, dict) and f.get("name")
-    }
+    """归一后的字段表 —— image_upload 这类历史别名在这里统一成 file_upload。
+
+    直接读库里的原始 schema 会让老模板的 image_upload 字段既接不了上游
+    产物，校验还会误报「只有 file_upload 类型的字段能接」。
+    """
+    return normalized_field_map(input_schema)
 
 
 def _input_field_names(input_schema) -> set[str]:
     return set(_field_map(input_schema))
+
+
+def _refs_upstream(expr) -> bool:
+    """这个取值引用了上游步骤的产物吗。"""
+    if not isinstance(expr, str):
+        return False
+    return any(ref.startswith("steps.") for ref in collect_refs(expr))
+
+
+def step_label(steps: list[dict], sid: str) -> str:
+    """步骤在界面上的名字 —— 优先用显示名（title），退回 id。
+
+    校验错误要给内容同事看，「步骤「gen」的字段…」这种裸 id 没人认得；
+    有显示名就说「第 2 步「生成参考图」的字段…」。
+    """
+    for index, step in enumerate(steps):
+        if str(step.get("id") or "") != sid:
+            continue
+        title = str(step.get("title") or "").strip()
+        return f"第 {index + 1} 步「{title}」" if title else f"第 {index + 1} 步"
+    return f"步骤「{sid}」"
 
 
 def compute_layers(steps: list[dict]) -> tuple[list[list[str]], list[str]]:
@@ -91,11 +108,12 @@ def validate_flow_config(
     input_names = _input_field_names(input_schema)
 
     for index, step in enumerate(steps):
-        sid = str(step.get("id") or f"第{index + 1}步")
+        sid = str(step.get("id") or f"step{index + 1}")
+        label = step_label(steps, sid)
         step_type = step.get("type") or "template"
         if step_type != "template":
             warnings.append(
-                f"步骤「{sid}」的类型是 {step_type}，第一刀只支持 template"
+                f"{label}的类型是 {step_type}，第一刀只支持 template"
                 "（子流程与循环还没实现）"
             )
             continue
@@ -103,24 +121,35 @@ def validate_flow_config(
         template_id = str(step.get("template_id") or "")
         template = templates.get(template_id)
         if template is None:
-            errors.append(f"步骤「{sid}」引用的节点不存在：{template_id}")
+            errors.append(f"{label}引用的节点不存在：{template_id}")
             continue
 
         fields = _field_map(template.input_schema)
         for field, expr in (step.get("params") or {}).items():
             if field not in fields:
+                spec_label = str(fields.get(field, {}).get("label") or field)
                 errors.append(
-                    f"步骤「{sid}」的字段「{field}」在节点「{template.name}」里不存在"
+                    f"{label}的字段「{spec_label}」在节点「{template.name}」里不存在"
                     f"（可用：{', '.join(sorted(fields)) or '无'}）"
                 )
                 continue
             spec = fields[field]
             is_ref = isinstance(expr, str) and "{{" in expr
 
-            if spec.get("type") == "file_upload" and not is_ref:
+            if is_file_field(spec) and not is_ref:
                 errors.append(
-                    f"步骤「{sid}」的字段「{field}」是文件类型，必须用引用取值"
-                    "（写素材 id 或 {{...}} 表达式），不能写字面量"
+                    f"{label}的字段「{spec.get('label') or field}」是文件类型，"
+                    "必须用引用取值（写素材 id 或 {{...}} 表达式），不能写字面量"
+                )
+
+            # 引用上游产物只能喂给文件字段 —— 普通字段接了就是配置错误。
+            # 这条检查原来只在执行器里（跑到那一步才报），挪到校验层，
+            # 保存流程时就拦住，别让用户白跑一次引擎才发现。
+            if not is_file_field(spec) and _refs_upstream(expr):
+                errors.append(
+                    f"{label}的字段「{spec.get('label') or field}」的类型是 "
+                    f"{spec.get('type')}，不能接上游产物"
+                    "（只有图片/文件类型的字段能接）"
                 )
 
             for ref in collect_refs(expr):
@@ -128,19 +157,19 @@ def validate_flow_config(
                     name = ref.split(".", 1)[1]
                     if name not in input_names:
                         errors.append(
-                            f"步骤「{sid}」引用了流程输入「{name}」，但流程输入里没有这个字段"
+                            f"{label}引用了流程输入「{name}」，但流程输入里没有这个字段"
                         )
                 elif ref.startswith("steps."):
                     parts = ref.split(".")
                     if len(parts) < 3 or parts[2] != "outputs":
                         warnings.append(
-                            f"步骤「{sid}」的引用「{ref}」只认 steps.<步骤>.outputs 这种形状"
+                            f"{label}的引用「{ref}」只认 steps.<步骤>.outputs 这种形状"
                         )
                     else:
                         upstream = parts[1]
                         if upstream not in seen:
                             errors.append(
-                                f"步骤「{sid}」引用了不存在的步骤「{upstream}」"
+                                f"{label}引用了不存在的步骤「{upstream}」"
                             )
                         else:
                             up_index = next(
@@ -153,7 +182,7 @@ def validate_flow_config(
                             )
                             if up_index >= index:
                                 errors.append(
-                                    f"步骤「{sid}」引用了后面的步骤「{upstream}」"
+                                    f"{label}引用了后面的{step_label(steps, upstream)}"
                                     "（只能引用前面的步骤 —— 顺序执行下拿不到还没跑的产物）"
                                 )
 

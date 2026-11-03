@@ -99,6 +99,64 @@ def test_collect_refs() -> None:
     assert collect_refs(1024) == []
 
 
+def test_list_first_and_last() -> None:
+    """从上游产物里取特定一张。
+
+    ComfyUI 一个工作流常出好几张图，下游只要其中一张时必须能指名 ——
+    否则只能全喂过去，然后报「字段只接一张图，但上游产出了 N 张」。
+    """
+    assert resolve_value("{{ steps.gen.outputs.first }}", CTX) == {
+        "asset_id": "a1",
+        "filename": "a.png",
+    }
+    assert resolve_value("{{ steps.gen.outputs.last }}", CTX) == {
+        "asset_id": "a2",
+        "filename": "b.png",
+    }
+    assert resolve_value("{{ steps.gen.outputs.1 }}", CTX) == {
+        "asset_id": "a2",
+        "filename": "b.png",
+    }
+
+
+def test_list_index_out_of_range() -> None:
+    """下标越界要报错，不能静默返回 None。"""
+    try:
+        resolve_value("{{ steps.gen.outputs.9 }}", CTX)
+    except FlowExprError as exc:
+        assert "越界" in str(exc), str(exc)
+    else:
+        raise AssertionError("越界应该报错")
+
+
+def test_list_pick_on_empty_list() -> None:
+    """上游没有产物时取 first 要报错 —— 空列表取不到东西。"""
+    empty = {"steps": {"gen": {"outputs": []}}}
+    try:
+        resolve_value("{{ steps.gen.outputs.first }}", empty)
+    except FlowExprError as exc:
+        assert "没有产物" in str(exc), str(exc)
+    else:
+        raise AssertionError("空列表取 first 应该报错")
+
+
+def test_list_rejects_unknown_key() -> None:
+    """列表上不能按名字取 —— 只认 first / last / 数字下标。"""
+    try:
+        resolve_value("{{ steps.gen.outputs.middle }}", CTX)
+    except FlowExprError as exc:
+        assert "first" in str(exc), str(exc)
+    else:
+        raise AssertionError("未知列表键应该报错")
+
+
+def test_whole_reference_with_pick_keeps_type() -> None:
+    """整体引用 .first 保留原始类型（拿到的是 dict，不是字符串）。"""
+    value = resolve_value("{{ steps.gen.outputs.first }}", CTX)
+    assert isinstance(value, dict)
+    assert value["asset_id"] == "a1"
+
+
 def main() -> int:
     tests = [
         test_literal_passthrough,
@@ -108,6 +166,11 @@ def main() -> int:
         test_bad_path_rejected,
         test_list_into_text_rejected,
         test_collect_refs,
+        test_list_first_and_last,
+        test_list_index_out_of_range,
+        test_list_pick_on_empty_list,
+        test_list_rejects_unknown_key,
+        test_whole_reference_with_pick_keeps_type,
     ]
     failures: list[str] = []
     for test in tests:

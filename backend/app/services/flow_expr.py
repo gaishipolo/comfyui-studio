@@ -26,8 +26,12 @@ import re
 _WHOLE_REF = re.compile(r"^\{\{\s*([^{}]+?)\s*\}\}$")
 # 文本中夹着 {{ ... }} → 按字符串插值处理
 _PART_REF = re.compile(r"\{\{\s*([^{}]+?)\s*\}\}")
-# 允许的引用路径：字母数字下划线 + 点分段
+# 允许的引用路径：字母数字下划线 + 点分段。
+# 末段可以是纯数字 —— 那是列表下标（steps.s1.outputs.0）。
 _PATH = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
+_PATH_WITH_INDEX = re.compile(
+    r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*(\.\d+)?$"
+)
 
 
 class FlowExprError(ValueError):
@@ -37,21 +41,51 @@ class FlowExprError(ValueError):
 def parse_ref(path: str) -> list[str]:
     """把 "steps.gen.outputs" 拆成 ["steps", "gen", "outputs"]。"""
     path = path.strip()
-    if not _PATH.match(path):
+    if not (_PATH.match(path) or _PATH_WITH_INDEX.match(path)):
         raise FlowExprError(f"引用路径不合法：{path!r}")
     return path.split(".")
 
 
 def resolve_ref(path: str, ctx: dict):
-    """按路径从上下文取值。取值只走字典下标 —— 不 getattr，不 eval。"""
+    """按路径从上下文取值。取值只走字典下标 —— 不 getattr，不 eval。
+
+    列表可以用 .first / .last 取元素 —— ComfyUI 一个工作流常出好几张图，
+    下游只要其中一张时必须能指名，否则只能全喂过去然后报「字段只接一张图」。
+    """
     parts = parse_ref(path)
     cur: object = ctx
     for i, part in enumerate(parts):
-        if not isinstance(cur, dict) or part not in cur:
+        if isinstance(cur, dict):
+            if part not in cur:
+                raise FlowExprError(
+                    f"引用「{path}」不存在（第 {i + 1} 段 {part!r} 找不到）"
+                )
+            cur = cur[part]
+        elif isinstance(cur, list):
+            if part == "first":
+                if not cur:
+                    raise FlowExprError(f"引用「{path}」取不到元素（上游没有产物）")
+                cur = cur[0]
+            elif part == "last":
+                if not cur:
+                    raise FlowExprError(f"引用「{path}」取不到元素（上游没有产物）")
+                cur = cur[-1]
+            elif part.isdigit():
+                index = int(part)
+                if index >= len(cur):
+                    raise FlowExprError(
+                        f"引用「{path}」越界（上游只有 {len(cur)} 个产物）"
+                    )
+                cur = cur[index]
+            else:
+                raise FlowExprError(
+                    f"引用「{path}」的第 {i + 1} 段 {part!r} 不是列表能用的"
+                    "（first / last / 数字下标）"
+                )
+        else:
             raise FlowExprError(
                 f"引用「{path}」不存在（第 {i + 1} 段 {part!r} 找不到）"
             )
-        cur = cur[part]
     return cur
 
 
@@ -93,4 +127,4 @@ def collect_refs(expr) -> list[str]:
     if not isinstance(expr, str):
         return []
     refs = [m.group(1).strip() for m in _PART_REF.finditer(expr)]
-    return [r for r in refs if _PATH.match(r)]
+    return [r for r in refs if _PATH.match(r) or _PATH_WITH_INDEX.match(r)]

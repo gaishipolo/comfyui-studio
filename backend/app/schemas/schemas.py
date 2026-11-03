@@ -316,6 +316,9 @@ class FlowStep(BaseModel):
     """流程里的一步。绑定按 id 引用（不引用下标），插入/排序不会打断引用。"""
 
     id: str = Field(min_length=1, max_length=64, description="步骤别名，流程内唯一")
+    # 显示名 —— 给内容同事看的。id 是内部标识（引用靠它），改名会断链，
+    # 所以界面让人改 title，id 由系统生成且不可编辑。
+    title: str = Field(default="", max_length=64, description="步骤显示名（给人看的）")
     type: str = Field(default="template", description="步骤类型：template（第一刀只支持这个）")
     template_id: str = Field(default="", description="节点（Template）ID")
     flow_id: str = Field(default="", description="子流程 ID（type=flow 时用）")

@@ -21,7 +21,8 @@ from app.filestore import read_asset_bytes
 from app.models.models import Asset, Flow, FlowRun, Task, Template
 from app.services.engine_input import EngineInputError, push_bytes_to_engine
 from app.services.flow_expr import FlowExprError, resolve_value
-from app.services.flow_validate import compute_layers
+from app.services.field_types import is_file_field, normalized_field_map
+from app.services.flow_validate import compute_layers, step_label
 from app.services.random_fields import resolve_random_fields
 from app.services.task_service import TaskService, spawn_background, spawn_task
 from app.timeutils import utcnow
@@ -39,25 +40,6 @@ class FlowError(RuntimeError):
     """流程配置错或执行出错。消息面向使用者，不含内部细节。"""
 
 
-def _field_map(input_schema: dict | list) -> dict:
-    """节点的输入字段表 {字段名: 字段定义}。
-
-    input_schema 历史上是裸 list，现在统一成 {"fields": [...]}，
-    两种都认（库里可能还有老格式）。
-    """
-    if isinstance(input_schema, dict):
-        fields = input_schema.get("fields", [])
-    elif isinstance(input_schema, list):
-        fields = input_schema
-    else:
-        fields = []
-    return {
-        str(f.get("name")): f
-        for f in fields
-        if isinstance(f, dict) and f.get("name")
-    }
-
-
 def _is_asset_list(value) -> bool:
     """判断一个值是不是「上游产物列表」。"""
     return (
@@ -65,6 +47,11 @@ def _is_asset_list(value) -> bool:
         and bool(value)
         and all(isinstance(v, dict) and v.get("asset_id") for v in value)
     )
+
+
+def _is_asset_ref(value) -> bool:
+    """单个产物引用 —— 表达式写了 .first / .last 时求值出来是这个形状。"""
+    return isinstance(value, dict) and bool(value.get("asset_id"))
 
 
 async def submit_flow(db, flow: Flow, params: dict, user) -> FlowRun:
@@ -129,12 +116,12 @@ async def _execute_flow(run_id: str) -> None:
                 try:
                     resolved = await _resolve_step_params(step, ctx)
                 except (FlowError, FlowExprError) as exc:
-                    await _fail_run(run_id, f"步骤「{step_id}」：{exc}", state)
+                    await _fail_run(run_id, f"{step_label(steps, step_id)}：{exc}", state)
                     return
                 try:
                     task_id = await _start_step(run, step, step_id, resolved)
                 except FlowError as exc:
-                    await _fail_run(run_id, f"步骤「{step_id}」：{exc}", state)
+                    await _fail_run(run_id, f"{step_label(steps, step_id)}：{exc}", state)
                     return
                 started.append((step_id, task_id))
 
@@ -144,7 +131,7 @@ async def _execute_flow(run_id: str) -> None:
                 try:
                     finished.append((step_id, await _wait_task(task_id)))
                 except FlowError as exc:
-                    await _fail_run(run_id, f"步骤「{step_id}」：{exc}", state)
+                    await _fail_run(run_id, f"{step_label(steps, step_id)}：{exc}", state)
                     return
 
             # 同层一步失败，同层其他步骤的产物仍然入库（跑都跑了，别浪费），
@@ -170,7 +157,7 @@ async def _execute_flow(run_id: str) -> None:
                 detail = task.error_msg or f"任务状态 {task.status}"
                 await _fail_run(
                     run_id,
-                    f"第 {layer_index + 1} 层「{step_id}」失败：{detail}",
+                    f"{step_label(steps, step_id)}失败：{detail}",
                     state,
                 )
                 return
@@ -227,7 +214,7 @@ async def _resolve_step_params(step: dict, ctx: dict) -> dict:
         template = await db.get(Template, template_id)
         if template is None:
             raise FlowError(f"节点不存在：{template_id}")
-        fields = _field_map(template.input_schema)
+        fields = normalized_field_map(template.input_schema)
         engine = template.engine
 
     resolved: dict = {}
@@ -239,12 +226,12 @@ async def _resolve_step_params(step: dict, ctx: dict) -> dict:
                 f"字段「{field}」在节点「{template.name}」里不存在"
                 f"（可用的：{', '.join(sorted(fields)) or '无'}）"
             )
-        if spec.get("type") == "file_upload":
+        if is_file_field(spec):
             # 文件类型的字段，值统一是「素材引用」：要么是素材 id（用户传的），
             # 要么是上游产物列表。两种都要送进本步节点的引擎换回引擎侧名字 ——
             # 我们自己存储里的路径，引擎不认。
             value = await _push_to_engine(engine, value, spec)
-        elif _is_asset_list(value):
+        elif _is_asset_list(value) or _is_asset_ref(value):
             raise FlowError(
                 f"字段「{field}」的类型是 {spec.get('type')}，不能接上游产物"
                 "（只有 file_upload 类型的字段能接）"
@@ -257,6 +244,9 @@ async def _push_to_engine(engine: str, value, spec: dict):
     """把素材引用推进引擎，返回引擎侧文件名（多值字段返回列表）。"""
     if isinstance(value, str) and value:
         items = [{"asset_id": value}]
+    elif _is_asset_ref(value):
+        # 表达式取了 .first / .last —— 单个产物
+        items = [value]
     elif _is_asset_list(value):
         items = value
     else:
