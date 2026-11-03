@@ -303,6 +303,9 @@ function RunView({
                   {run.steps.map((s, i) => (
                     <li key={s.step_id} className="flex items-center gap-sm text-sm">
                       <span className="chip">{i + 1}</span>
+                      {typeof s.layer === 'number' && (
+                        <span className="text-xs text-muted">第 {s.layer + 1} 层</span>
+                      )}
                       <code className="text-xs text-muted">{s.step_id}</code>
                       <span
                         className={
@@ -357,10 +360,12 @@ function EditView({
   const [draft, setDraft] = useState<Flow | null>(selected)
   const [busy, setBusy] = useState(false)
   const [issues, setIssues] = useState<{ errors: string[]; warnings: string[] } | null>(null)
+  const [layers, setLayers] = useState<string[][]>([])
 
   useEffect(() => {
     setDraft(selected)
     setIssues(null)
+    setLayers([])
   }, [selected])
 
   const capOf = (id: string) => caps.find((c) => c.id === id) ?? null
@@ -406,6 +411,7 @@ function EditView({
         outputs: draft.outputs,
       })
       setIssues({ errors: result.errors, warnings: result.warnings })
+      setLayers(result.layers)
     } catch (err) {
       reportError('校验失败', err)
     } finally {
@@ -423,6 +429,7 @@ function EditView({
         outputs: draft.outputs,
       })
       setIssues({ errors: result.errors, warnings: result.warnings })
+      setLayers(result.layers)
       if (!result.ok) {
         notify('流程还有问题，先改完再保存', 'warning')
         return
@@ -627,6 +634,30 @@ function EditView({
                 </ol>
               )}
             </div>
+
+            {layers.length > 0 && (
+              <div className="panel mb-md">
+                <h4 className="font-display text-base font-medium">并行分组</h4>
+                <p className="mt-2xs text-xs text-muted">
+                  同一组里的步骤互不依赖，会同时开跑；后面的组等前面跑完
+                </p>
+                <ol className="mt-sm flex flex-col gap-2xs">
+                  {layers.map((layer, i) => (
+                    <li key={i} className="flex items-center gap-sm text-sm">
+                      <span className="chip">第 {i + 1} 层</span>
+                      {layer.map((sid) => (
+                        <code key={sid} className="text-xs text-muted">
+                          {sid}
+                        </code>
+                      ))}
+                      {layer.length > 1 && (
+                        <span className="text-xs text-accent">{layer.length} 步并行</span>
+                      )}
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            )}
 
             {issues && (issues.errors.length > 0 || issues.warnings.length > 0) && (
               <div className="panel mb-md">

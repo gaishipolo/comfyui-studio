@@ -21,6 +21,7 @@ from app.filestore import read_asset_bytes
 from app.models.models import Asset, Flow, FlowRun, Task, Template
 from app.services.engine_input import EngineInputError, push_bytes_to_engine
 from app.services.flow_expr import FlowExprError, resolve_value
+from app.services.flow_validate import compute_layers
 from app.services.random_fields import resolve_random_fields
 from app.services.task_service import TaskService, spawn_background, spawn_task
 from app.timeutils import utcnow
@@ -103,37 +104,76 @@ async def _execute_flow(run_id: str) -> None:
         state: list[dict] = []
         total = len(steps)
 
-        for index, step in enumerate(steps):
-            step_id = str(step.get("id") or f"step{index + 1}")
-            try:
-                resolved = await _resolve_step_params(step, ctx)
-            except (FlowError, FlowExprError) as exc:
-                await _fail_run(run_id, f"第 {index + 1} 步「{step_id}」：{exc}", state)
-                return
+        # 按依赖分层：同层的步骤互不依赖，一起提交、一起等。
+        # 「谁吃谁」是流程声明的，「谁能同时跑」是算出来的 —— 不让用户配并行组，
+        # 因为并行组配错了（把有依赖的放进同一组）会拿不到产物，而且错得很隐蔽。
+        layers, cycle = compute_layers(steps)
+        if cycle:
+            await _fail_run(run_id, f"步骤之间存在循环依赖：{', '.join(cycle)}", state)
+            return
+        if not layers:
+            await _update_run(run_id, status="done", progress=100.0, steps=state)
+            return
 
-            try:
-                finished = await _run_step(run, step, step_id, resolved)
-            except FlowError as exc:
-                await _fail_run(run_id, f"第 {index + 1} 步「{step_id}」：{exc}", state)
-                return
+        by_id = {str(s.get("id") or ""): s for s in steps}
+        done_count = 0
 
-            if finished.status != "done":
-                detail = finished.error_msg or f"任务状态 {finished.status}"
-                await _fail_run(run_id, f"第 {index + 1} 步「{step_id}」失败：{detail}", state)
-                return
+        for layer_index, layer_ids in enumerate(layers):
+            layer_steps = [(sid, by_id[sid]) for sid in layer_ids if sid in by_id]
+            if not layer_steps:
+                continue
 
-            # 上游产物：既喂给下一步，也作为流程输出候选
-            outputs = await _collect_outputs(finished.id)
-            ctx["steps"][step_id] = {"outputs": outputs}
-            state.append(
-                {
-                    "step_id": step_id,
-                    "task_id": finished.id,
-                    "status": finished.status,
-                    "outputs": outputs,
-                }
-            )
-            await _update_run(run_id, progress=(index + 1) / total * 100, steps=state)
+            # ── 先把整层都提交出去（这一步不等待，任务在后台跑）──
+            started: list[tuple[str, str]] = []
+            for step_id, step in layer_steps:
+                try:
+                    resolved = await _resolve_step_params(step, ctx)
+                except (FlowError, FlowExprError) as exc:
+                    await _fail_run(run_id, f"步骤「{step_id}」：{exc}", state)
+                    return
+                try:
+                    task_id = await _start_step(run, step, step_id, resolved)
+                except FlowError as exc:
+                    await _fail_run(run_id, f"步骤「{step_id}」：{exc}", state)
+                    return
+                started.append((step_id, task_id))
+
+            # ── 再等这一层全部跑完 ──
+            finished: list[tuple[str, Task]] = []
+            for step_id, task_id in started:
+                try:
+                    finished.append((step_id, await _wait_task(task_id)))
+                except FlowError as exc:
+                    await _fail_run(run_id, f"步骤「{step_id}」：{exc}", state)
+                    return
+
+            # 同层一步失败，同层其他步骤的产物仍然入库（跑都跑了，别浪费），
+            # 但后续层不执行 —— 它们拿不到这一步的产物。
+            failed = [(sid, t) for sid, t in finished if t.status != "done"]
+            for step_id, task in finished:
+                outputs = await _collect_outputs(task.id)
+                ctx["steps"][step_id] = {"outputs": outputs}
+                state.append(
+                    {
+                        "step_id": step_id,
+                        "task_id": task.id,
+                        "status": task.status,
+                        "layer": layer_index,
+                        "outputs": outputs,
+                    }
+                )
+                done_count += 1
+            await _update_run(run_id, progress=done_count / total * 100, steps=state)
+
+            if failed:
+                step_id, task = failed[0]
+                detail = task.error_msg or f"任务状态 {task.status}"
+                await _fail_run(
+                    run_id,
+                    f"第 {layer_index + 1} 层「{step_id}」失败：{detail}",
+                    state,
+                )
+                return
 
         await _update_run(run_id, status="done", progress=100.0, steps=state)
 
@@ -245,8 +285,12 @@ async def _push_to_engine(engine: str, value, spec: dict):
     return names[0] if names else ""
 
 
-async def _run_step(run: FlowRun, step: dict, step_id: str, params: dict) -> Task:
-    """建任务、启动、等它跑完。返回终态任务。"""
+async def _start_step(run: FlowRun, step: dict, step_id: str, params: dict) -> str:
+    """建任务并启动，**不等它跑完** —— 返回 task_id。
+
+    分开是为了并行：同层的步骤要全部先提交出去，再一起等。
+    真正限制并发的是引擎侧的闸门（按引擎分池），这里只管尽快把任务送进队列。
+    """
     template_id = str(step.get("template_id") or "")
     async with async_session() as db:
         template = await db.get(Template, template_id)
@@ -266,7 +310,7 @@ async def _run_step(run: FlowRun, step: dict, step_id: str, params: dict) -> Tas
         task_id = task.id
 
     await spawn_task(task_id)
-    return await _wait_task(task_id)
+    return task_id
 
 
 async def _wait_task(task_id: str) -> Task:

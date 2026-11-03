@@ -294,6 +294,8 @@ export interface FlowStepState {
   step_id: string
   task_id: string
   status: string
+  /** 依赖分层（从 0 开始）—— 同层的步骤是同时跑的 */
+  layer?: number
   outputs?: { asset_id: string; filename: string; mime_type: string }[]
 }
 
