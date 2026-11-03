@@ -40,6 +40,7 @@ sys.modules.setdefault("app.auth", auth_stub)
 
 import app.api.assets as assets_api
 import app.api.tasks as tasks_api
+import app.asset_media as asset_media
 import app.filestore as filestore
 import app.thumbs as thumbs
 from app.config import settings
@@ -350,6 +351,7 @@ def make_asset(
 ) -> Asset:
     return Asset(
         id=asset_id,
+        owner_id="owner",
         task_id=task_id,
         file_path=file_path or f"{task_id}/{file_name}",
         file_name=file_name,
@@ -383,6 +385,9 @@ class ThumbDB:
 
     async def execute(self, _query) -> ScalarResult:
         return ScalarResult(self.asset)
+
+    async def get(self, _model, _asset_id):
+        return self.asset
 
 
 class AssetDeleteDB:
@@ -481,10 +486,9 @@ async def call_thumb(
     *,
     headers: dict[str, str] | None = None,
 ):
-    return await tasks_api.download_asset_thumb(
-        asset.task_id,
-        asset.file_name,
-        request=request(headers),
+    return await assets_api.download_asset_thumb(
+        asset.id,
+        request(headers),
         user=ADMIN,
         db=ThumbDB(asset),
     )
@@ -542,7 +546,7 @@ async def contend_for_lifecycle(key: str, acquired: asyncio.Event) -> None:
 def thumbnail_task_registries() -> list[dict]:
     return [
         value
-        for name, value in vars(tasks_api).items()
+        for name, value in vars(asset_media).items()
         if "thumb" in name.lower() and isinstance(value, dict)
     ]
 
@@ -779,7 +783,11 @@ async def test_cancelled_waiter_does_not_cancel_or_leak_generation() -> None:
         assert store.save_calls.count(derived_key) == 1, store.save_calls
 
 
-async def test_failed_image_generation_returns_404_and_cleans_inflight() -> None:
+async def test_failed_image_generation_falls_back_to_source_and_cleans_inflight() -> None:
+    """生成失败（损坏图）不再 404：回退原图保证页面能显示，并清掉 in-flight 登记。
+
+    旧行为是 404，会让前端再发一次原图请求；现在直接返回原图，少一跳。
+    """
     source_key = "task-invalid/source.png"
     derived_key = "task-invalid/thumb_source.png.jpg"
     asset = make_asset("asset-invalid", "task-invalid", "source.png", "image/png")
@@ -788,20 +796,22 @@ async def test_failed_image_generation_returns_404_and_cleans_inflight() -> None
         assert isinstance(store, TrackingLocalFileStore)
         seed_local(store, source_key, b"invalid image bytes")
         capture = LogCapture()
-        prior_level = tasks_api.logger.level
-        prior_propagate = tasks_api.logger.propagate
-        tasks_api.logger.addHandler(capture)
-        tasks_api.logger.setLevel(logging.WARNING)
-        tasks_api.logger.propagate = False
+        prior_level = asset_media.logger.level
+        prior_propagate = asset_media.logger.propagate
+        asset_media.logger.addHandler(capture)
+        asset_media.logger.setLevel(logging.WARNING)
+        asset_media.logger.propagate = False
         try:
-            await expect_http(call_thumb(asset), 404)
+            response = await call_thumb(asset)
+            assert response.status_code == 200, response.status_code
+            assert await response_bytes(response) == b"invalid image bytes"
             await wait_until(
                 lambda: all(not registry for registry in thumbnail_task_registries())
             )
         finally:
-            tasks_api.logger.removeHandler(capture)
-            tasks_api.logger.setLevel(prior_level)
-            tasks_api.logger.propagate = prior_propagate
+            asset_media.logger.removeHandler(capture)
+            asset_media.logger.setLevel(prior_level)
+            asset_media.logger.propagate = prior_propagate
         assert not store.exists(derived_key)
         assert store.save_calls.count(derived_key) == 0
         assert any(
@@ -853,7 +863,7 @@ async def test_etag_cache_headers_and_revalidation() -> None:
         seed_local(store, derived_key, existing)
         response = await call_thumb(asset)
         assert response.headers["etag"] == '"asset-etag"', response.headers
-        assert response.headers["cache-control"] == "private, no-cache", response.headers
+        assert response.headers["cache-control"] == "private, max-age=3600", response.headers
 
         store.read_calls.clear()
         revalidated = await call_thumb(
@@ -864,7 +874,7 @@ async def test_etag_cache_headers_and_revalidation() -> None:
         assert await response_bytes(revalidated) == b""
         assert source_key not in store.read_calls, store.read_calls
         assert revalidated.headers["etag"] == '"asset-etag"'
-        assert revalidated.headers["cache-control"] == "private, no-cache"
+        assert revalidated.headers["cache-control"] == "private, max-age=3600"
 
 
 async def test_missing_image_matching_etag_skips_filestore() -> None:
@@ -1597,52 +1607,49 @@ class LogCapture(logging.Handler):
 
 
 async def test_cleanup_failures_do_not_restore_database_records() -> None:
-    source_failure = make_asset(
+    """文件删不掉绝不能影响「删除记录」这个主动作，失败原因要如实上报。
+
+    素材独立化后缩略图键从 file_path 推导（不再用 task_id/file_name），
+    所以「源文件路径非法」时缩略图路径同样非法 —— 两者一起失败是预期行为，
+    正好也验证了越界路径不会把清理操作引到存储根目录之外。
+    """
+    broken = make_asset(
         "asset-source-failure",
         "task-source-failure",
         "source.png",
         "image/png",
         file_path="../outside.png",
     )
-    source_db = AssetDeleteDB(source_failure)
-    derived_key = "task-source-failure/thumb_source.png.jpg"
-    with temporary_local_store() as raw_store:
-        store = raw_store
-        assert isinstance(store, TrackingLocalFileStore)
-        seed_local(store, derived_key, b"thumb")
-        body = await assets_api.delete_asset(source_failure.id, user=ADMIN, db=source_db)
-        assert body["file_removed"] is False and body["file_error"]
-        assert body["thumbnail_removed"] is True and body["thumbnail_error"] == ""
-        assert source_db.deleted == [source_failure] and source_db.commits == 1
-
-    derivative_failure = make_asset(
-        "asset-thumb-failure",
-        "..",
-        "source.png",
-        "image/png",
-        file_path="safe/source.png",
-    )
-    derivative_db = AssetDeleteDB(derivative_failure)
+    broken_db = AssetDeleteDB(broken)
     capture = LogCapture()
     root_logger = logging.getLogger()
     root_logger.addHandler(capture)
     try:
-        with temporary_local_store() as raw_store:
-            store = raw_store
-            assert isinstance(store, TrackingLocalFileStore)
-            seed_local(store, derivative_failure.file_path, b"source")
-            body = await assets_api.delete_asset(
-                derivative_failure.id,
-                user=ADMIN,
-                db=derivative_db,
-            )
-            assert body["file_removed"] is True and body["file_error"] == ""
-            assert body["thumbnail_removed"] is False and body["thumbnail_error"]
-            assert derivative_db.deleted == [derivative_failure]
-            assert derivative_db.commits == 1
+        body = await assets_api.delete_asset(broken.id, user=ADMIN, db=broken_db)
     finally:
         root_logger.removeHandler(capture)
+
+    assert body["file_removed"] is False and body["file_error"]
+    assert body["thumbnail_removed"] is False and body["thumbnail_error"]
+    # 记录必须删掉：清理只是附带动作
+    assert broken_db.deleted == [broken] and broken_db.commits == 1
     assert any("thumbnail" in message.lower() for message in capture.messages), capture.messages
+
+    # 缩略图本来就不存在 → 不算错误，不打扰用户
+    clean = make_asset(
+        "asset-thumb-absent",
+        "task-thumb-absent",
+        "source.png",
+        "image/png",
+        file_path="safe/source.png",
+    )
+    clean_db = AssetDeleteDB(clean)
+    with temporary_local_store() as raw_store:
+        seed_local(raw_store, clean.file_path, b"source")
+        body = await assets_api.delete_asset(clean.id, user=ADMIN, db=clean_db)
+    assert body["file_removed"] is True and body["file_error"] == ""
+    assert body["thumbnail_removed"] is False and body["thumbnail_error"] == ""
+    assert clean_db.deleted == [clean] and clean_db.commits == 1
 
 
 TESTS = [
@@ -1659,10 +1666,10 @@ TESTS = [
     ("concurrent image requests generate exactly once", test_concurrent_requests_generate_once),
     ("stale second miss does not regenerate a thumbnail", test_stale_second_miss_does_not_regenerate_thumbnail),
     ("request cancellation does not cancel or leak shared generation", test_cancelled_waiter_does_not_cancel_or_leak_generation),
-    ("failed image generation returns 404 and clears in-flight state", test_failed_image_generation_returns_404_and_cleans_inflight),
+    ("failed image generation falls back to source and clears in-flight state", test_failed_image_generation_falls_back_to_source_and_cleans_inflight),
     ("missing video thumbnail does not read source", test_video_without_thumbnail_never_reads_source),
     ("audio never generates a thumbnail", test_audio_never_generates_thumbnail),
-    ("ETag, no-cache, and 304 revalidation work", test_etag_cache_headers_and_revalidation),
+    ("ETag, max-age caching, and 304 revalidation work", test_etag_cache_headers_and_revalidation),
     ("missing image revalidation skips all FileStore work", test_missing_image_matching_etag_skips_filestore),
     ("existing video revalidation returns 304", test_existing_video_matching_etag_returns_304),
     ("object-backed thumbnail streams and closes its handle", test_object_thumbnail_streams_and_closes_handle),
@@ -1689,9 +1696,8 @@ TESTS = [
 
 async def main() -> int:
     print("=== Persistent thumbnail and derived-file reliability ===")
-    with patched(tasks_api, task_owner_map=owner_map):
-        for name, test in TESTS:
-            await run_case(name, test)
+    for name, test in TESTS:
+        await run_case(name, test)
     print(f"\n{PASS} passed, {FAIL} failed")
     return int(FAIL != 0)
 

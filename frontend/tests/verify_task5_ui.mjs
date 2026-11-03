@@ -97,6 +97,31 @@ async function json(route, value, status = 200) {
   await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(value) })
 }
 
+/** 应用内提示（toast）的文本。
+ *
+ *  失败反馈已从原生 `alert()` 换成右上角 toast —— 原生弹窗样式由浏览器决定，
+ *  和界面完全脱节。所以断言不能再等 `page.on('dialog')`，得读 DOM。
+ *  `aria-live="polite"` 只有 toast 容器在用（顶部状态 chip 没有这个属性）。 */
+function toastTexts(page) {
+  return page.locator('[aria-live="polite"] button').allTextContents()
+}
+
+async function waitForToast(page, message) {
+  await waitUntil(page, async () => (await toastTexts(page)).length > 0, message)
+}
+
+/** 应用内对话框（DialogHost）：标题元素出现即为「弹出来了」。
+ *  多行失败原因（批量选素材、磁盘文件没清干净）走这里，不用 toast —— 需要用户读完。 */
+async function waitForDialog(page, message) {
+  await waitUntil(page, async () => (await page.locator('#app-dialog-title').count()) > 0, message)
+}
+
+/** 关掉信息型对话框。它是 modal，不关会挡住后面的点击。 */
+async function dismissDialog(page) {
+  await page.getByRole('button', { name: '知道了' }).click()
+  await page.locator('#app-dialog-title').waitFor({ state: 'detached' })
+}
+
 async function startPreview() {
   const child = spawn(
     process.execPath,
@@ -285,6 +310,9 @@ async function openForm(browser, { fields, assets = [], initialValues, apiHandle
 
 async function closeChecked(state) {
   await state.context.close()
+  // 原生弹窗现在是「不该出现」的东西：反馈统一走 DialogHost / toast。
+  // 留着这条断言当护栏 —— 哪天又写了 window.alert，这里会直接红。
+  assert.deepEqual(state.dialogs, [], `native browser dialogs came back: ${state.dialogs.join(' | ')}`)
   assert.deepEqual(state.consoleErrors, [], `browser console errors: ${state.consoleErrors.join('\n')}`)
 }
 
@@ -322,7 +350,7 @@ async function testSingleReplacementIsAtomic(browser) {
     const replacementVisibleWhilePending = await state.page.locator('img[alt="replacement.png"]').count()
 
     releaseSecond.resolve()
-    await waitUntil(state.page, () => Promise.resolve(state.dialogs.length === 1), 'failure alert missing')
+    await waitForToast(state.page, 'failure alert missing')
     assert.equal(oldVisibleWhilePending, 1, 'pending replacement hid the previous preview')
     assert.equal(replacementVisibleWhilePending, 0, 'pending replacement published a new preview')
     assert.equal(await state.page.locator('img[alt="old.png"]').count(), 1)
@@ -379,7 +407,7 @@ async function testMultipleUploadsStayAligned(browser) {
     releaseFirst.resolve()
 
     await waitUntil(state.page, () => Promise.resolve(attempts === 3), 'not all uploads ran')
-    await waitUntil(state.page, () => Promise.resolve(state.dialogs.length === 1), 'middle failure alert missing')
+    await waitForToast(state.page, 'middle failure alert missing')
     await state.page.locator('img[alt="third.png"]').waitFor()
     assert.equal(previewCountWhilePending, 0, 'multi upload published before engine acceptance')
     assert.equal(await state.page.locator('img[alt="failed.png"]').count(), 0)
@@ -723,7 +751,8 @@ async function testAssetMultipleUploadsStaySerialAndAligned(browser) {
     assert.equal(attempts, 2, 'asset multi upload was not serial')
     releaseSecond.resolve()
     await waitUntil(state.page, () => Promise.resolve(attempts === 3), 'third asset was not forwarded')
-    await waitUntil(state.page, () => Promise.resolve(state.dialogs.length === 1), 'asset multi failure alert missing')
+    await waitForDialog(state.page, 'asset multi failure alert missing')
+    await dismissDialog(state.page)
     await state.page.locator('img[alt="asset-third.png"]').waitFor()
     assert.equal(await state.page.locator('img[alt="asset-first.png"]').count(), 1)
     assert.equal(await state.page.locator('img[alt="asset-failed.png"]').count(), 0)
@@ -992,7 +1021,8 @@ async function testFailedAssetReplacementKeepsOldState(browser) {
     const thumbBeforeAcceptance = thumbRequests - thumbBefore
     const oldVisibleWhilePending = await state.page.locator('img[alt="old.png"]').count()
     releaseForward.resolve()
-    await waitUntil(state.page, () => Promise.resolve(state.dialogs.length === 1), 'asset failure alert missing')
+    await waitForDialog(state.page, 'asset failure alert missing')
+    await dismissDialog(state.page)
 
     assert.equal(rawBeforeAcceptance, 0, 'raw asset preview downloaded before forwarding succeeded')
     assert.equal(thumbBeforeAcceptance, 0, 'new thumbnail rendered before forwarding succeeded')
@@ -1277,8 +1307,10 @@ async function testAbortOnUnmount(browser) {
 async function testAbortOnSourceChange(browser) {
   const oldRequestStarted = deferred()
   const releaseOldRequest = deferred()
-  const oldAsset = asset('old-src.png')
-  const newAsset = { ...asset('new-src.png'), id: oldAsset.id }
+  // 缩略图 URL 用的是**素材 id**（`/api/assets/{id}/thumb`），不含文件名。
+  // 两个素材必须给不同的 id，否则两个 thumb 地址一样，分不出「旧的」和「新的」。
+  const oldAsset = asset('old-src.png', 'image/png', 'asset-old-src')
+  const newAsset = asset('new-src.png', 'image/png', 'asset-new-src')
   const state = await openForm(browser, {
     fields: [
       { name: 'single', label: 'Change media', type: 'file_upload', accept: 'image', required: false },
@@ -1289,7 +1321,7 @@ async function testAbortOnSourceChange(browser) {
         await json(route, [newAsset])
         return true
       }
-      if (url.pathname.endsWith('/old-src.png/thumb')) {
+      if (url.pathname === '/api/assets/asset-old-src/thumb') {
         oldRequestStarted.resolve()
         await releaseOldRequest.promise
         try {
@@ -1299,7 +1331,7 @@ async function testAbortOnSourceChange(browser) {
         }
         return true
       }
-      if (url.pathname.endsWith('/new-src.png/thumb')) {
+      if (url.pathname === '/api/assets/asset-new-src/thumb') {
         await route.fulfill({ status: 200, contentType: 'image/png', body: PNG })
         return true
       }
@@ -1318,7 +1350,7 @@ async function testAbortOnSourceChange(browser) {
       () =>
         state.page.evaluate(() =>
           window.__assetFetchSignals.some(
-            (record) => record.url.includes('/old-src.png/thumb') && record.aborted,
+            (record) => record.url.includes('/asset-old-src/thumb') && record.aborted,
           ),
         ),
       'source change did not abort old media request',

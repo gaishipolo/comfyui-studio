@@ -255,6 +255,95 @@ async def test_options_and_non_target_paths_are_unchanged() -> None:
         assert app.bodies == [b"body"]
 
 
+class DisconnectingReceive:
+    """模拟真实服务器：请求体读完后，再 receive() 要阻塞到断开才返回 http.disconnect。"""
+
+    def __init__(self, chunks: list[bytes]):
+        self.chunks = list(chunks)
+        self.calls = 0
+
+    async def __call__(self) -> dict:
+        self.calls += 1
+        if self.chunks:
+            body = self.chunks.pop(0)
+            return {
+                "type": "http.request",
+                "body": body,
+                "more_body": bool(self.chunks),
+            }
+        return {"type": "http.disconnect"}
+
+
+class StreamingApp:
+    """模拟 FileResponse：发完响应体后还要 await receive() 直到断开。
+
+    receive 调用次数**必须设上限**：中间件若继续伪造 `http.request`，这里要
+    立刻抛错快速失败。不能只靠外层 `wait_for` 超时 —— 那种情况下事件循环被
+    这条协程独占（`await` 一个不挂起的协程等于不让出），超时回调根本没机会
+    执行，测试会挂死而不是失败，CI 上表现为「跑不完」而不是「跑红了」。
+    """
+
+    MAX_RECEIVE_CALLS = 32
+
+    def __init__(self):
+        self.saw_disconnect = False
+        self.receive_calls = 0
+
+    async def _receive(self, receive) -> dict:
+        self.receive_calls += 1
+        if self.receive_calls > self.MAX_RECEIVE_CALLS:
+            raise AssertionError(
+                "downstream keeps calling receive(): middleware never handed "
+                "control back to the real receive()"
+            )
+        return await receive()
+
+    async def __call__(self, _scope, receive, send) -> None:
+        while True:
+            message = await self._receive(receive)
+            if message["type"] != "http.request":
+                return
+            if not message.get("more_body", False):
+                break
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"zip"})
+        while True:
+            message = await self._receive(receive)
+            if message["type"] == "http.disconnect":
+                self.saw_disconnect = True
+                return
+
+
+async def test_streaming_response_after_body_replay_terminates() -> None:
+    """回归：请求体还完后必须把 receive 交回真实实现。
+
+    旧实现无条件伪造 `http.request`，`await receive()` 因此永不挂起 —— 事件循环
+    被这条请求独占 100% CPU，响应体一个字节都发不出去，整台服务假死。
+    """
+    downstream = StreamingApp()
+    sent: list[dict] = []
+
+    async def send(message: dict) -> None:
+        sent.append(message)
+
+    middleware = ProtectedBodyLimitMiddleware(downstream)
+    await asyncio.wait_for(
+        middleware(
+            scope_for("/api/assets/batch-download", content_length=2),
+            DisconnectingReceive([b"[]"]),
+            send,
+        ),
+        timeout=2.0,
+    )
+    assert downstream.saw_disconnect is True
+    raw = b"".join(
+        message.get("body", b"")
+        for message in sent
+        if message["type"] == "http.response.body"
+    )
+    assert raw == b"zip", raw
+
+
 async def main() -> int:
     tests = [
         test_missing_bearer_is_rejected_without_consuming_body,
@@ -266,6 +355,7 @@ async def main() -> int:
         test_prepare_batch_endpoint_shares_batch_limit,
         test_audio_video_raw_allowance_boundaries_reach_app,
         test_options_and_non_target_paths_are_unchanged,
+        test_streaming_response_after_body_replay_terminates,
     ]
     failures: list[str] = []
     for test in tests:

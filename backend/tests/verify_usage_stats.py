@@ -22,6 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from test_env import API_BASE_URL  # noqa: E402
+from app.timeutils import parse_day  # noqa: E402
 
 BASE = API_BASE_URL
 DB_PATH = Path(__file__).resolve().parents[1] / "workbench.db"
@@ -68,8 +69,13 @@ TPL_ID = tpl["id"]
 
 SEEDED_TASKS: list[str] = []
 
-OLD = datetime(2026, 10, 1, 12, 0, 0)   # 老任务日
+OLD = datetime(2026, 10, 1, 12, 0, 0)   # 老任务日（本地墙钟，用于拼查询串）
 TODAY = datetime.now().replace(microsecond=0)  # 新任务日
+# ⚠️ 入库的 created_at 必须是 **naive UTC**：库里存 UTC，而 date_from/date_to 是
+# 「本地日期 → UTC」解析的。直接塞本地时间，傍晚之后（本地 > 当日 15:59 UTC 上界）
+# 就会全部落在区间外，测试变成「只有白天通过」。用同一个 parse_day 换算。
+OLD_DB = parse_day(OLD.isoformat())
+TODAY_DB = parse_day(TODAY.isoformat())
 
 
 def snapshot(token, q=""):
@@ -110,7 +116,7 @@ async def seed(owner_id: str, status: str, created_at: datetime,
         abs_path.parent.mkdir(parents=True, exist_ok=True)
         abs_path.write_bytes(b"\x89PNG-test-bytes")
         db.add(Asset(
-            id=aid, task_id=task_id, file_path=rel,
+            id=aid, owner_id=owner_id, task_id=task_id, file_path=rel,
             file_name="u.png", file_size=file_size,
             mime_type="image/png", tags=[], meta={},
             created_at=created_at,
@@ -130,13 +136,13 @@ base_by, base_t = snapshot(ADMIN_T)
 base_old, _ = snapshot(ADMIN_T, Q_OLD)
 base_today, _ = snapshot(ADMIN_T, Q_TODAY)
 
-asyncio.run(seed(ADMIN_ID, "done", OLD, 100, 1000))
-asyncio.run(seed(ADMIN_ID, "done", TODAY, 200, 2000))
-asyncio.run(seed(ADMIN_ID, "done", TODAY, 400, 3000))
-asyncio.run(seed(ADMIN_ID, "error", TODAY, None, 4000))
-asyncio.run(seed(ADMIN_ID, "cancelled", TODAY, None, 5000))
-asyncio.run(seed(MEMBER_ID, "done", TODAY, 60, 6000))
-asyncio.run(seed(MEMBER_ID, "done", TODAY, 180, 7000))
+asyncio.run(seed(ADMIN_ID, "done", OLD_DB, 100, 1000))
+asyncio.run(seed(ADMIN_ID, "done", TODAY_DB, 200, 2000))
+asyncio.run(seed(ADMIN_ID, "done", TODAY_DB, 400, 3000))
+asyncio.run(seed(ADMIN_ID, "error", TODAY_DB, None, 4000))
+asyncio.run(seed(ADMIN_ID, "cancelled", TODAY_DB, None, 5000))
+asyncio.run(seed(MEMBER_ID, "done", TODAY_DB, 60, 6000))
+asyncio.run(seed(MEMBER_ID, "done", TODAY_DB, 180, 7000))
 
 print("\n=== 1. 权限 ===")
 st, d = req("/stats/usage", token=ADMIN_T)

@@ -82,7 +82,7 @@ async def fixture(prefix: str):
             ))
             await db.commit()
         save_asset_file(f"{task_id}/image.png", b"source", "image/png")
-        save_asset_file(thumb_key(task_id, "image.png"), b"thumb", "image/jpeg")
+        save_asset_file(thumb_key(f"{task_id}/image.png"), b"thumb", "image/jpeg")
         try:
             yield sessions, task_id, asset_id
         finally:
@@ -139,7 +139,7 @@ async def test_asset_delete_then_retry_serializes_without_stale_rows() -> None:
         assert retried.status == "pending"
         assert await db_counts(sessions, task_id) == (0, 1, "pending")
         assert not asset_exists(f"{task_id}/image.png")
-        assert not asset_exists(thumb_key(task_id, "image.png"))
+        assert not asset_exists(thumb_key(f"{task_id}/image.png"))
 
 
 async def test_retry_then_asset_delete_reloads_current_asset() -> None:
@@ -161,7 +161,7 @@ async def test_retry_then_asset_delete_reloads_current_asset() -> None:
         assert delete_result.status_code == 404, delete_result
         assert await db_counts(sessions, task_id) == (0, 1, "pending")
         assert not asset_exists(f"{task_id}/image.png")
-        assert not asset_exists(thumb_key(task_id, "image.png"))
+        assert not asset_exists(thumb_key(f"{task_id}/image.png"))
 
 
 async def test_task_delete_then_asset_delete_returns_404_not_500() -> None:
@@ -182,7 +182,7 @@ async def test_task_delete_then_asset_delete_returns_404_not_500() -> None:
         assert asset_result.status_code == 404, asset_result
         assert await db_counts(sessions, task_id) == (0, 0, None)
         assert not asset_exists(f"{task_id}/image.png")
-        assert not asset_exists(thumb_key(task_id, "image.png"))
+        assert not asset_exists(thumb_key(f"{task_id}/image.png"))
 
 
 async def test_cancelled_asset_delete_keeps_task_ownership_until_commit() -> None:
@@ -191,11 +191,11 @@ async def test_cancelled_asset_delete_keeps_task_ownership_until_commit() -> Non
         release = threading.Event()
         real_cleanup = cleanup_asset_files
 
-        def blocking_cleanup(file_path: str, owner_task_id: str, file_name: str):
+        def blocking_cleanup(file_path: str, file_name: str):
             started.set()
             if not release.wait(timeout=5):
                 raise RuntimeError("cleanup gate timed out")
-            return real_cleanup(file_path, owner_task_id, file_name)
+            return real_cleanup(file_path, file_name)
 
         acquired = asyncio.Event()
 
@@ -223,7 +223,7 @@ async def test_cancelled_asset_delete_keeps_task_ownership_until_commit() -> Non
         assert cancelled, "caller cancellation did not propagate after child completion"
         assert await db_counts(sessions, task_id) == (0, 1, "cancelled")
         assert not asset_exists(f"{task_id}/image.png")
-        assert not asset_exists(thumb_key(task_id, "image.png"))
+        assert not asset_exists(thumb_key(f"{task_id}/image.png"))
 
 
 async def test_session_bound_user_survives_hint_transaction_reset() -> None:
@@ -236,7 +236,7 @@ async def test_session_bound_user_survives_hint_transaction_reset() -> None:
         assert result["id"] == asset_id
         assert await db_counts(sessions, task_id) == (0, 1, "cancelled")
         assert not asset_exists(f"{task_id}/image.png")
-        assert not asset_exists(thumb_key(task_id, "image.png"))
+        assert not asset_exists(thumb_key(f"{task_id}/image.png"))
 
 
 async def main() -> int:

@@ -92,10 +92,10 @@ check("B9 include_inactive 返回全量模板", code == 200 and code2 == 200
 
 # ── 4. B2: 路径穿越必须 404 ──
 trav = urllib.parse.quote("../../workbench.db", safe="")
-code, _ = req("GET", f"/api/tasks/x/assets/{trav}", token=token)
-check("B2 文件名穿越被拒", code == 404, f"code={code}")
-code, _ = req("GET", "/api/tasks/..%2F..%2F/assets/x.png", token=token)
-check("B2 task_id 穿越被拒", code == 404, f"code={code}")
+code, _ = req("GET", f"/api/assets/{trav}/file", token=token)
+check("B2 素材 id 穿越被拒", code == 404, f"code={code}")
+code, _ = req("GET", "/api/assets/..%2F..%2F/thumb", token=token)
+check("B2 缩略图 id 穿越被拒", code == 404, f"code={code}")
 
 # ── 5. 素材下载回归 ──
 # 不能盲取 assets[0]：素材库是共享的，最新一条可能是别处留下的小文件/测试残留。
@@ -104,8 +104,7 @@ code, assets = req("GET", "/api/assets", token=token)
 real_assets = [x for x in assets if (x.get("file_size") or 0) > 1000] if isinstance(assets, list) else []
 if real_assets:
     a = real_assets[0]
-    fname = urllib.parse.quote(a["file_name"], safe="")
-    code, content = req("GET", f"/api/tasks/{a['task_id']}/assets/{fname}", token=token, raw=True)
+    code, content = req("GET", f"/api/assets/{a['id']}/file", token=token, raw=True)
     check("素材下载回归", code == 200 and len(content) > 1000, f"code={code} bytes={len(content)}")
 else:
     check("素材下载回归", False, "无 >1KB 的真实素材可测")

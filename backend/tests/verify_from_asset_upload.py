@@ -95,7 +95,7 @@ async def seed(owner_id: str, shared: bool = False):
             params={}, result={}, error_msg="",
         ))
         db.add(Asset(
-            id=aid, task_id=task_id, file_path=rel,
+            id=aid, owner_id=owner_id, task_id=task_id, file_path=rel,
             file_name="ref.png", file_size=abs_path.stat().st_size,
             mime_type="image/png", tags=[], meta={}, is_shared=shared,
         ))

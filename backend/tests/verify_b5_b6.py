@@ -105,7 +105,7 @@ def returned_task_ids(payload) -> list[str]:
     ]
 
 
-class _B5FakeGenericProvider:
+class _B5FakeProvider:
     def __init__(self):
         self.submit_calls: list[tuple[dict, dict]] = []
         self.status_calls: list[str] = []
@@ -125,7 +125,7 @@ class _B5FakeGenericProvider:
 
 
 async def verify_b5_in_process(check) -> bool:
-    provider = _B5FakeGenericProvider()
+    provider = _B5FakeProvider()
     original_session_factory = task_service_module.async_session
     original_acquire_provider = task_service_module.acquire_provider
     conditions: list[bool] = []
@@ -148,8 +148,8 @@ async def verify_b5_in_process(check) -> bool:
 
         def fake_get_provider(engine_name: str):
             verify(
-                "B5 in-process 只请求 generic_api Provider",
-                engine_name == "generic_api",
+                "B5 in-process 只请求模板指定的 Provider",
+                engine_name == "fake_engine",
                 repr(engine_name),
             )
             return provider
@@ -163,7 +163,7 @@ async def verify_b5_in_process(check) -> bool:
                         id=template_id,
                         name="B5 in-process generic fixture",
                         category="image",
-                        engine="generic_api",
+                        engine="fake_engine",
                         workflow_file="",
                         input_schema={"fields": []},
                         param_mapping={},
@@ -439,7 +439,7 @@ def main() -> int:
                     thumb_format = thumb_image.format or ""
             except Exception:
                 pass
-            persistent_key = thumb_key(b6_task_id, asset["file_name"])
+            persistent_key = thumb_key(asset["file_path"])
             smaller_when_meaningful = (
                 max(source_size or (0, 0)) <= 400 or len(thumb_bytes) < len(source_bytes)
             )
@@ -493,7 +493,7 @@ def main() -> int:
                 check(
                     f"素材文件已清理 {asset['file_name']}",
                     not asset_exists(asset["file_path"])
-                    and not asset_exists(thumb_key(task_id, asset["file_name"])),
+                    and not asset_exists(thumb_key(asset["file_path"])),
                     asset["file_path"],
                 )
 

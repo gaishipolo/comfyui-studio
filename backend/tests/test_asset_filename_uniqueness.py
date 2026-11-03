@@ -8,10 +8,28 @@ from app.asset_names import unique_asset_name  # noqa: E402
 from app.models.models import Asset  # noqa: E402
 
 
-def test_asset_model_has_task_filename_unique_index() -> None:
-    indexes = [index for index in Asset.__table__.indexes if index.unique]
-    columns = [{column.name for column in index.columns} for index in indexes]
-    assert {"task_id", "file_name"} in columns, columns
+def test_asset_model_has_no_task_filename_unique_index() -> None:
+    """`(task_id, file_name)` 唯一索引必须**不存在**。
+
+    素材独立化后 `task_id` 可为空（用户上传没有来源任务），而 SQLite 认为
+    NULL 互不相等 —— 那个唯一索引对上传素材完全失效，留着只会造成「生成素材
+    受唯一约束、上传素材不受」的假安全感。去重改由 `unique_asset_name()`
+    在应用层做（上传按 owner_id 查重）。
+    """
+    unique_columns = [
+        {column.name for column in index.columns}
+        for index in Asset.__table__.indexes
+        if index.unique
+    ]
+    assert {"task_id", "file_name"} not in unique_columns, unique_columns
+
+    # 归属查询的主力索引还在：素材库按 owner + 时间倒序翻页
+    plain_columns = [
+        tuple(column.name for column in index.columns)
+        for index in Asset.__table__.indexes
+        if not index.unique
+    ]
+    assert ("owner_id", "created_at") in plain_columns, plain_columns
 
 
 def test_duplicate_names_receive_stable_suffix() -> None:
@@ -32,7 +50,7 @@ def test_generated_name_respects_column_width() -> None:
 
 def main() -> int:
     tests = [
-        test_asset_model_has_task_filename_unique_index,
+        test_asset_model_has_no_task_filename_unique_index,
         test_duplicate_names_receive_stable_suffix,
         test_generated_name_respects_column_width,
     ]

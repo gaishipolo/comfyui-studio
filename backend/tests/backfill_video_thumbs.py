@@ -40,7 +40,7 @@ def main() -> int:
 
     done = skipped = failed = 0
     for r in rows:
-        key = thumb_key(r["task_id"], r["file_name"])
+        key = thumb_key(r["file_path"])
         if open_asset(key) is not None:
             skipped += 1
             continue

@@ -91,6 +91,7 @@ def make_asset(
 ) -> Asset:
     return Asset(
         id=asset_id,
+        owner_id="owner",
         task_id=task_id,
         file_path=f"{task_id}/{asset_id}.bin",
         file_name=file_name,
@@ -100,6 +101,16 @@ def make_asset(
         meta={},
         is_shared=False,
     )
+
+
+def entry(asset: Asset) -> tuple[str, str, str]:
+    """`_build_batch_archive` 的入参形态：**纯数据元组**，不是 ORM 实例。
+
+    它跑在 `asyncio.to_thread` 的工作线程里，而 async session 的 ORM 实例绑在
+    事件循环的 greenlet 上 —— 在线程里碰属性会触发懒加载并卡死，所以生产代码
+    在起线程前就把字段摘干净，测试必须照着同样的契约喂数据。
+    """
+    return (asset.file_path, asset.file_name, asset.task_id or "")
 
 
 class FakeScalars:
@@ -141,10 +152,6 @@ class ReportedSizeBytes(bytes):
 
     def __len__(self) -> int:
         return self.reported_size
-
-
-async def owner_map(_db, task_ids: set[str]) -> dict[str, str]:
-    return {task_id: "owner" for task_id in task_ids}
 
 
 ADMIN = SimpleNamespace(id="admin", role="admin")
@@ -261,7 +268,6 @@ async def test_metadata_limit_precedes_archive_creation() -> None:
         _build_batch_archive=forbidden_builder,
         open_asset=forbidden_file_work,
         read_asset_bytes=forbidden_file_work,
-        task_owner_map=owner_map,
     ):
         await expect_http(
             assets_api.batch_download([asset.id], user=ADMIN, db=db),
@@ -309,7 +315,7 @@ async def test_actual_size_limit_removes_partial_and_closes_handle() -> None:
         ),
     ):
         try:
-            builder()([asset])
+            builder()([entry(asset)])
         except HTTPException as exc:
             assert exc.status_code == 400
         else:
@@ -333,7 +339,7 @@ async def test_actual_size_limit_allows_exactly_1_gib() -> None:
             AssertionError("whole-file reads are forbidden")
         ),
     ):
-        path = builder()([asset])
+        path = builder()([entry(asset)])
         assert path.exists() and path.parent == root
         assert closed == [asset.file_path]
         cleanup(path)
@@ -361,7 +367,7 @@ async def test_archive_names_are_safe_unique_basenames() -> None:
             AssertionError("whole-file reads are forbidden")
         ),
     ):
-        path = builder()(assets)
+        path = builder()([entry(asset) for asset in assets])
         assert path.parent == root
         assert path.exists()
         with zipfile.ZipFile(path) as archive:
@@ -393,7 +399,7 @@ async def test_missing_selected_member_fails_and_removes_partial_archive() -> No
         open_asset=open_asset,
     ):
         try:
-            builder()([present, missing])
+            builder()([entry(present), entry(missing)])
         except HTTPException as exc:
             assert exc.status_code == 404, exc
             assert exc.detail == "Selected asset file is missing", exc.detail
@@ -414,7 +420,6 @@ async def test_filestore_failure_maps_to_503_and_cleans_partial_archive() -> Non
     with temporary_archive_dir() as root, patched(
         assets_api,
         open_asset=unavailable,
-        task_owner_map=owner_map,
     ):
         await expect_http(
             assets_api.batch_download([present.id], user=ADMIN, db=db),
@@ -466,7 +471,6 @@ async def make_response(asset: Asset, payload: bytes) -> tuple[FileResponse, lis
         read_asset_bytes=lambda _path: (_ for _ in ()).throw(
             AssertionError("whole-file reads are forbidden")
         ),
-        task_owner_map=owner_map,
     ):
         response = await assets_api.batch_download([asset.id], user=ADMIN, db=db)
     assert isinstance(response, FileResponse), type(response)
@@ -579,7 +583,6 @@ async def test_request_cancellation_removes_late_archive() -> None:
         assets_api,
         _build_batch_archive=recording_builder,
         open_asset=blocking_open_asset,
-        task_owner_map=owner_map,
     ):
         request = asyncio.create_task(
             assets_api.batch_download([asset.id], user=ADMIN, db=db)
@@ -647,7 +650,6 @@ async def test_cancelled_failing_worker_exception_is_consumed() -> None:
             assets_api,
             _build_batch_archive=recording_builder,
             open_asset=blocking_open_asset,
-            task_owner_map=owner_map,
         ):
             request = asyncio.create_task(
                 assets_api.batch_download([asset.id], user=ADMIN, db=db)

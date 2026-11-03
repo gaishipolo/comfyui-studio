@@ -409,10 +409,12 @@ ts_src = py_sources.get("task_service.py", "")
 report("_save_asset 的存储键用 POSIX 分隔符", 'f"{task.id}/{safe_name}"' in ts_src)
 report("_save_asset 不再自己 mkdir / write_bytes", "write_bytes" not in ts_src)
 
-tasks_src = py_sources.get("tasks.py", "")
-report("下载接口不再假设本地路径", "asset_disk_path" not in tasks_src)
-report("下载接口保留 FileResponse 分支（本地走 Range）", "FileResponse(" in tasks_src)
-report("下载接口有流式兜底", "StreamingResponse(" in tasks_src)
+# 素材文件的读取/下载已从 tasks.py 抽到 asset_media.py（素材可脱离任务独立存在，
+# 路由也搬到了 /api/assets/{id}/file|thumb），守卫跟着搬。
+media_src = py_sources.get("asset_media.py", "")
+report("下载接口不再假设本地路径", "asset_disk_path" not in media_src)
+report("下载接口保留 FileResponse 分支（本地走 Range）", "FileResponse(" in media_src)
+report("下载接口有流式兜底", "StreamingResponse(" in media_src)
 
 fs_src = py_sources.get("filestore.py", "")
 report("filestore 里 minio 是懒导入（本地模式不被依赖绑住）",

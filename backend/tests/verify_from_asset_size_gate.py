@@ -75,6 +75,7 @@ def make_asset(
 ):
     return SimpleNamespace(
         id=asset_id,
+        owner_id="owner",
         task_id="task-id",
         file_path="task-id/input.png",
         file_name="input.png",
@@ -84,12 +85,8 @@ def make_asset(
     )
 
 
-async def owner_map(_db, task_ids: set[str]) -> dict[str, str]:
-    return {task_id: "owner" for task_id in task_ids}
-
-
 @contextmanager
-def route_dependencies(*, provider, open_asset, read_asset_bytes, owners=owner_map):
+def route_dependencies(*, provider, open_asset, read_asset_bytes):
     with ExitStack() as stack:
         stack.enter_context(patch.object(
             uploads_api,
@@ -100,7 +97,6 @@ def route_dependencies(*, provider, open_asset, read_asset_bytes, owners=owner_m
         # imports open_asset.
         stack.enter_context(patch.object(uploads_api, "open_asset", open_asset, create=True))
         stack.enter_context(patch.object(uploads_api, "read_asset_bytes", read_asset_bytes))
-        stack.enter_context(patch.object(uploads_api, "task_owner_map", owners))
         yield
 
 

@@ -75,6 +75,7 @@ DESTRUCTIVE_LIVE_SCRIPTS = [
     "verify_plugin_loader.py",
     "verify_schema_normalization.py",
     "verify_template_export.py",
+    "verify_thumbnail_perf.py",
     "verify_upload_kinds.py",
     "verify_usage_stats.py",
     "verify_user_isolation.py",

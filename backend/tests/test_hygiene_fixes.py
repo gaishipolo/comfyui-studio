@@ -16,8 +16,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.api import assets as assets_api  # noqa: E402
 from app.api import uploads as uploads_api  # noqa: E402
-from app.engines.base import TaskStatus  # noqa: E402
-from app.engines.generic_api import GenericAPIProvider  # noqa: E402
 from app.models.models import Asset  # noqa: E402
 from app.services.task_service import TaskService  # noqa: E402
 from app.schemas.auth_schemas import LoginRequest, RegisterRequest, UserUpdateRequest  # noqa: E402
@@ -44,6 +42,7 @@ class TagAssetDB:
     def __init__(self, tags):
         self.asset = Asset(
             id="asset",
+            owner_id="owner",
             task_id="task",
             file_path="task/file.png",
             file_name="file.png",
@@ -77,27 +76,6 @@ def test_upload_fallback_filename_uses_allowed_extension() -> None:
     assert uploads_api._fallback_filename("video").endswith(".mp4")
 
 
-def test_generic_status_404_is_terminal_error() -> None:
-    provider = GenericAPIProvider({})
-
-    class Response:
-        status_code = 404
-
-    result = provider._status_http_error("missing", Response())
-    assert result.status == TaskStatus.ERROR, result
-    assert "not found" in result.error.lower(), result.error
-
-
-def test_generic_progress_is_validated_and_clamped() -> None:
-    normalize = GenericAPIProvider._normalize_progress
-    assert normalize("75.5") == 75.5
-    assert normalize(-4) == 0.0
-    assert normalize(120) == 100.0
-    assert normalize("not-a-number") == 50.0
-    assert normalize(None) == 50.0
-    assert normalize(float("nan")) == 50.0
-
-
 def _max_length(field) -> int | None:
     for meta in getattr(field, "metadata", []):
         if type(meta).__name__ == "MaxLen":
@@ -115,22 +93,17 @@ def test_tag_query_parameters_are_length_bounded() -> None:
 def test_remove_tag_is_case_insensitive_and_rejects_long_values() -> None:
     user = SimpleNamespace(id="owner", role="member")
 
-    async def owner_of(_db, _asset):
-        return "owner"
-
     db = TagAssetDB(["Foo", "Bar"])
-    with patch.object(assets_api, "_owner_of", owner_of):
-        result = asyncio.run(assets_api.remove_tag("asset", "foo", user=user, db=db))
+    result = asyncio.run(assets_api.remove_tag("asset", "foo", user=user, db=db))
     assert result == {"tags": ["Bar"]}, result
     assert db.commits == 1
 
-    with patch.object(assets_api, "_owner_of", owner_of):
-        try:
-            asyncio.run(assets_api.remove_tag("asset", "x" * 65, user=user, db=db))
-        except HTTPException as exc:
-            assert exc.status_code == 400, exc.status_code
-        else:
-            raise AssertionError("overlong tag was accepted")
+    try:
+        asyncio.run(assets_api.remove_tag("asset", "x" * 65, user=user, db=db))
+    except HTTPException as exc:
+        assert exc.status_code == 400, exc.status_code
+    else:
+        raise AssertionError("overlong tag was accepted")
 
 
 def test_schema_strings_match_database_column_widths() -> None:
@@ -154,40 +127,15 @@ def test_task_service_uses_logger_not_print() -> None:
     assert "print(" not in inspect.getsource(TaskService)
 
 
-def test_generic_clients_use_independent_timeouts_and_reuse_download_pool() -> None:
-    async def scenario() -> None:
-        provider = GenericAPIProvider({
-            "api_key": "secret",
-            "timeout": 17,
-            "download_timeout": 23,
-        })
-        assert provider.timeout == 17
-        assert provider.download_timeout == 23
-        api_client = await provider._get_client()
-        download_one = await provider._get_download_client()
-        download_two = await provider._get_download_client()
-        assert download_one is download_two
-        assert api_client.timeout.read == 17
-        assert download_one.timeout.read == 23
-        assert provider.key_header not in download_one.headers
-        await provider.close()
-        assert api_client.is_closed and download_one.is_closed
-
-    asyncio.run(scenario())
-
-
 def main() -> int:
     tests = [
         test_asset_response_keeps_relative_filestore_key,
         test_tag_counts_trim_and_merge_case_variants,
         test_upload_fallback_filename_uses_allowed_extension,
-        test_generic_status_404_is_terminal_error,
-        test_generic_progress_is_validated_and_clamped,
         test_tag_query_parameters_are_length_bounded,
         test_remove_tag_is_case_insensitive_and_rejects_long_values,
         test_schema_strings_match_database_column_widths,
         test_task_service_uses_logger_not_print,
-        test_generic_clients_use_independent_timeouts_and_reuse_download_pool,
     ]
     failures: list[str] = []
     for test in tests:

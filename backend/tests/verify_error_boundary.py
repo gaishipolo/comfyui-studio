@@ -601,6 +601,8 @@ async def main():
                 settings.WORKFLOW_DIR = original_workflow_dir
 
         asset = SimpleNamespace(
+            id="asset-id",
+            owner_id="owner",
             task_id="upload-owner-task",
             is_shared=False,
             mime_type="image/png",
@@ -619,15 +621,11 @@ async def main():
             state["released"] = release.wait(timeout=1.0)
             return b"asset-bytes"
 
-        async def fake_owner_map(db, task_ids):
-            return {"upload-owner-task": "owner"}
-
         async def fake_forward(engine_name, data, filename):
             return "engine-input.png"
 
         with patch.object(uploads_api, "open_asset", lambda _path: ObjectHandle(size=16)), \
                 patch.object(uploads_api, "read_asset_bytes", blocking_asset_read), \
-                patch.object(uploads_api, "task_owner_map", fake_owner_map), \
                 patch.object(uploads_api, "_forward_to_engine", fake_forward):
             await run_blocking_gate(
                 "from-asset reads run outside the event loop",
@@ -642,7 +640,7 @@ async def main():
             )
 
         fake_db = FakeAssetDb()
-        task = SimpleNamespace(id="asset-task", params={})
+        task = SimpleNamespace(id="asset-task", params={}, created_by="owner")
         template = SimpleNamespace(category="image")
         started = threading.Event()
         release = threading.Event()

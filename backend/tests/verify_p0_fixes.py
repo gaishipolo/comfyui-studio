@@ -305,9 +305,11 @@ def archive_contract() -> None:
     print("\n=== temporary archive contract ===")
     payloads = {"first": b"one", "second": b"two"}
     closed: list[str] = []
-    assets = [
-        SimpleNamespace(file_path="first", file_name="../same.png", task_id="task-one"),
-        SimpleNamespace(file_path="second", file_name="..\\same.png", task_id="task-two"),
+    # _build_batch_archive 收的是纯数据元组 (file_path, file_name, task_id)：
+    # 它跑在 to_thread 的工作线程里，不能碰 ORM 实例
+    entries = [
+        ("first", "../same.png", "task-one"),
+        ("second", "..\\same.png", "task-two"),
     ]
 
     def open_fixture(key: str):
@@ -320,7 +322,7 @@ def archive_contract() -> None:
     archive_path: Path | None = None
     try:
         with patch.object(assets_api, "open_asset", open_fixture):
-            archive_path = assets_api._build_batch_archive(assets)
+            archive_path = assets_api._build_batch_archive(entries)
         with zipfile.ZipFile(archive_path) as archive:
             names = archive.namelist()
             contents = {archive.read(name) for name in names}
@@ -452,15 +454,11 @@ def thumbnail_contract() -> None:
         settings.STORAGE_DIR = Path(raw_dir)
         filestore.reset_store()
         source_key = "task-p0/source.png"
-        derived_key = thumb_key("task-p0", "source.png")
+        derived_key = thumb_key(source_key)
         try:
             filestore.save_asset_file(source_key, b"source", "image/png")
             filestore.save_asset_file(derived_key, thumbnail or b"thumbnail", "image/jpeg")
-            source_result, thumbnail_result = cleanup_asset_files(
-                source_key,
-                "task-p0",
-                "source.png",
-            )
+            source_result, thumbnail_result = cleanup_asset_files(source_key, "source.png")
             report("media cleanup removes the source", source_result == (True, ""), source_result)
             report(
                 "media cleanup removes the derived thumbnail",

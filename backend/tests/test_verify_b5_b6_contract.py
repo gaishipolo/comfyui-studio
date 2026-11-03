@@ -170,7 +170,6 @@ def run_verifier(
         root = Path(raw_dir)
         env = os.environ.copy()
         env.pop("COMFYUI_STUDIO_TEST_GENERIC_BASE_URL", None)
-        env.pop("GENERIC_API_BASE_URL", None)
         if template_id is None:
             env.pop("COMFYUI_STUDIO_B5_B6_TEMPLATE_ID", None)
         else:

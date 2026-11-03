@@ -113,7 +113,7 @@ async def seed(owner_id: str, n_assets: int, status: str = "done"):
             abs_path.parent.mkdir(parents=True, exist_ok=True)
             abs_path.write_bytes(b"\x89PNG-test-bytes")
             db.add(Asset(
-                id=aid, task_id=task_id, file_path=rel,
+                id=aid, owner_id=owner_id, task_id=task_id, file_path=rel,
                 file_name=f"img_{i}.png", file_size=14,
                 mime_type="image/png", tags=["deltest-iso"], meta={},
             ))
@@ -201,9 +201,9 @@ report("B 拉 A 的素材详情 404", st == 404, f"status={st}")
 st, _ = req(f"/assets/{a_id}", token=A_T)
 report("A 拉自己的素材详情 200", st == 200)
 
-st, _ = req_raw(f"/tasks/{t_a2}/assets/{a_name}", token=B_T)
+st, _ = req_raw(f"/assets/{a_id}/file", token=B_T)
 report("B 下载 A 的素材 404", st == 404, f"status={st}")
-st, _ = req_raw(f"/tasks/{t_a2}/assets/{a_name}", token=A_T)
+st, _ = req_raw(f"/assets/{a_id}/file", token=A_T)
 report("A 下载自己的素材 200", st == 200, f"status={st}")
 
 st, d = req(f"/assets/{a_id}/tags?tag=x", "POST", token=B_T)
@@ -230,7 +230,7 @@ report("共享素材带来源人（B 视角）",
 
 st, _ = req(f"/assets/{a_id}", token=B_T)
 report("共享后 B 拉详情 200", st == 200)
-st, _ = req_raw(f"/tasks/{t_a2}/assets/{a_name}", token=B_T)
+st, _ = req_raw(f"/assets/{a_id}/file", token=B_T)
 report("共享后 B 能下载", st == 200, f"status={st}")
 
 st, d = req(f"/assets/{a_id}/tags?tag=x", "POST", token=B_T)

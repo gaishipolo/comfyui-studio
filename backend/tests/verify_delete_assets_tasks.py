@@ -294,9 +294,11 @@ async def cleanup():
             r = await db.execute(select(Asset).where(Asset.task_id == tid))
             for a in r.scalars().all():
                 # 用应用自己的 filestore helper：自带穿越守卫，且吞掉本环境
-                # safe-delete 钩子抛的 SystemExit，清理不会因为环境拦一下就崩
-                from app.filestore import delete_asset_file
-                delete_asset_file(a.file_path)
+                # safe-delete 钩子抛的 SystemExit，清理不会因为环境拦一下就崩。
+                # 走 cleanup_asset_files 而不是裸 delete_asset_file —— 它连缩略图
+                # 和「删空了的目录」一起收，否则每跑一次就在 storage 下留一堆空壳。
+                from app.thumbs import cleanup_asset_files
+                cleanup_asset_files(a.file_path, a.file_name)
                 await db.delete(a)
             t = await db.get(Task, tid)
             if t:

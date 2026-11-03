@@ -273,7 +273,7 @@ async def test_cancel_wins_while_done_output_save_is_blocked() -> None:
         assert task.status == "cancelled", task.status
         assert asset_count == 0, asset_count
         assert not asset_exists(f"{task_id}/clip.mp4")
-        assert not asset_exists(thumb_key(task_id, "clip.mp4"))
+        assert not asset_exists(thumb_key(f"{task_id}/clip.mp4"))
 
 
 async def test_cancel_wins_over_provider_error_completion() -> None:

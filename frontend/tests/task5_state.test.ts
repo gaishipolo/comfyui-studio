@@ -344,9 +344,9 @@ test('switching away from ComfyUI clears hidden workflow configuration', () => {
     param_mapping: { prompt: '1.inputs.text' },
     output_config: { nodes: ['9'] },
   }
-  const switched = applyTemplateEngine(form, 'generic_api')
+  const switched = applyTemplateEngine(form, 'agnes')
   assert.deepEqual(switched, {
-    engine: 'generic_api',
+    engine: 'agnes',
     capability: '',
     workflow_file: '',
     param_mapping: {},
@@ -356,7 +356,7 @@ test('switching away from ComfyUI clears hidden workflow configuration', () => {
 
 test('non-ComfyUI save payload is defensively normalized', () => {
   const normalized = normalizeTemplateEngineFields({
-    engine: 'generic_api',
+    engine: 'agnes',
     workflow_file: 'stale.json',
     param_mapping: { prompt: '1.inputs.text' },
     output_config: { nodes: ['9'] },

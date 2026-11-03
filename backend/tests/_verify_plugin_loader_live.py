@@ -228,7 +228,7 @@ st, lst = req("/plugins", token=ADMIN_T)
 report("GET /plugins 200", st == 200)
 by_name = {p["name"]: p for p in lst}
 report("内置 comfyui 在列且 builtin", by_name.get("comfyui", {}).get("builtin") is True)
-report("内置 generic_api 在列", "generic_api" in by_name)
+report("已移除的内置 generic_api 不在列", "generic_api" not in by_name)
 plug = by_name.get("deltest_plug", {})
 report("插件在列且非内置", plug.get("builtin") is False, f"got {plug.get('builtin')}")
 report("插件已启用", plug.get("enabled") is True)

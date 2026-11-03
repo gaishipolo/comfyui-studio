@@ -14,7 +14,8 @@ from fastapi import HTTPException
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import filestore  # noqa: E402
-from app.api import tasks as tasks_api  # noqa: E402
+from app import asset_media  # noqa: E402
+from app.api import assets as assets_api  # noqa: E402
 from app.filestore import MinioFileStore  # noqa: E402
 from app.models.models import Asset  # noqa: E402
 
@@ -48,6 +49,9 @@ class AssetDB:
     async def execute(self, _query):
         return ScalarResult(self.asset)
 
+    async def get(self, _model, _asset_id):
+        return self.asset
+
 
 class BlockingStatClient:
     def __init__(self):
@@ -76,6 +80,7 @@ class ErrorStatClient:
 def make_asset() -> SimpleNamespace:
     return SimpleNamespace(
         id="asset-id",
+        owner_id="owner",
         task_id="task-id",
         file_path="task-id/file.png",
         file_name="file.png",
@@ -83,10 +88,6 @@ def make_asset() -> SimpleNamespace:
         mime_type="image/png",
         is_shared=False,
     )
-
-
-async def owner_map(_db, task_ids: set[str]) -> dict[str, str]:
-    return {task_id: "owner" for task_id in task_ids}
 
 
 async def test_slow_minio_stat_stays_off_loop_and_maps_auth_failure_to_503() -> None:
@@ -104,9 +105,8 @@ async def test_slow_minio_stat_stays_off_loop_and_maps_auth_failure_to_503() -> 
 
     async def operation() -> HTTPException:
         try:
-            await tasks_api.download_asset(
-                "task-id",
-                "file.png",
+            await assets_api.download_asset_file(
+                "asset-id",
                 user=USER,
                 db=AssetDB(make_asset()),
             )
@@ -114,10 +114,7 @@ async def test_slow_minio_stat_stays_off_loop_and_maps_auth_failure_to_503() -> 
             return exc
         raise AssertionError("operational FileStore failure did not fail")
 
-    with (
-        patch.object(tasks_api, "open_asset", store.open),
-        patch.object(tasks_api, "task_owner_map", owner_map),
-    ):
+    with patch.object(asset_media, "open_asset", store.open):
         error, _ = await asyncio.wait_for(
             asyncio.gather(operation(), ticker()),
             timeout=3,
@@ -134,14 +131,10 @@ async def test_thumbnail_operational_failure_is_503_not_404() -> None:
     def unavailable(_path: str):
         raise FileStoreUnavailableError("backend unavailable")
 
-    with (
-        patch.object(tasks_api, "open_asset", unavailable),
-        patch.object(tasks_api, "task_owner_map", owner_map),
-    ):
+    with patch.object(asset_media, "open_asset", unavailable):
         try:
-            await tasks_api.download_asset_thumb(
-                "task-id",
-                "file.png",
+            await assets_api.download_asset_thumb(
+                "asset-id",
                 SimpleNamespace(headers={}),
                 user=USER,
                 db=AssetDB(asset),

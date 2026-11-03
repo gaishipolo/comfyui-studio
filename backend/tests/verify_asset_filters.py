@@ -25,6 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from test_env import API_BASE_URL  # noqa: E402
+from app.timeutils import parse_day  # noqa: E402
 
 BASE = API_BASE_URL
 ok_all = True
@@ -82,7 +83,7 @@ async def seed(owner_id: str, created_at: datetime, name: str,
         abs_path.parent.mkdir(parents=True, exist_ok=True)
         abs_path.write_bytes(b"\x89PNG-test-bytes")
         db.add(Asset(
-            id=aid, task_id=task_id, file_path=rel,
+            id=aid, owner_id=owner_id, task_id=task_id, file_path=rel,
             file_name=f"{name}.{ext}", file_size=14,
             mime_type=mime, tags=[], meta={},
             created_at=created_at,
@@ -141,8 +142,13 @@ def temporary_member():
 
 
 # 老素材（2026-10-01）归 admin，新素材（今天）也归 admin，再加一个今天的「他人」素材
-OLD = datetime(2026, 10, 1, 12, 0, 0)
-TODAY = datetime.now().replace(microsecond=0)
+# ⚠️ 时间要**存 UTC**：库里 created_at 是 naive UTC，而 API 的 created_from/created_to
+# 是「本地日期 → UTC」解析的。直接塞本地时间会在傍晚之后全部越界（本地 21:00 > 当日
+# 15:59 UTC 上界），测试就变成「只有白天才通过」。这里用同一个 parse_day 换算。
+OLD_LOCAL = datetime(2026, 10, 1, 12, 0, 0)
+TODAY_LOCAL = datetime.now().replace(microsecond=0)
+OLD = parse_day(OLD_LOCAL.isoformat())
+TODAY = parse_day(TODAY_LOCAL.isoformat())
 
 a_old = asyncio.run(seed(ADMIN_ID, OLD, "old-asset"))
 a_new = asyncio.run(seed(ADMIN_ID, TODAY, "new-asset"))
@@ -152,15 +158,16 @@ with temporary_member() as (MEMBER_NAME, MEMBER_T, MEMBER_ID):
     report("造好三份测试素材", True, f"old={a_old[:6]} new={a_new[:6]} other={a_other[:6]}")
 
     print("\n=== 1. 时间范围 ===")
-    TODAY_STR = TODAY.strftime("%Y-%m-%d")
-    FUTURE_STR = (TODAY + timedelta(days=3)).strftime("%Y-%m-%d")
+    # 日期串用**本地**日期（parse_day 按本地解释），不要用换算成 UTC 后的 TODAY
+    TODAY_STR = TODAY_LOCAL.strftime("%Y-%m-%d")
+    FUTURE_STR = (TODAY_LOCAL + timedelta(days=3)).strftime("%Y-%m-%d")
 
     st, lst = req(f"/assets?created_from={TODAY_STR}&limit=200", token=ADMIN_T)
     ids = {x["id"] for x in lst}
     report("created_from 滤掉老素材", st == 200 and a_new in ids and a_old not in ids,
            f"返回 {len(lst)} 条")
 
-    st, lst = req(f"/assets?created_to={OLD.strftime('%Y-%m-%d')}&limit=200", token=ADMIN_T)
+    st, lst = req(f"/assets?created_to={OLD_LOCAL.strftime('%Y-%m-%d')}&limit=200", token=ADMIN_T)
     ids = {x["id"] for x in lst}
     report("created_to 滤掉新素材（纯日期含当天全天）", st == 200 and a_old in ids and a_new not in ids,
            f"返回 {len(lst)} 条")
