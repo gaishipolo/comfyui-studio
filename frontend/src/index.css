@@ -5,6 +5,28 @@
 @tailwind components;
 @tailwind utilities;
 
+@layer base {
+  /* 滚动槽固定占位 —— 这是「切页时顶栏横向抖动」的根因修复。
+   *
+   * 各模块内容高度差极大：任务列表 3700px、素材库 3100px、用量统计一屏 900px。
+   * 浏览器默认 scrollbar-gutter: auto，滚动条只在需要时出现，一出现就吃掉 15px
+   * 视口宽度：短页面切长页面，整页（含 sticky 顶栏）向右压缩 15px；切回来又弹回去。
+   * 视觉上就是顶栏在左右"抖一下"，而且越靠近屏幕右侧越明显（用户区块在最右）。
+   *
+   * stable 让滚动槽始终保留，宽度恒定，代价是短页面右侧留一条 15px 空槽。 */
+  html {
+    scrollbar-gutter: stable;
+  }
+
+  /* Safari 18.2 之前没有 scrollbar-gutter。退回「始终显示滚动条」，
+     同样能保证宽度不跳；代价是空滚动槽一直画着，可接受。 */
+  @supports not (scrollbar-gutter: stable) {
+    html {
+      overflow-y: scroll;
+    }
+  }
+}
+
 @layer components {
   /* ── The control recipe ───────────────────────────────────────────
      36px tall, 44px hit target. One recipe for every control in the

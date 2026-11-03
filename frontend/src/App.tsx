@@ -165,6 +165,19 @@ export default function App() {
     setActiveKey('generate')
   }, [])
 
+  // 切模块一律回到顶部。
+  //
+  // 不写这句的现状是「靠副作用碰巧回到顶部」：旧模块卸载后 DOM 高度塌到只剩
+  // 顶栏，浏览器把 scrollY 夹到 0。所以从任务列表（3700px）滚到一半再切页，
+  // 总是被硬拽回顶部 —— 顺序取决于卸载/挂载与浏览器夹取的时机，不同机器上
+  // 表现还不一样。
+  //
+  // 显式归零把这件事变成确定行为，也让「切页 = 进入一个新页面」符合预期。
+  // 用 instant 而不是 smooth：平滑滚动会在切页瞬间同时滚两屏，反而更晃。
+  useEffect(() => {
+    window.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior })
+  }, [activeKey])
+
   // 未登录 → 登录页
   if (!user || !getToken()) {
     return <Login onLogin={() => setUser(getStoredUser())} />
