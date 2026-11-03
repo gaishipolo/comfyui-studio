@@ -46,7 +46,7 @@ def _read_workflow_file(workflow_file: str) -> dict:
 def _validate_workflow_config(workflow_file: str, param_mapping: dict, output_config: dict):
     """保存前校验「映射指向的节点存在」+「出图节点已勾选」。
 
-    只在真的配了工作流时才查 —— generic_api 模板 workflow_file 为空，
+    只在真的配了工作流时才查 —— 插件引擎（非 ComfyUI）的 workflow_file 为空，
     没有节点图可查，硬查会把它们全挡在门外。
 
     两件事各有出处：

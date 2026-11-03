@@ -116,14 +116,31 @@ class Task(Base):
 
 
 class Asset(Base):
-    """生成素材"""
+    """素材 —— 既可以是生成产物，也可以是用户直接上传的文件。
+
+    身份由 `id` 决定。早期版本用 (task_id, file_name) 二元组定位素材，
+    导致「素材必须属于某个任务」成了硬约束，用户上传的文件无处安放。
+    现在 `task_id` 降级为**来源标记**：指向产出它的生成任务，上传素材为 NULL。
+
+    归属走 `owner_id`（权威字段），不再借道 task.created_by —— 否则归属判定
+    要写成「有任务查任务、没任务查自己」两套逻辑。
+    """
     __tablename__ = "assets"
     __table_args__ = (
-        Index("uq_assets_task_file_name", "task_id", "file_name", unique=True),
+        # 列表的主查询是「我的素材按时间倒序」，复合索引直接覆盖。
+        Index("ix_assets_owner_created", "owner_id", "created_at"),
+        # 文件名唯一性从 DB 约束降级为应用层保证（unique_asset_name）：
+        # task_id 可空后，SQLite 唯一索引里 NULL 互不相等，旧约束形同虚设。
     )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=gen_uuid)
-    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id"), comment="关联任务")
+    owner_id: Mapped[str] = mapped_column(
+        String(32), default="", comment="归属人 ID（权限判定只看这一列）"
+    )
+    task_id: Mapped[str | None] = mapped_column(
+        ForeignKey("tasks.id"), nullable=True,
+        comment="来源任务；用户上传的素材为空",
+    )
 
     file_path: Mapped[str] = mapped_column(String(512), comment="存储路径")
     file_name: Mapped[str] = mapped_column(String(256), comment="原始文件名")
@@ -138,7 +155,7 @@ class Asset(Base):
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
-    task: Mapped["Task"] = relationship(back_populates="assets")
+    task: Mapped["Task | None"] = relationship(back_populates="assets")
 
 
 class EnginePlugin(Base):

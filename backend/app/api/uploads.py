@@ -25,53 +25,18 @@ from app.models.models import Asset, User
 from app.auth import get_current_user
 from app.safe_detail import safe_detail
 from app.schemas.schemas import AssetUploadRequest
-from app.access import can_view_asset, task_owner_map
+from app.access import can_view_asset
+from app.upload_rules import (
+    ALLOWED_MIME_PREFIXES,
+    FILE_KINDS,
+    MB,
+    fallback_filename as _fallback_filename,
+    kind_rules as _kind_rules,
+    read_upload_bounded,
+)
 
 router = APIRouter(prefix="/api/upload", tags=["upload"])
 logger = logging.getLogger(__name__)
-
-MB = 1024 * 1024
-
-# 文件种类 → 校验规则。ext 用来挡明显不对的文件名，prefixes 用来挡「从素材库选材」时的 MIME
-FILE_KINDS: dict[str, dict] = {
-    "image": {
-        "label": "图片",
-        "ext": {".png", ".jpg", ".jpeg", ".jfif", ".webp", ".gif", ".bmp"},
-        "prefixes": ("image/",),
-        "max": 20 * MB,
-    },
-    "audio": {
-        "label": "音频",
-        "ext": {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus"},
-        "prefixes": ("audio/",),
-        "max": 50 * MB,
-    },
-    "video": {
-        "label": "视频",
-        "ext": {".mp4", ".webm", ".mov", ".mkv"},
-        "prefixes": ("video/",),
-        "max": 200 * MB,
-    },
-}
-
-
-def _fallback_filename(kind: str) -> str:
-    """缺失 filename 时使用该种类允许的保守扩展名，避免兜底路径自拒。"""
-    return {
-        "image": "input.png",
-        "audio": "input.mp3",
-        "video": "input.mp4",
-    }.get((kind or "image").strip().lower(), "input.bin")
-
-# 从素材库选材时放行的 mime 前缀（三类都放行，具体能不能用由插件决定）
-ALLOWED_MIME_PREFIXES = tuple(p for k in FILE_KINDS.values() for p in k["prefixes"])
-
-
-def _kind_rules(kind: str) -> dict:
-    rules = FILE_KINDS.get((kind or "image").strip().lower())
-    if rules is None:
-        raise HTTPException(status_code=400, detail=f"不支持的文件种类：{kind}")
-    return rules
 
 
 async def _forward_to_engine(engine: str, data: bytes, name: str) -> str:
@@ -124,24 +89,7 @@ async def upload_file(
             detail=f"不支持的{rules['label']}格式：{name}（允许 {', '.join(sorted(rules['ext']))}）",
         )
 
-    # 分块读、即时封顶：若先 read() 再查大小，恶意客户端传多大服务器就先吃多少进内存，
-    # 200MB 上限对内存 DoS 形同虚设。超限在读到第 (max+1) 个字节时就断掉。
-    chunks: list[bytes] = []
-    total = 0
-    while True:
-        chunk = await file.read(1024 * 1024)
-        if not chunk:
-            break
-        total += len(chunk)
-        if total > rules["max"]:
-            raise HTTPException(
-                status_code=400,
-                detail=f"{rules['label']}超过 {rules['max'] // MB}MB 限制",
-            )
-        chunks.append(chunk)
-    data = b"".join(chunks)
-    if not data:
-        raise HTTPException(status_code=400, detail="空文件")
+    data = await read_upload_bounded(file, rules)
 
     server_name = await _forward_to_engine(engine, data, name)
     return {"filename": server_name, "engine": engine, "kind": kind}
@@ -177,8 +125,7 @@ async def upload_from_asset(
         raise HTTPException(status_code=404, detail="素材不存在")
 
     # 用户隔离：只能拿自己可见的素材当输入（自己的 + 已共享的），看不见的报同款 404
-    owners = await task_owner_map(db, {asset.task_id})
-    if not can_view_asset(user, owners.get(asset.task_id, ""), asset.is_shared):
+    if not can_view_asset(user, asset.owner_id, asset.is_shared):
         raise HTTPException(status_code=404, detail="素材不存在")
 
     if not any((asset.mime_type or "").startswith(p) for p in ALLOWED_MIME_PREFIXES):

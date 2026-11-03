@@ -254,6 +254,26 @@ class LocalFileStore:
             logger.warning("删除素材文件失败 %s —— %s", target, reason)
             return False, reason
 
+    def prune_empty_dir(self, file_path: str) -> None:
+        """素材删干净后顺手收掉因此变空的目录。
+
+        每个任务目录 `{task_id}/`、每个上传目录 `uploads/{asset_id}/` 都只装
+        一个源文件（外加一个缩略图），删完必然变空。不收就会在 storage 下攒出
+        成百上千个空壳目录（实测一次回归测试就能留下 200+ 个）。
+        目录非空时 ``rmdir`` 抛 OSError —— 那正好表示「这里还有别的素材」，忽略即可。
+        """
+        target = self._resolve(file_path)
+        if target is None:
+            return
+        parent = target.parent
+        root = settings.STORAGE_DIR.resolve()
+        if parent == root or not parent.is_relative_to(root):
+            return
+        try:
+            parent.rmdir()
+        except (OSError, RuntimeError, SystemExit):
+            pass
+
 
 class MinioFileStore:
     """MinIO / S3 兼容对象存储实现。
@@ -482,3 +502,17 @@ def open_asset(file_path: str) -> ObjectHandle | None:
 def delete_asset_file(file_path: str) -> tuple[bool, str]:
     """尽力而为地删掉素材文件。返回 (是否真的删掉, 失败原因)。"""
     return get_store().delete(file_path)
+
+
+def prune_empty_asset_dir(file_path: str) -> None:
+    """素材文件都删完后，清掉因此变空的目录（尽力而为，不空就什么也不做）。
+
+    对象存储没有目录概念，后端没实现这个方法就直接跳过。
+    """
+    prune = getattr(get_store(), "prune_empty_dir", None)
+    if prune is None:
+        return
+    try:
+        prune(file_path)
+    except (OSError, RuntimeError, SystemExit) as exc:  # noqa: BLE001 - 收尾失败不该外溢
+        logger.warning("清理空素材目录失败 key=%s —— %s", file_path, exc)

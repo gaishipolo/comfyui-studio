@@ -151,16 +151,21 @@ class ProtectedBodyLimitMiddleware:
 
             await asyncio.to_thread(spool.seek, 0)
             sent = 0
+            replayed = False
 
             async def replay_receive() -> dict:
-                nonlocal sent
+                nonlocal sent, replayed
+                if replayed:
+                    # 请求体已经还完：**必须交回真实 receive**，不能继续伪造
+                    # http.request。ASGI 语义要求此时阻塞到客户端断开再返回
+                    # http.disconnect，而 FileResponse / StreamingResponse 会一直
+                    # `await receive()` 等这个 disconnect 来结束请求。
+                    # 之前这里无条件返回 http.request，await 一个不挂起的协程等于
+                    # 不让出事件循环 —— 整个事件循环被这条请求吃满 100% CPU 卡死
+                    # （health 都不响应），而响应体一个字节也发不出去。
+                    return await receive()
                 if total == 0:
-                    return {
-                        "type": "http.request",
-                        "body": b"",
-                        "more_body": False,
-                    }
-                if sent >= total:
+                    replayed = True
                     return {
                         "type": "http.request",
                         "body": b"",
@@ -168,6 +173,9 @@ class ProtectedBodyLimitMiddleware:
                     }
                 chunk = await asyncio.to_thread(spool.read, _REPLAY_CHUNK_SIZE)
                 sent += len(chunk)
+                if not chunk or sent >= total:
+                    # 空读也要收尾，否则会一直重放下去
+                    replayed = True
                 return {
                     "type": "http.request",
                     "body": chunk,

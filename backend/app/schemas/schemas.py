@@ -169,7 +169,8 @@ class TaskResponse(BaseModel):
 
 class AssetResponse(BaseModel):
     id: str
-    task_id: str
+    # 来源任务：生成素材指向产出它的任务，用户上传的素材为 None
+    task_id: str | None = None
     file_path: str
     file_name: str
     file_size: int
@@ -177,7 +178,7 @@ class AssetResponse(BaseModel):
     tags: list
     meta: dict
     is_shared: bool = False  # 已共享给团队（共享≠共同所有：别人只能看/下载）
-    created_by: str = ""  # 归属人（走 task.created_by）
+    created_by: str = ""  # 归属人 id（assets.owner_id）
     creator_name: str = ""  # 归属人显示名（展示「来自谁」）
     created_at: datetime
 

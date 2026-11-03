@@ -158,7 +158,6 @@ class TaskService:
                 await asyncio.to_thread(
                     cleanup_asset_files,
                     asset.file_path,
-                    asset.task_id,
                     asset.file_name,
                 )
 
@@ -639,7 +638,7 @@ class TaskService:
     ) -> Asset:
         """Stage one output file and unflushed Asset for terminal commit."""
         # 产物是远程 URL 时把 URL 传下去 —— download_output 认 URL 直接下载。
-        # generic_api 提取产物时 filename 已截成纯文件名（URL 在 url 字段），
+        # 插件引擎提取产物时 filename 已截成纯文件名（URL 在 url 字段），
         # 传纯文件名会拼出 /files//xxx.png 的错误路径，素材根本落不了盘
         src = output.get("url") or output["filename"]
         raw_name = Path(output["filename"]).name or f"{uuid.uuid4().hex}.bin"
@@ -682,7 +681,7 @@ class TaskService:
                     if thumb:
                         await asyncio.to_thread(
                             save_asset_file,
-                            thumb_key(task.id, safe_name),
+                            thumb_key(rel_path),
                             thumb,
                             content_type="image/jpeg",
                         )
@@ -690,6 +689,9 @@ class TaskService:
                     logger.warning("视频缩略图生成失败，跳过：%s", safe_name, exc_info=True)
 
             asset = Asset(
+                # 归属随素材走：任务提交人就是素材作者。不这么写就得靠回表查任务，
+                # 而上传素材没有任务，那条路走不通。
+                owner_id=task.created_by or "",
                 task_id=task.id,
                 file_path=rel_path,
                 file_name=safe_name,
@@ -705,7 +707,6 @@ class TaskService:
                 await asyncio.to_thread(
                     cleanup_asset_files,
                     rel_path,
-                    task.id,
                     safe_name,
                 )
             raise

@@ -13,7 +13,6 @@ from dataclasses import dataclass
 
 from app.engines.base import GenerationProvider
 from app.engines.comfyui import ComfyUIProvider
-from app.engines.generic_api import GenericAPIProvider
 
 _providers: dict[str, GenerationProvider] = {}
 _engine_configs: dict[str, dict] = {}
@@ -161,9 +160,12 @@ def _fire_change() -> None:
             log.exception("Provider registry change hook failed: %r", cb)
 
 # 引擎注册表：engine_name → Provider 类
+# 内置只有 ComfyUI；其他引擎一律走插件机制（上传 .py 注册），见
+# docs/provider-dev-guide.md。早期那个 generic_api 通用适配器已移除 ——
+# 它靠「路径模板 + 字段名透传」适配，表达力不够（multipart / Base64 /
+# 列表参数都写不出来），已被插件机制取代。
 _REGISTRY: dict[str, type[GenerationProvider]] = {
     "comfyui": ComfyUIProvider,
-    "generic_api": GenericAPIProvider,
 }
 
 

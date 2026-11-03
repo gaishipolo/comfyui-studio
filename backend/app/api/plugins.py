@@ -28,6 +28,10 @@ from app.models.models import EnginePlugin, User
 
 router = APIRouter(prefix="/api/plugins", tags=["plugins"])
 
+# 内置引擎：没有 DB 记录、没有代码文件、不可删除/停用。
+# 只有 ComfyUI —— 其他引擎一律走插件机制。
+BUILTIN_ENGINE_NAMES: tuple[str, ...] = ("comfyui",)
+
 _HEALTH_CHECK_TIMEOUT_SECONDS = 15.0
 
 
@@ -50,13 +54,13 @@ async def _registry_snapshot(db: AsyncSession) -> list[dict]:
     by_name = {r.name: r for r in rows}
 
     items: list[dict] = []
-    # 内置引擎（comfyui/generic_api）：没有 DB 行，描述从类读
+    # 内置引擎（ComfyUI）：没有 DB 行，描述从类读
     from app.engines.factory import _REGISTRY  # noqa: PLC2701 —— 描述要读注册表
     for name, cls in _REGISTRY.items():
         row = by_name.get(name)
         items.append({
             **describe_provider(cls),
-            "builtin": name in ("comfyui", "generic_api"),
+            "builtin": name in BUILTIN_ENGINE_NAMES,
             "enabled": True,
             "last_error": "",
             "filename": getattr(row, "filename", "") if row else "",
@@ -207,7 +211,7 @@ async def delete_plugin(
 ):
     """删除插件：注销 + 删文件 + 删账"""
     _require_admin(user)
-    if name in ("comfyui", "generic_api"):
+    if name in BUILTIN_ENGINE_NAMES:
         raise HTTPException(status_code=400, detail="内置引擎不可删除")
     row = (await db.execute(select(EnginePlugin).where(EnginePlugin.name == name))).scalar_one_or_none()
     if row is None:
@@ -296,7 +300,7 @@ async def restore_plugins(db: AsyncSession) -> list[dict]:
             row.last_error = "注册名或文件名不合法"
             unregister_provider(row.name)
             continue
-        if not (PLUGIN_DIR / row.filename).exists() and row.name not in ("comfyui", "generic_api"):
+        if not (PLUGIN_DIR / row.filename).exists() and row.name not in BUILTIN_ENGINE_NAMES:
             row.last_error = "代码文件丢失"
             unregister_provider(row.name)
 

@@ -14,7 +14,14 @@ from typing import TypeVar
 from PIL import Image, ImageOps
 
 from app.config import settings
-from app.filestore import delete_asset_file
+from app.filestore import delete_asset_file, prune_empty_asset_dir, safe_key
+
+# 显式像素上限：超大图解码会把整张 RGB 读进内存（5888×10496 ≈ 185MB，
+# 加上 exif/convert 副本峰值约 500MB）。PIL 默认阈值（约 178M 像素）太宽松。
+# 设为 100M 像素：覆盖实测的 61.8Mpx「99MB 图」，又能挡住 >10000×10000 的
+# 病态大图。超过此值 Image.open 抛 DecompressionBombError → make_image_thumb
+# 返回 None → 路由回退原图，功能不丢，只是不做缩略图。
+Image.MAX_IMAGE_PIXELS = 100_000_000  # 约 10000×10000
 
 logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
@@ -84,18 +91,27 @@ def make_video_thumb(data: bytes, suffix: str = ".mp4") -> bytes | None:
     return None
 
 
-def thumb_key(task_id: str, file_name: str) -> str:
-    """缩略图在存储里的键：与视频同目录，加 thumb_ 前缀 + .jpg 后缀。
+def thumb_key(file_path: str) -> str:
+    """缩略图在存储里的键：与源文件同目录，加 thumb_ 前缀 + .jpg 后缀。
 
-    约定成路径（而不是数据库字段）是为了让老素材天然「没有缩略图」——
-    请求 404 → 前端退回原逻辑，不需要迁移，也不会多出素材记录。
+    从 **file_path** 推导（而不是 (task_id, file_name)）—— 素材不再必须属于
+    某个任务，上传素材的路径是 `uploads/{asset_id}/x.png`，同样能算出键。
+    历史素材的 file_path 是 `{task_id}/{name}`，推导结果与原公式逐字节一致，
+    老缩略图无需迁移即可命中。
     """
-    return f"{task_id}/thumb_{file_name}.jpg"
+    key = safe_key(file_path) or file_path.replace("\\", "/")
+    directory, _, name = key.rpartition("/")
+    return f"{directory}/thumb_{name}.jpg" if directory else f"thumb_{name}.jpg"
 
 
 def task_lifecycle_key(task_id: str) -> str:
     """Coordination key for mutations that affect a task as a whole."""
     return f"task-lifecycle:{task_id}"
+
+
+def asset_lifecycle_key(asset_id: str) -> str:
+    """Coordination key for a single asset（上传素材没有任务，只能按素材加锁）"""
+    return f"asset-lifecycle:{asset_id}"
 
 
 @asynccontextmanager
@@ -120,16 +136,34 @@ async def thumbnail_lifecycle(keys: Iterable[str]) -> AsyncIterator[None]:
             lock.release()
 
 
-async def wait_for_task_completion(task: asyncio.Task[_T]) -> _T:
-    """Delay caller cancellation until a shielded lifecycle task settles."""
+async def wait_for_task_completion(
+    task: asyncio.Task[_T],
+    *,
+    timeout: float | None = None,
+) -> _T:
+    """Delay caller cancellation until a shielded lifecycle task settles.
+
+    `timeout` 到点抛 asyncio.TimeoutError，但**不会取消** task —— 它继续在
+    后台跑完，下次请求即可命中产物（缩略图首访用这个做「等一下，超时先给
+    原图」）。调用方被取消时取消仍然延迟到 task 结束，且取消优先于超时。
+    """
     cancellation: asyncio.CancelledError | None = None
+    loop = asyncio.get_running_loop()
+    deadline = None if timeout is None else loop.time() + timeout
     while not task.done():
+        remaining: float | None = None
+        if deadline is not None:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                if cancellation is not None:
+                    raise cancellation
+                raise asyncio.TimeoutError
         try:
-            await asyncio.shield(task)
+            # asyncio.wait 只监听、不把取消传染给 task（等价于 shield），
+            # 同时支持超时。
+            await asyncio.wait({task}, timeout=remaining)
         except asyncio.CancelledError as exc:
             cancellation = exc
-        except Exception:
-            break
 
     try:
         result = task.result()
@@ -194,7 +228,6 @@ def make_image_thumb(data: bytes, max_edge: int = 400) -> bytes | None:
 
 def cleanup_asset_files(
     file_path: str,
-    task_id: str,
     file_name: str,
 ) -> tuple[tuple[bool, str], tuple[bool, str]]:
     """Best-effort cleanup for an asset source and its derived thumbnail."""
@@ -208,7 +241,7 @@ def cleanup_asset_files(
             return False, reason
 
     source_result = remove(file_path, "Source file")
-    derived_key = thumb_key(task_id, file_name)
+    derived_key = thumb_key(file_path)
     derived_result = remove(derived_key, "Thumbnail")
     if not derived_result[0] and derived_result[1] == "文件本就不存在":
         derived_result = False, ""
@@ -218,4 +251,6 @@ def cleanup_asset_files(
             derived_key,
             derived_result[1],
         )
+    # 源文件和缩略图都处理完再收目录：只删掉其中一个时目录还不空，rmdir 会失败跳过
+    prune_empty_asset_dir(file_path)
     return source_result, derived_result

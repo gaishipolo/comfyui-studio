@@ -1,19 +1,28 @@
-"""素材库 API — 搜索、标签、批量下载"""
+"""素材库 API — 上传、搜索、标签、文件服务、批量下载
+
+素材不再必须属于某个任务（2026-11-02）：用户可以直接把文件传进素材库，
+这类素材的 `task_id` 为 NULL、归属写在 `owner_id`。因此文件/缩略图路由
+按 **asset_id** 定位，而不是 (task_id, filename)。
+"""
 import asyncio
 import tempfile
+import uuid
 import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Sequence
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import String, bindparam, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 from starlette.background import BackgroundTask
 
+from app.asset_media import serve_asset_file, serve_asset_thumb
+from app.asset_names import unique_asset_name
 from app.database import get_db
 from app.download_tickets import registry as download_ticket_registry
+from app.media import guess_mime
 from app.models.models import Asset, Task, Template, User
 from app.schemas.schemas import AssetResponse, AssetShareRequest
 from app.auth import get_current_user
@@ -21,8 +30,11 @@ from app.filestore import (
     FILESTORE_UNAVAILABLE_DETAIL,
     FileStoreUnavailableError,
     open_asset,
+    save_asset_file,
 )
+from app.upload_rules import FILE_KINDS, kind_for_filename, read_upload_bounded
 from app.thumbs import (
+    asset_lifecycle_key,
     cleanup_asset_files,
     task_lifecycle_key,
     thumb_key,
@@ -36,7 +48,6 @@ from app.access import (
     can_view_asset,
     creator_display_names,
     is_admin,
-    task_owner_map,
 )
 
 router = APIRouter(prefix="/api/assets", tags=["assets"])
@@ -55,8 +66,13 @@ def _remove_temp_archive(path: Path) -> None:
         pass
 
 
-def _build_batch_archive(assets: Sequence[Asset]) -> Path:
-    """Write a bounded ZIP to disk without buffering source files in memory."""
+def _build_batch_archive(entries: Sequence[tuple[str, str, str]]) -> Path:
+    """把素材打包成 ZIP 落临时文件（不把源文件读进内存）。
+
+    入参是**纯数据** `(file_path, file_name, task_id)`，不是 ORM 对象 ——
+    这个函数跑在 `asyncio.to_thread` 的工作线程里，而 async session 的 ORM
+    实例属于事件循环的 greenlet 上下文，在线程里碰属性会触发懒加载并卡死。
+    """
     archive_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -69,8 +85,8 @@ def _build_batch_archive(assets: Sequence[Asset]) -> Path:
         used_names: set[str] = set()
         read_total = 0
         with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
-            for asset in assets:
-                handle = open_asset(asset.file_path)
+            for file_path, file_name, task_id in entries:
+                handle = open_asset(file_path)
                 if handle is None:
                     raise HTTPException(
                         status_code=404,
@@ -78,7 +94,7 @@ def _build_batch_archive(assets: Sequence[Asset]) -> Path:
                     )
                 try:
                     base_name = PurePosixPath(
-                        str(asset.file_name or "").replace("\\", "/")
+                        str(file_name or "").replace("\\", "/")
                     ).name.replace("\x00", "_")
                     if base_name in {"", ".", ".."}:
                         base_name = "asset"
@@ -86,7 +102,7 @@ def _build_batch_archive(assets: Sequence[Asset]) -> Path:
                     archive_name = base_name
                     if archive_name in used_names:
                         raw_prefix = PurePosixPath(
-                            str(asset.task_id or "").replace("\\", "/")
+                            str(task_id or "").replace("\\", "/")
                         ).name[:8]
                         prefix = "".join(
                             char if char.isalnum() or char in "-_" else "_"
@@ -151,24 +167,21 @@ def _escape_like(value: str) -> str:
 
 
 async def _annotate(db: AsyncSession, assets: list[Asset]) -> list[AssetResponse]:
-    """补上归属信息（created_by / creator_name）—— 素材本身没归属字段，走 task.created_by"""
-    owners = await task_owner_map(db, {a.task_id for a in assets})
-    names = await creator_display_names(db, set(owners.values()))
+    """补上归属显示名。归属直接读 assets.owner_id —— 不再回表查任务。
+
+    素材脱离任务独立存在后，「归属 = 产出任务的提交人」这个恒等式不成立了，
+    owner_id 才是唯一来源。这里只查一次用户名，不做 N+1。
+    """
+    names = await creator_display_names(db, {a.owner_id for a in assets})
     out = []
     for a in assets:
-        owner = owners.get(a.task_id, "")
+        owner = a.owner_id or ""
         out.append(
             AssetResponse.model_validate(a).model_copy(
                 update={"created_by": owner, "creator_name": names.get(owner, "")}
             )
         )
     return out
-
-
-async def _owner_of(db: AsyncSession, asset: Asset) -> str:
-    """单个素材的归属人 id（显式查，不能用 asset.task 懒加载）"""
-    owners = await task_owner_map(db, {asset.task_id})
-    return owners.get(asset.task_id, "")
 
 
 # 标签精确匹配：用 SQLite json_each 展开 JSON 数组后逐个比对。
@@ -203,20 +216,18 @@ async def list_assets(
 
     用户隔离：普通用户只见「自己提交的 + 已共享给团队的」，admin 可见全部。
     """
-    # 归属过滤、按创建人筛选、按场景筛选都要过任务表 —— join 只做一次，别重复
-    need_join = bool(template_id) or bool(creator) or not is_admin(user)
-    query = select(Asset)
-    if need_join:
-        query = query.join(Task, Asset.task_id == Task.id)
-    query = query.order_by(Asset.created_at.desc())
+    # 归属过滤和按创建人筛选都读 assets.owner_id —— 素材自带归属，不用再 join 任务表。
+    # 只有「按模板筛选」必须过任务表，且用 outerjoin：上传素材没有来源任务，
+    # 筛模板时自然落选（inner join 结果相同，但 outer 语义更准确）。
+    query = select(Asset).order_by(Asset.created_at.desc())
 
     if not is_admin(user):
         query = query.where(
-            or_(Task.created_by == user.id, Asset.is_shared.is_(True))
+            or_(Asset.owner_id == user.id, Asset.is_shared.is_(True))
         )
 
     if creator:
-        query = query.where(Task.created_by == creator)
+        query = query.where(Asset.owner_id == creator)
 
     if created_from:
         query = query.where(Asset.created_at >= _parse_day(created_from))
@@ -253,11 +264,108 @@ async def list_assets(
         query = query.where(Asset.mime_type.ilike(f"{k}/%"))
 
     if template_id:
-        query = query.where(Task.template_id == template_id)
+        query = query.outerjoin(Task, Asset.task_id == Task.id).where(
+            Task.template_id == template_id
+        )
 
     query = query.offset(offset).limit(limit)
     result = await db.execute(query)
     return await _annotate(db, result.scalars().all())
+
+
+# 一次最多传多少个文件。单文件上限由 FILE_KINDS 管，这里防的是「一次几百个」
+MAX_UPLOAD_FILES = 20
+
+# 用户上传素材的存储前缀。按 asset_id 分目录：一个素材一个目录，天然不重名，
+# 也不像生成素材那样依赖 task_id。
+UPLOAD_DIR_PREFIX = "uploads"
+
+
+@router.post("/upload", response_model=list[AssetResponse])
+async def upload_assets(
+    files: list[UploadFile] = File(..., description="一个或多个文件"),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """把文件直接存进素材库（不经过生成引擎）。
+
+    与 `POST /api/upload/file` 的区别：那个是「给这次生成提供参考文件」，
+    传完即丢；这里落的是素材库里的正式条目，之后能在「从素材库选择」里复用。
+
+    逐个处理（读一个 → 落盘 → 登记一个），不把所有文件先读进内存 ——
+    10 个 200MB 的视频全缓冲就是 2GB。任一文件失败则整体回滚，不留半成品。
+    """
+    if not files:
+        raise HTTPException(status_code=400, detail="没有收到文件")
+    if len(files) > MAX_UPLOAD_FILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"一次最多上传 {MAX_UPLOAD_FILES} 个文件",
+        )
+
+    # 同一归属人名下文件名去重：卡片重名在界面上分不清谁是谁。
+    # 物理路径按 asset_id 分目录，重名本来不冲突，去重只是为了显示清晰。
+    existing = await db.execute(
+        select(Asset.file_name).where(Asset.owner_id == user.id)
+    )
+    used_names = set(existing.scalars().all())
+
+    # 先做「文件名 + 种类」预检（不读内容）：混合上传里只要有一个不合规就整体
+    # 拒绝，此时还没落盘，不会留下空目录和半个批次。
+    staged: list[tuple[UploadFile, str, dict]] = []
+    for upload in files:
+        raw_name = Path(upload.filename or "").name
+        if not raw_name:
+            raise HTTPException(status_code=400, detail="文件缺少文件名")
+        kind = kind_for_filename(raw_name)
+        if kind is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"不支持的格式：{raw_name}（只收图片 / 音频 / 视频）",
+            )
+        staged.append((upload, raw_name, FILE_KINDS[kind]))
+
+    created_ids: list[str] = []
+    saved: list[tuple[str, str]] = []  # (存储键, 文件名) —— 失败时回滚磁盘
+    try:
+        for upload, raw_name, rules in staged:
+            data = await read_upload_bounded(upload, rules)
+            mime = guess_mime(raw_name, data)
+            safe_name = unique_asset_name(raw_name, used_names)
+            used_names.add(safe_name)
+
+            asset_id = uuid.uuid4().hex
+            rel_path = f"{UPLOAD_DIR_PREFIX}/{asset_id}/{safe_name}"
+            # to_thread：视频可达 200MB，同步写盘会冻住事件循环
+            await asyncio.to_thread(save_asset_file, rel_path, data, content_type=mime)
+            saved.append((rel_path, safe_name))
+
+            db.add(
+                Asset(
+                    id=asset_id,
+                    owner_id=user.id,
+                    task_id=None,  # 没有来源任务 —— 这正是素材独立化的意义
+                    file_path=rel_path,
+                    file_name=safe_name,
+                    file_size=len(data),
+                    mime_type=mime,
+                    tags=[],
+                    meta={"source": "upload", "original_name": raw_name},
+                )
+            )
+            created_ids.append(asset_id)
+
+        await db.commit()
+    except BaseException:
+        await db.rollback()
+        for rel_path, safe_name in saved:
+            await asyncio.to_thread(cleanup_asset_files, rel_path, safe_name)
+        raise
+
+    # commit 后 ORM 实例已过期，在 async 会话里碰属性会触发懒加载。
+    # 重新查一遍拿干净快照（数量 ≤ 20，成本可忽略）。
+    result = await db.execute(select(Asset).where(Asset.id.in_(created_ids)))
+    return await _annotate(db, list(result.scalars().all()))
 
 
 @router.get("/tags")
@@ -304,10 +412,40 @@ async def get_asset(
     # 用户隔离：看不见的一律 404，不泄露「存在但无权」
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
-    owner = await _owner_of(db, asset)
-    if not can_view_asset(user, owner, asset.is_shared):
+    if not can_view_asset(user, asset.owner_id, asset.is_shared):
         raise HTTPException(status_code=404, detail="Asset not found")
     return (await _annotate(db, [asset]))[0]
+
+
+@router.get("/{asset_id}/file")
+async def download_asset_file(
+    asset_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """素材原文件（下载 / 预览）。用户隔离：看不见的一律 404。
+
+    按 asset_id 定位 —— 素材可以没有来源任务，旧的
+    `/api/tasks/{task_id}/assets/{filename}` 已废弃。
+    """
+    asset = await db.get(Asset, asset_id)
+    if not asset or not can_view_asset(user, asset.owner_id, asset.is_shared):
+        raise HTTPException(status_code=404, detail="Asset file not found")
+    return await serve_asset_file(asset)
+
+
+@router.get("/{asset_id}/thumb")
+async def download_asset_thumb(
+    asset_id: str,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """素材缩略图。图片首访懒生成后落盘，视频在落盘时就已抽帧。"""
+    asset = await db.get(Asset, asset_id)
+    if not asset or not can_view_asset(user, asset.owner_id, asset.is_shared):
+        raise HTTPException(status_code=404, detail="Asset file not found")
+    return await serve_asset_thumb(asset, request)
 
 
 @router.post("/{asset_id}/tags")
@@ -321,7 +459,7 @@ async def add_tag(
     asset = await db.get(Asset, asset_id)
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
-    if not can_modify_asset(user, await _owner_of(db, asset)):
+    if not can_modify_asset(user, asset.owner_id):
         raise HTTPException(
             status_code=403, detail="只能修改自己提交的素材（或联系管理员）"
         )
@@ -352,7 +490,7 @@ async def remove_tag(
     asset = await db.get(Asset, asset_id)
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
-    if not can_modify_asset(user, await _owner_of(db, asset)):
+    if not can_modify_asset(user, asset.owner_id):
         raise HTTPException(
             status_code=403, detail="只能修改自己提交的素材（或联系管理员）"
         )
@@ -390,7 +528,7 @@ async def share_asset(
     asset = await db.get(Asset, asset_id)
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
-    if not can_modify_asset(user, await _owner_of(db, asset)):
+    if not can_modify_asset(user, asset.owner_id):
         raise HTTPException(
             status_code=403, detail="只能共享自己提交的素材（或联系管理员）"
         )
@@ -409,47 +547,44 @@ async def delete_asset(
 ):
     """删除单个素材（记录 + 磁盘文件）。仅本人或管理员可删。
 
-    素材本身没有归属字段，归属走 task.created_by —— 显式查一次，
-    不能用 asset.task 懒加载（async 会话里抛 MissingGreenlet）。
+    归属读 `assets.owner_id` —— 素材可以没有来源任务（用户上传），不能再借道
+    task.created_by。锁也相应改成素材级：生成素材额外叠加任务锁，避免和
+    「删任务级联删素材」同时动手。
     """
     requester_id = user.id
     requester_role = user.role
 
     async def delete_operation() -> tuple[tuple[bool, str], tuple[bool, str]]:
-        # The route only carries asset_id, so first read the immutable task-id
-        # hint, end that transaction, then reload all authoritative state while
-        # owning the same task lock used by retry and task deletion.
-        task_result = await db.execute(
-            select(Asset.task_id).where(Asset.id == asset_id)
-        )
-        owned_task_id = task_result.scalar_one_or_none()
+        # 先只读一列拿「来源任务」提示，随即结束读事务 —— 要拿任务锁得先知道
+        # 锁哪个任务。**权威状态必须等锁拿到之后再读**：锁外读到的快照可能是
+        # retry / 删任务动手之前的，据此删除会删掉一条别人已经删掉的记录。
+        hint = await db.execute(select(Asset.task_id).where(Asset.id == asset_id))
+        task_hint = hint.scalar_one_or_none()
         await db.rollback()
-        if not owned_task_id:
-            raise HTTPException(status_code=404, detail="Asset not found")
 
-        async with thumbnail_lifecycle([task_lifecycle_key(owned_task_id)]):
+        lock_keys = [asset_lifecycle_key(asset_id)]
+        if task_hint:
+            lock_keys.append(task_lifecycle_key(task_hint))
+        async with thumbnail_lifecycle(lock_keys):
             asset = await db.get(Asset, asset_id)
-            if asset is None or asset.task_id != owned_task_id:
+            if asset is None or asset.task_id != task_hint:
                 raise HTTPException(status_code=404, detail="Asset not found")
-            task = await db.get(Task, owned_task_id)
-            owner_id = task.created_by if task is not None else ""
             if not can_modify_asset_identity(
                 requester_id,
                 requester_role,
-                owner_id,
+                asset.owner_id,
             ):
                 raise HTTPException(
                     status_code=403,
                     detail="只能删除自己提交的素材（或联系管理员）",
                 )
 
-            derived_key = thumb_key(asset.task_id, asset.file_name)
-            async with thumbnail_lifecycle([derived_key]):
+            # 缩略图键锁住派生文件（源文件和缩略图同处一个生命周期）
+            async with thumbnail_lifecycle([thumb_key(asset.file_path)]):
                 # 记录是主体，文件清理是附带 —— 文件删不掉也要把记录删掉，如实上报原因
                 cleanup_result = await asyncio.to_thread(
                     cleanup_asset_files,
                     asset.file_path,
-                    asset.task_id,
                     asset.file_name,
                 )
                 await db.delete(asset)
@@ -507,11 +642,7 @@ async def _prepare_archive(asset_ids: list[str], user: User, db: AsyncSession) -
     result = await db.execute(select(Asset).where(Asset.id.in_(asset_ids)))
     assets = result.scalars().all()
 
-    owners = await task_owner_map(db, {a.task_id for a in assets})
-    assets = [
-        a for a in assets
-        if can_view_asset(user, owners.get(a.task_id, ""), a.is_shared)
-    ]
+    assets = [a for a in assets if can_view_asset(user, a.owner_id, a.is_shared)]
 
     if not assets:
         raise HTTPException(status_code=404, detail="No matching assets")
@@ -526,8 +657,10 @@ async def _prepare_archive(asset_ids: list[str], user: User, db: AsyncSession) -
             ),
         )
 
+    # 在线程启动前把字段摘成纯数据：工作线程里不能碰 ORM 实例
+    entries = [(a.file_path, a.file_name, a.task_id or "") for a in assets]
     archive_task = asyncio.create_task(
-        asyncio.to_thread(_build_batch_archive, assets)
+        asyncio.to_thread(_build_batch_archive, entries)
     )
     try:
         archive_path = await asyncio.shield(archive_task)

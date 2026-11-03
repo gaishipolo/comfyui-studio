@@ -1,10 +1,12 @@
-"""任务提交与查询 API"""
+"""任务提交与查询 API
+
+素材文件的下载/预览/缩略图已迁到 `app/asset_media.py` —— 素材独立化后
+它们与任务无关，路由在 `api/assets.py` 里按 asset_id 注册。
+"""
 import asyncio
 import logging
 import uuid
-from pathlib import Path
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,18 +20,8 @@ from app.services.task_service import (
     _running_tasks,
 )
 from app.auth import get_current_user
-from app.filestore import (
-    FILESTORE_UNAVAILABLE_DETAIL,
-    FileStoreUnavailableError,
-    open_asset,
-    read_asset_bytes,
-    save_asset_file,
-)
-from app.media import guess_mime
-from app.disposition import attachment_disposition
 from app.thumbs import (
     cleanup_asset_files,
-    make_image_thumb,
     task_lifecycle_key,
     thumb_key,
     thumbnail_lifecycle,
@@ -38,79 +30,12 @@ from app.thumbs import (
 from app.timeutils import utcnow
 from app.access import (
     can_modify_task,
-    can_view_asset,
     can_view_task,
     creator_display_names,
-    task_owner_map,
 )
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 logger = logging.getLogger(__name__)
-
-_thumbnail_generation_tasks: dict[str, asyncio.Task[bool]] = {}
-
-
-async def _open_asset_handle(file_path: str):
-    try:
-        return await asyncio.to_thread(open_asset, file_path)
-    except FileStoreUnavailableError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=FILESTORE_UNAVAILABLE_DETAIL,
-        ) from exc
-
-
-def _generate_image_thumbnail(source_key: str, derived_key: str) -> bool:
-    data = read_asset_bytes(source_key)
-    if not data:
-        return False
-    thumbnail = make_image_thumb(data)
-    if thumbnail is None:
-        return False
-    save_asset_file(derived_key, thumbnail, content_type="image/jpeg")
-    return True
-
-
-def _thumbnail_generation_done(
-    derived_key: str,
-    task: asyncio.Task[bool],
-) -> None:
-    try:
-        generated = task.result()
-        if not generated:
-            logger.warning("Thumbnail generation failed key=%s", derived_key)
-    except asyncio.CancelledError:
-        logger.warning("Thumbnail generation cancelled key=%s", derived_key)
-    except Exception:
-        logger.exception("Thumbnail generation failed key=%s", derived_key)
-    finally:
-        if _thumbnail_generation_tasks.get(derived_key) is task:
-            _thumbnail_generation_tasks.pop(derived_key, None)
-
-
-def _shared_thumbnail_generation(
-    source_key: str,
-    derived_key: str,
-) -> asyncio.Task[bool]:
-    task = _thumbnail_generation_tasks.get(derived_key)
-    if task is None:
-        task = asyncio.create_task(
-            asyncio.to_thread(
-                _generate_image_thumbnail,
-                source_key,
-                derived_key,
-            ),
-            name=f"thumbnail:{derived_key}",
-        )
-        _thumbnail_generation_tasks[derived_key] = task
-        task.add_done_callback(
-            lambda completed, key=derived_key: _thumbnail_generation_done(
-                key,
-                completed,
-            )
-        )
-    return task
-
 
 @router.post("", response_model=list[TaskResponse])
 async def submit_tasks(
@@ -197,181 +122,18 @@ async def get_task_assets(
         raise HTTPException(status_code=404, detail="Task not found")
     result = await db.execute(select(Asset).where(Asset.task_id == task_id))
     assets = result.scalars().all()
-    names = await creator_display_names(db, {task.created_by})
-    creator = names.get(task.created_by, "")
+    # 归属读素材自己的 owner_id（写入时已按 task.created_by 落好），
+    # 不再假定「任务提交人 = 素材作者」
+    names = await creator_display_names(db, {a.owner_id for a in assets})
     return [
         AssetResponse.model_validate(a).model_copy(
-            update={"created_by": task.created_by, "creator_name": creator}
+            update={
+                "created_by": a.owner_id or "",
+                "creator_name": names.get(a.owner_id, ""),
+            }
         )
         for a in assets
     ]
-
-
-@router.get("/{task_id}/assets/{filename}")
-async def download_asset(
-    task_id: str,
-    filename: str,
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """下载/预览素材文件"""
-    # 安全：只取纯文件名，杜绝 ../ 路径穿越
-    safe_name = Path(filename).name
-    safe_task_id = Path(task_id).name
-
-    # 只允许下载数据库中登记的素材
-    result = await db.execute(
-        select(Asset).where(Asset.task_id == safe_task_id, Asset.file_name == safe_name)
-    )
-    asset = result.scalar_one_or_none()
-    if not asset:
-        raise HTTPException(status_code=404, detail="Asset file not found")
-
-    # 用户隔离：任务看不见时，看素材本身是否已共享 —— 共享素材的下载/预览
-    # 走的就是这条路由，必须放行，否则素材库里的共享卡片打不开
-    owners = await task_owner_map(db, {safe_task_id})
-    if not can_view_asset(user, owners.get(safe_task_id, ""), asset.is_shared):
-        raise HTTPException(status_code=404, detail="Asset file not found")
-
-    handle = await _open_asset_handle(asset.file_path)
-    if handle is None:
-        raise HTTPException(status_code=404, detail="Asset file not found")
-
-    # 落盘时已嗅探过文件头（app/media.py），直接用库里的值；
-    # 老记录可能没有 mime_type，再按文件名兜底
-    media_type = asset.mime_type or guess_mime(safe_name)
-
-    # 本地后端有真实路径 → FileResponse：支持 HTTP Range，视频拖进度条才不卡
-    if handle.local_path is not None:
-        local_path = handle.local_path
-        handle.close()
-        return FileResponse(local_path, media_type=media_type, filename=safe_name)
-
-    # 对象存储后端没有本地路径 → 流式转发（前端取的是整段 blob，不影响现有交互）
-    def _stream():
-        try:
-            yield from handle.iter_bytes()
-        finally:
-            handle.close()
-
-    return StreamingResponse(
-        _stream(),
-        media_type=media_type,
-        headers={
-            "Content-Length": str(handle.size),
-            # 文件名用户可控（中文前缀常见）：必须走 RFC 5987 编码，
-            # 裸拼会让非 latin-1 字符在 header 编码时抛错 → 500
-            "Content-Disposition": attachment_disposition(safe_name),
-        },
-    )
-
-
-@router.get("/{task_id}/assets/{filename}/thumb")
-async def download_asset_thumb(
-    task_id: str,
-    filename: str,
-    request: Request,
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Serve persistent image/video thumbnails after asset authorization."""
-    safe_name = Path(filename).name
-    safe_task_id = Path(task_id).name
-    derived_key = thumb_key(safe_task_id, safe_name)
-
-    async with thumbnail_lifecycle([derived_key]):
-        result = await db.execute(
-            select(Asset).where(
-                Asset.task_id == safe_task_id,
-                Asset.file_name == safe_name,
-            )
-        )
-        asset = result.scalar_one_or_none()
-        if not asset:
-            raise HTTPException(status_code=404, detail="Asset file not found")
-
-        owners = await task_owner_map(db, {safe_task_id})
-        if not can_view_asset(user, owners.get(safe_task_id, ""), asset.is_shared):
-            raise HTTPException(status_code=404, detail="Asset file not found")
-
-        mime_type = asset.mime_type or guess_mime(safe_name)
-        is_image = mime_type.startswith("image/")
-        is_video = mime_type.startswith("video/")
-        if not (is_image or is_video):
-            raise HTTPException(status_code=404, detail="Thumbnail not found")
-
-        etag = f'"{asset.id}"'
-        headers = {
-            "ETag": etag,
-            "Cache-Control": "private, no-cache",
-        }
-        if_none_match = request.headers.get("if-none-match", "")
-        etag_matches = any(
-            candidate.strip() in {"*", etag, f"W/{etag}"}
-            for candidate in if_none_match.split(",")
-        )
-        if is_image and etag_matches:
-            return Response(status_code=304, headers=headers)
-
-        handle = await _open_asset_handle(derived_key)
-        if handle is None:
-            if is_video:
-                # Never try to decode a missing video thumbnail as an image.
-                raise HTTPException(status_code=404, detail="Thumbnail not found")
-
-            # Recheck while owning the lifecycle before registering work. This
-            # closes stale-miss races with a just-completed generation task.
-            handle = await _open_asset_handle(derived_key)
-            if handle is None:
-                generation = _shared_thumbnail_generation(
-                    asset.file_path,
-                    derived_key,
-                )
-                try:
-                    generated = await wait_for_task_completion(generation)
-                except asyncio.CancelledError:
-                    raise
-                except FileStoreUnavailableError as exc:
-                    raise HTTPException(
-                        status_code=503,
-                        detail=FILESTORE_UNAVAILABLE_DETAIL,
-                    ) from exc
-                except Exception:
-                    raise HTTPException(status_code=404, detail="Thumbnail not found")
-                if not generated:
-                    raise HTTPException(status_code=404, detail="Thumbnail not found")
-                handle = await _open_asset_handle(derived_key)
-                if handle is None:
-                    raise HTTPException(status_code=404, detail="Thumbnail not found")
-
-        if etag_matches:
-            handle.close()
-            return Response(status_code=304, headers=headers)
-
-        if handle.local_path is not None:
-            local_path = handle.local_path
-            handle.close()
-            return FileResponse(
-                local_path,
-                media_type="image/jpeg",
-                headers=headers,
-            )
-
-        def stream_thumbnail():
-            try:
-                yield from handle.iter_bytes()
-            finally:
-                handle.close()
-
-        try:
-            return StreamingResponse(
-                stream_thumbnail(),
-                media_type="image/jpeg",
-                headers={**headers, "Content-Length": str(handle.size)},
-            )
-        except BaseException:
-            handle.close()
-            raise
 
 
 @router.post("/{task_id}/cancel", response_model=TaskResponse)
@@ -434,7 +196,7 @@ async def retry_task(
             result = await db.execute(select(Asset).where(Asset.task_id == task.id))
             old_assets = result.scalars().all()
             derived_keys = [
-                thumb_key(asset.task_id, asset.file_name)
+                thumb_key(asset.file_path)
                 for asset in old_assets
             ]
             async with thumbnail_lifecycle(derived_keys):
@@ -442,7 +204,6 @@ async def retry_task(
                     await asyncio.to_thread(
                         cleanup_asset_files,
                         old_asset.file_path,
-                        old_asset.task_id,
                         old_asset.file_name,
                     )
                     await db.delete(old_asset)
@@ -514,7 +275,7 @@ async def delete_task(
             result = await db.execute(select(Asset).where(Asset.task_id == task.id))
             assets = result.scalars().all()
             derived_keys = [
-                thumb_key(asset.task_id, asset.file_name)
+                thumb_key(asset.file_path)
                 for asset in assets
             ]
             async with thumbnail_lifecycle(derived_keys):
@@ -522,7 +283,6 @@ async def delete_task(
                     source_result, thumbnail_result = await asyncio.to_thread(
                         cleanup_asset_files,
                         asset.file_path,
-                        asset.task_id,
                         asset.file_name,
                     )
                     source_removed, source_error = source_result

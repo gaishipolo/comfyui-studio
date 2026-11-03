@@ -3,10 +3,10 @@
 规则（产品拍板：默认隔离 + 手动共享）：
 - 任务：创建者本人或管理员可见、可操作（取消/重试/删除）。
   created_by 为空视为无主，仅管理员可见。
-- 素材：素材本身没有归属字段，归属走 task.created_by。
-  默认仅本人/管理员可见；is_shared=True 后全团队**可见可下载**，
-  但**不可改** —— 打标签、删除、共享开关仍是作者本人或管理员的权利
-  （共享的是「看」的权限，不是共同所有）。
+- 素材：归属看 **assets.owner_id**（2026-11-02 起，素材可脱离任务独立存在，
+  上传素材直接记上传人）。默认仅本人/管理员可见；is_shared=True 后全团队
+  **可见可下载**，但**不可改** —— 打标签、删除、共享开关仍是作者本人或
+  管理员的权利（共享的是「看」的权限，不是共同所有）。
 
 用法约定：
 - 读接口（列表/详情/下载）不可见时返回 **404**（不泄露「存在但无权」）
@@ -33,7 +33,10 @@ def can_modify_task(user: User, owner_id: str) -> bool:
 
 
 def can_view_asset(user: User, owner_id: str, is_shared: bool) -> bool:
-    """素材可见性：本人、管理员，或已共享给团队的"""
+    """素材可见性：本人、管理员，或已共享给团队的。
+
+    `owner_id` 取自 assets.owner_id（素材自带归属，不借道任务）。
+    """
     return is_admin(user) or bool(is_shared) or (bool(owner_id) and owner_id == user.id)
 
 

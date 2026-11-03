@@ -22,16 +22,6 @@ class Settings(BaseSettings):
     COMFYUI_BASE_URL: str = "http://127.0.0.1:8188"
     COMFYUI_TIMEOUT: int = 300  # 生成超时（秒）
 
-    # 通用 HTTP API 引擎（可扩展接入云端生成 API）
-    GENERIC_API_BASE_URL: str = ""
-    GENERIC_API_KEY: str = ""
-    GENERIC_API_SUBMIT_PATH: str = "/generate"
-    GENERIC_API_STATUS_PATH: str = "/tasks/{task_id}"
-    GENERIC_API_KEY_HEADER: str = "Authorization"
-    GENERIC_API_KEY_PREFIX: str = "Bearer"
-    GENERIC_API_TIMEOUT: float = 300.0
-    GENERIC_API_DOWNLOAD_TIMEOUT: float = 60.0
-
     # 文件存储
     # 后端可切换：local = 本机目录（默认）| minio = MinIO / S3 兼容对象存储。
     # 换后端只改这一个值，业务代码不感知（见 app/filestore.py）。

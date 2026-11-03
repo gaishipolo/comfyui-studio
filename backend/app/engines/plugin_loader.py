@@ -26,7 +26,9 @@ PLUGIN_DIR = Path(__file__).resolve().parents[2] / "plugins"
 _ALLOWED_MODULES = set(sys.stdlib_module_names) | {"httpx", "app"}
 SAFE_PROVIDER_NAME = re.compile(r"^[a-z0-9_-]{1,64}$")
 
-# 内置引擎注册名，插件不许撞
+# 内置引擎注册名，插件不许撞。
+# generic_api 是已移除的早期内置引擎名，继续保留以防上传同名插件 ——
+# 那个名字在历史文档/工单里出现过，复用会造成「这到底是不是原来那个」的混淆。
 _RESERVED_NAMES = {"comfyui", "generic_api"}
 
 
