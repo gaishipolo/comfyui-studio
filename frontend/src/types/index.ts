@@ -295,6 +295,12 @@ export interface Flow {
   created_by: string
   created_at: string
   updated_at: string
+  /** 审批留痕：reviewed_by 为空说明还没批 */
+  reviewed_by?: string
+  reviewed_at?: string
+  review_note?: string
+  /** Agent 对这份流程的说明 */
+  agent_note?: string
 }
 
 export interface FlowStepState {

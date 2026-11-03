@@ -702,3 +702,15 @@ export const runFlow = (id: string, params: Record<string, unknown>) =>
   request<FlowRun>(`/flows/${id}/run`, { method: 'POST', body: JSON.stringify(params) })
 
 export const getFlowRun = (runId: string) => request<FlowRun>(`/flows/runs/${runId}`)
+
+/** 试跑一条流程 —— 真的出图，但产物不进正式素材库。
+ *  Agent 生成的流程上线前先看效果，产物默认从素材库排除。 */
+export const trialFlow = (id: string, params: Record<string, unknown>) =>
+  request<FlowRun>(`/flows/${id}/trial`, { method: 'POST', body: JSON.stringify(params) })
+
+/** 审批一份草稿。approve=false 是驳回（归档并留下意见） */
+export const approveFlow = (id: string, approve: boolean, note = '') =>
+  request<{ ok: boolean; flow_id: string; status: string; message: string }>(
+    `/flows/${id}/approve`,
+    { method: 'POST', body: JSON.stringify({ approve, note }) },
+  )

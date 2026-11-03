@@ -15,6 +15,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Flow, FlowRun, FlowStep, NodeCapability, Template, TemplateField } from '../types'
 import {
+  approveFlow,
   createFlow,
   deleteFlow,
   exportFlow,
@@ -23,6 +24,7 @@ import {
   listFlows,
   listNodeCapabilities,
   runFlow,
+  trialFlow,
   updateFlow,
   validateFlow,
 } from '../api/client'
@@ -203,6 +205,11 @@ export default function FlowWorkspace({ user }: ModuleProps) {
           user={user}
           onSelect={setSelectedId}
           onChanged={load}
+          onRunStarted={(r) => {
+            // 试跑开始 → 切到运行台盯着它跑
+            setRun(r)
+            setTab('run')
+          }}
         />
       )}
     </div>
@@ -230,11 +237,15 @@ function RunView({
 }) {
   const nodeName = (templateId: string) =>
     caps.find((c) => c.id === templateId)?.name ?? '未知节点'
-  if (loading && !flows.length) return <p className="text-sm text-muted">加载中…</p>
-  if (!flows.length) {
+  // 运行台只列**能跑的**流程。
+  // 草稿还没审批上线，运营点了也跑不了 —— 列出来只会让人以为坏了。
+  // 草稿在「编排」页看。
+  const runnable = flows.filter((f) => f.status === 'active')
+  if (loading && !runnable.length) return <p className="text-sm text-muted">加载中…</p>
+  if (!runnable.length) {
     return (
       <div className="empty">
-        <p className="empty-title">还没有流程</p>
+        <p className="empty-title">还没有可运行的流程</p>
         <p className="empty-hint">切到「编排」页新建一条，把节点串起来</p>
       </div>
     )
@@ -243,7 +254,7 @@ function RunView({
     <div className="flex min-h-0 flex-1 gap-md">
       <aside className="w-64 shrink-0 overflow-y-auto">
         <ul className="flex flex-col gap-2xs">
-          {flows.map((f) => (
+          {runnable.map((f) => (
             <li key={f.id}>
               <button
                 type="button"
@@ -255,9 +266,7 @@ function RunView({
                 onClick={() => onSelect(f.id)}
               >
                 <div className="font-medium">{f.name}</div>
-                <div className="text-xs text-muted">
-                  {f.steps.length} 步 · {f.status === 'active' ? '已启用' : f.status}
-                </div>
+                <div className="text-xs text-muted">{f.steps.length} 步</div>
               </button>
             </li>
           ))}
@@ -382,6 +391,7 @@ function EditView({
   user,
   onSelect,
   onChanged,
+  onRunStarted,
 }: {
   flows: Flow[]
   caps: NodeCapability[]
@@ -389,6 +399,8 @@ function EditView({
   user: ModuleProps['user']
   onSelect: (id: string) => void
   onChanged: () => Promise<void>
+  /** 试跑开始时通知外层 —— 让运行台切到这次运行 */
+  onRunStarted?: (run: FlowRun) => void
 }) {
   const [draft, setDraft] = useState<Flow | null>(selected)
   const [busy, setBusy] = useState(false)
@@ -400,6 +412,8 @@ function EditView({
   // 拖动排序：dragIdx 是被拖的那项，dropIdx 是「插到第几项之前」
   const [dragIdx, setDragIdx] = useState<number | null>(null)
   const [dropIdx, setDropIdx] = useState<number | null>(null)
+  // 审批意见 —— 草稿批/驳时填
+  const [reviewNote, setReviewNote] = useState('')
 
   useEffect(() => {
     setDraft(selected)
@@ -632,6 +646,51 @@ function EditView({
     }
   }
 
+  /**
+   * 审批草稿 —— 批准上线或驳回。
+   *
+   * 驳回不是删掉，是归档（status=archived）：留个档，
+   * 「当时为什么没批」也记下来了。
+   */
+  const doApprove = async (approve: boolean) => {
+    if (!draft?.id) return
+    setBusy(true)
+    try {
+      const result = await approveFlow(draft.id, approve, reviewNote)
+      if (!result.ok) {
+        notify(result.message || '审批失败', 'warning')
+        return
+      }
+      notify(approve ? '已批准上线' : '已驳回', 'success')
+      setReviewNote('')
+      await onChanged()
+    } catch (err) {
+      reportError('审批失败', err)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /**
+   * 试跑 —— 真的出图，但产物不进正式素材库。
+   *
+   * 审批前得先看看效果对不对。试跑的图默认从素材库排除
+   * （素材库里有「试跑产物」筛选能翻出来）。
+   */
+  const doTrial = async () => {
+    if (!draft?.id) return
+    setBusy(true)
+    try {
+      const run = await trialFlow(draft.id, {})
+      notify('试跑已开始，产物不会进正式素材库', 'success')
+      onRunStarted?.(run)
+    } catch (err) {
+      reportError('试跑失败', err)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <div className="flex min-h-0 flex-1 gap-md">
       <aside className="w-56 shrink-0 overflow-y-auto">
@@ -667,7 +726,14 @@ function EditView({
                 onClick={() => onSelect(f.id)}
               >
                 <div className="font-medium">{f.name}</div>
-                <div className="text-xs text-muted">{f.steps.length} 步</div>
+                <div className="text-xs text-muted">
+                  {f.steps.length} 步 ·{' '}
+                  {f.status === 'active'
+                    ? '已启用'
+                    : f.status === 'draft'
+                      ? '待审批'
+                      : '已归档'}
+                </div>
               </button>
             </li>
           ))}
@@ -704,6 +770,59 @@ function EditView({
                 </label>
               </div>
             </div>
+
+            {/* ── 草稿审批区：Agent 生成的流程落成 draft，人批了才上线 ── */}
+            {draft.status === 'draft' && (
+              <div className="panel mb-md border-accent">
+                <div className="flex flex-wrap items-center gap-sm">
+                  <span className="chip" data-tone="accent">
+                    待审批
+                  </span>
+                  <span className="text-sm text-ink-2">
+                    这条流程还没上线，运营在运行台跑不到它。
+                  </span>
+                </div>
+                {draft.agent_note && (
+                  <p className="mt-2xs text-sm text-muted">
+                    <span className="text-ink-2">Agent 说明：</span>
+                    {draft.agent_note}
+                  </p>
+                )}
+                <div className="mt-sm flex flex-wrap items-end gap-sm">
+                  <label className="field-label flex-1">
+                    审批意见
+                    <input
+                      className="field"
+                      value={reviewNote}
+                      placeholder="例如：第 2 步该用图生图，不是文生图"
+                      onChange={(e) => setReviewNote(e.target.value)}
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    disabled={busy}
+                    onClick={() => void doApprove(true)}
+                  >
+                    批准上线
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-danger-quiet"
+                    disabled={busy}
+                    onClick={() => void doApprove(false)}
+                  >
+                    驳回
+                  </button>
+                </div>
+              </div>
+            )}
+            {draft.status !== 'draft' && draft.review_note && (
+              <p className="mb-md text-xs text-muted">
+                <span className="text-ink-2">审批意见：</span>
+                {draft.review_note}
+              </p>
+            )}
 
             {/* ── 节点列表：可拖动排序，双击开设置 ── */}
             <div className="mb-md flex items-center justify-between gap-sm">
@@ -1002,6 +1121,17 @@ function EditView({
               <button type="button" className="btn btn-quiet" disabled={busy} onClick={() => void doValidate()}>
                 只校验
               </button>
+              {draft.id && draft.status !== 'archived' && (
+                <button
+                  type="button"
+                  className="btn btn-quiet"
+                  disabled={busy}
+                  onClick={() => void doTrial()}
+                  title="真的跑一遍，出图但产物不进正式素材库"
+                >
+                  试跑
+                </button>
+              )}
               {draft.id && (
                 <button
                   type="button"
