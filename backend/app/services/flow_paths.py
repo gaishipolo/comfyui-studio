@@ -6,27 +6,39 @@
 **这里绝不能出现 getattr / eval / 导入**：
 - 表达式将来是 Agent 生成的，任意代码执行路径不可接受
 - 表达式必须可静态分析（校验层要确认引用了哪些路径），否则审批失去意义
+
+**标识符允许中文**：字段名（input.prompt）是用户起的，界面上标签是中文，
+用中文命名很自然。但**仍然只允许「标识符」形态**——字母数字下划线或中文，
+不能有空格、括号、引号。所以 `__class__` 之类照样拒绝（不是字典里的键）。
 """
 import re
 
-# 允许的引用路径：字母数字下划线 + 点分段。
+# 标识符：ASCII 字母数字下划线，或中文（及其他非 ASCII 字母）。
+# **不允许**空格、括号、引号、运算符 —— 路径里出现这些就该被拒。
+#
+# **写法说明**：首字符不能是数字，所以要拆成两支：ASCII 字母下划线 / 非 ASCII 字符。
+# 这里必须用**组**而不是字符类 —— 字符类里没法表达「非 ASCII 但不是数字」。
+_IDENT = r"(?:[A-Za-z_]|[^\x00-\x7F])\w*"
+# 方括号里的标识符 —— 与 _IDENT 同形。
+# **用组不用字符类**：写成 `[[\w\u0080-\uffff]]` 会被当成嵌套字符类，
+# 匹配静默出错（`[index]` 匹配不上）还带告警。
+_BRACKET_CONTENT = r"(?:[A-Za-z_]|[^\x00-\x7F])\w*"
+
+# 允许的引用路径：标识符 + 点分段。
 # 末段可以是纯数字 —— 那是列表下标（steps.s1.outputs.0）。
-_PATH = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
-_PATH_WITH_INDEX = re.compile(
-    r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*(\.\d+)?$"
-)
+_PATH = re.compile(rf"^{_IDENT}(\.{_IDENT})*$")
+_PATH_WITH_INDEX = re.compile(rf"^{_IDENT}(\.{_IDENT})*(\.\d+)?$")
 # 带方括号下标的路径：input.prompts[index]
-_BRACKET_INDEX = re.compile(r"\[([A-Za-z_][A-Za-z0-9_]*)\]")
+_BRACKET_INDEX = re.compile(rf"\[({_IDENT})\]")
 # 路径里允许出现方括号（段内下标），也要允许纯点号分段
 # —— 两者的区别只是有没有方括号，所以合并成一个正则：
 #   input.prompts[index]      段内带方括号
 #   steps.gen.outputs.first   纯点号（first/last 是列表取值）
 _PATH_WITH_BRACKET = re.compile(
-    r"^[A-Za-z_][A-Za-z0-9_]*"
-    r"(\.[A-Za-z_][A-Za-z0-9_]*|\[[A-Za-z0-9_]+\])*$"
+    rf"^{_IDENT}(\.{_IDENT}|\[{_BRACKET_CONTENT}\])*$"
 )
 # 段内带方括号的路径（用于区分「要不要走方括号求值」）
-_PATH_WITH_INNER_BRACKET = re.compile(r"\[[A-Za-z0-9_]+\]")
+_PATH_WITH_INNER_BRACKET = re.compile(rf"\[{_BRACKET_CONTENT}\]")
 
 
 class FlowExprError(ValueError):
@@ -158,7 +170,7 @@ def _resolve_with_bracket(path: str, ctx: dict):
             continue
 
         # 段里可能既有名字又有下标：prompts[index]
-        m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)(.*)$", seg)
+        m = re.match(rf"^({_IDENT})(.*)$", seg)
         if not m:
             raise FlowExprError(f"引用「{path}」的第 {i + 1} 段不合法：{seg!r}")
         name, rest = m.group(1), m.group(2)

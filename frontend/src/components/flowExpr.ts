@@ -196,9 +196,13 @@ function tokenize(src: string): Token[] | null {
       i = j
       continue
     }
-    if (/[A-Za-z_]/.test(ch)) {
+    // 标识符：ASCII 字母/下划线，或任何非 ASCII 字母（中文）。
+    // **首字符不能是数字** —— 数字单独走 number 分支。
+    // 字段名是用户起的，用中文很自然（界面标签本来就是中文），
+    // 所以这里必须认中文标识符，否则中文字段名在表达式里没法引用。
+    if (/[A-Za-z_]/.test(ch) || (ch.charCodeAt(0) > 127 && /[\p{L}_]/u.test(ch))) {
       let j = i
-      while (j < src.length && /[A-Za-z0-9_]/.test(src[j])) j += 1
+      while (j < src.length && /[A-Za-z0-9_\u0080-\uffff]/.test(src[j])) j += 1
       out.push({ t: 'ident', v: src.slice(i, j) })
       i = j
       continue

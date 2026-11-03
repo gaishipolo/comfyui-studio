@@ -45,7 +45,7 @@ _TOKEN_RE = re.compile(
     \s*(?:
       (?P<STRING>"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')
     | (?P<NUMBER>\d+(?:\.\d+)?)
-    | (?P<IDENT>[A-Za-z_][A-Za-z0-9_]*)
+    | (?P<IDENT>[^\W\d][\w]*)
     | (?P<OP>==|!=|>=|<=|>|<)
     | (?P<PIPE>\|)
     | (?P<QUESTION>\?)

@@ -259,6 +259,38 @@ def test_today_and_now() -> None:
     assert "T" in now or " " in now
 
 
+def test_chinese_field_names() -> None:
+    """**中文字段名要能用** —— 字段名是用户起的，界面标签本来就是中文。
+
+    早期版本的路径正则只认 ASCII 标识符，于是中文字段名在表达式里
+    根本没法引用 —— 用户把字段命名为「提示词」，流程就配不出来。
+    """
+    ctx = {**CTX, "input": {**CTX["input"], "提示词": "一只狗", "画风": "写实"}}
+    assert resolve_value("{{ input.提示词 }}", ctx) == "一只狗"
+    assert resolve_value("{{ input.提示词 | trim }}", ctx) == "一只狗"
+    assert resolve_value('{{ input.画风 == "写实" ? input.提示词 : "其他" }}', ctx) == "一只狗"
+
+
+def test_chinese_field_name_with_bracket_index() -> None:
+    """中文列表字段 + 下标。"""
+    ctx = {**CTX, "input": {**CTX["input"], "提示词列表": ["猫", "狗", "鸟"]}}
+    assert resolve_value("{{ input.提示词列表[index] }}", ctx) == "狗"
+
+
+def test_attribute_chain_still_rejected_with_chinese_support() -> None:
+    """支持中文**不能**放松安全边界 —— 属性链照样拒绝。"""
+    for expr in (
+        "{{ input.__class__ }}",
+        "{{ input.提示词.__class__ }}",
+        "{{ __class__ }}",
+    ):
+        try:
+            resolve_value(expr, CTX)
+        except FlowExprError:
+            continue
+        raise AssertionError(f"{expr} 应当被拒绝")
+
+
 def main() -> int:
     tests = [
         test_pipe_trim,
@@ -291,6 +323,9 @@ def main() -> int:
         test_interpolation_with_pipe,
         test_whole_reference_with_pipe_keeps_type,
         test_today_and_now,
+        test_chinese_field_names,
+        test_chinese_field_name_with_bracket_index,
+        test_attribute_chain_still_rejected_with_chinese_support,
     ]
     failures: list[str] = []
     for test in tests:

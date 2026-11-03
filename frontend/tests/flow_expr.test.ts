@@ -152,6 +152,30 @@ test('认不得的形状解析不出来', () => {
   assert.equal(parseValue('{{ "未闭合 }}'), null)
 })
 
+test('中文字段名能引用', () => {
+  // 字段名是用户起的，界面标签本来就是中文 —— 中文名必须能用。
+  const v = parseValue('{{ input.提示词 }}')
+  assert.ok(v)
+  assert.equal(v!.base.kind === 'input' && v!.base.field, '提示词')
+})
+
+test('中文字段名带加工与条件都能解析', () => {
+  const a = parseValue('{{ input.提示词 | trim }}')
+  assert.ok(a)
+  assert.equal(a!.transforms.length, 1)
+
+  const b = parseValue('{{ input.画风 == "写实" ? input.写实提示词 : input.油画提示词 }}')
+  assert.ok(b)
+  assert.equal(b!.condition?.field, '画风')
+})
+
+test('中文字段名的往返保持不变', () => {
+  const raw = '{{ input.提示词 | trim }}'
+  const parsed = parseValue(raw)
+  assert.ok(parsed)
+  assert.equal(formatValue(parsed!), raw)
+})
+
 // ── 格式化 ──────────────────────────────────────────────
 
 test('格式化固定值不带引号', () => {
