@@ -366,8 +366,11 @@ async function main() {
   await page.click('button[type="submit"]')
   await page.waitForTimeout(1500)
 
-  await page.click('button:has-text("流程")')
+  // 应用列表 → 双击进编辑器 → 中栏底部的运行区
+  await page.click('button:text-is("应用")')
   await page.waitForTimeout(1200)
+  await page.dblclick('[data-app-card="flow-main"]')
+  await page.waitForTimeout(1000)
 
   // ── 第一次运行：干净跑完 ──────────────────────────────────────
   // 表单字段的 id 是 `field-<name>`（见 DynamicForm），不是 name 属性

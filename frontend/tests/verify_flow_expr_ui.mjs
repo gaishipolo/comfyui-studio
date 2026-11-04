@@ -196,9 +196,10 @@ async function main() {
   await page.click('button[type="submit"]')
   await page.waitForTimeout(1500)
 
-  await page.click('button:has-text("流程")')
-  await page.waitForTimeout(1200)
-  await page.click('button:has-text("编排")')
+  // 应用列表 → 双击卡片进编辑器（一个搭好的流程就是一个应用）
+  await page.click('button:text-is("应用")')
+  await page.waitForTimeout(1000)
+  await page.dblclick('[data-app-card="flow-fake"]')
   await page.waitForTimeout(1200)
 
   // 双击节点卡片

@@ -25,6 +25,8 @@ import DialogHost from './components/DialogHost'
 /** 模块图标（24 视框线性图）。按注册表 key 取，未登记的模块退回一个通用方块 */
 const MODULE_ICON: Record<string, string> = {
   generate: 'M12 3.5 13.9 9l5.6 1.9-5.6 1.9L12 18.4l-1.9-5.6L4.5 10.9 10.1 9 12 3.5Z',
+  // 应用：四个格子 = 一堆搭好的东西，进去是工作台
+  apps: 'M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z',
   tasks: 'M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01',
   assets: 'M4 5h16v14H4zM9.5 10.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3M20 16l-4.5-4.5L7 20',
   admin: 'M4 6h16M4 12h10M4 18h6',

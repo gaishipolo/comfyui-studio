@@ -219,20 +219,20 @@ async function main() {
   await page.click('button[type="submit"]')
   await page.waitForTimeout(1500)
 
-  await page.click('button:has-text("流程")')
-  await page.waitForTimeout(1200)
-
-  // 切到「编排」页
-  await page.click('button:text-is("编排")')
+  // 应用列表 → 双击卡片进编辑器
+  await page.click('button:text-is("应用")')
   await page.waitForTimeout(1200)
 
   const listText = await page.textContent('body')
-  check('流程列表显示「待审批」', () => {
+  check('应用列表显示「待审批」', () => {
     assert.ok(listText.includes('待审批'), '列表里没看到「待审批」')
   })
 
+  await page.dblclick('[data-app-card="flow-agent"]')
+  await page.waitForTimeout(1000)
+
   const body = await page.textContent('body')
-  check('编排页有审批区', () => {
+  check('编辑器里有审批区', () => {
     assert.ok(body.includes('批准上线'), '没有「批准上线」按钮')
     assert.ok(body.includes('驳回'), '没有「驳回」按钮')
   })
@@ -259,8 +259,8 @@ async function main() {
   })
 
   const after = await page.textContent('body')
-  check('批准后列表显示已启用', () => {
-    assert.ok(after.includes('已启用'), '列表里没看到「已启用」')
+  check('批准后应用显示已启用', () => {
+    assert.ok(after.includes('已启用'), '应用里没看到「已启用」')
     assert.ok(after.includes('看着没问题'), '审批意见没显示出来')
   })
 

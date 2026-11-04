@@ -50,3 +50,6 @@ backend/backups/
 /image_flux2_klein_text_to_image_ref_face.json
 /图像放大.json
 /images.jfif
+
+# 本地截图（给人看界面，不入库）
+.shots/

@@ -14,7 +14,7 @@ import DashboardModule from '../components/modules/DashboardModule'
 import UserManager from '../components/modules/UserManager'
 import UsagePanel from '../components/modules/UsagePanel'
 import PluginManager from '../components/modules/PluginManager'
-import FlowWorkspace from '../components/FlowWorkspace'
+import AppWorkspace from '../components/apps/AppWorkspace'
 
 // ── 核心模块 ────────────────────────────────
 // 组件按需接收 ModuleProps 的子集即可（结构化类型兼容，无需类型断言）
@@ -27,9 +27,9 @@ registerModule({
 })
 
 registerModule({
-  key: 'flows',
-  label: '流程',
-  component: FlowWorkspace,
+  key: 'apps',
+  label: '应用',
+  component: AppWorkspace,
   order: 2,
 })
 

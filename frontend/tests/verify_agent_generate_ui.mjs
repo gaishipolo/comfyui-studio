@@ -42,6 +42,38 @@ const CAPABILITY = {
 
 const GENERATED_NOTE = '模型 ui-fake-model · 第 1 次尝试通过校验 · 一步出图，提示词由运营填'
 
+/** 列表里先放一个应用 —— 新的界面是「列表 → 双击进编辑器」，
+ *  没有卡片就没地方打开 agent 栏 */
+function baseFlow() {
+  return {
+    id: 'flow-base',
+    name: '已有应用',
+    description: '',
+    category: 'image',
+    icon: '',
+    input_schema: {
+      fields: [{ name: 'prompt', label: '提示词', type: 'textarea', required: true }],
+    },
+    outputs: [],
+    steps: [
+      {
+        id: 's1',
+        title: '出图',
+        type: 'template',
+        template_id: 'template-fake',
+        flow_id: '',
+        count: 1,
+        params: { prompt: '{{ input.prompt }}' },
+      },
+    ],
+    status: 'active',
+    version: 1,
+    created_by: 'owner',
+    created_at: '2026-10-31T00:00:00',
+    updated_at: '2026-10-31T00:00:00',
+  }
+}
+
 function generatedFlow() {
   return {
     id: 'flow-gen',
@@ -74,7 +106,7 @@ function generatedFlow() {
 }
 
 const state = {
-  flows: [],
+  flows: [baseFlow()],
   configured: true,
   generateBody: null,
   generateCalls: 0,
@@ -206,14 +238,15 @@ async function main() {
   await page.click('button[type="submit"]')
   await page.waitForTimeout(1500)
 
-  await page.click('button:has-text("流程")')
+  // 应用列表 → 双击进编辑器 → 右栏 agent
+  await page.click('button:text-is("应用")')
   await page.waitForTimeout(1000)
-  await page.click('button:text-is("编排")')
+  await page.dblclick('[data-app-card="flow-base"]')
   await page.waitForTimeout(1000)
 
   const entryCount = await page.locator('button:has-text("一句话生成")').count()
-  check('编排器有「一句话生成」入口', () => {
-    assert.ok(entryCount, '侧栏没有入口')
+  check('编辑器有「一句话生成」入口', () => {
+    assert.ok(entryCount, '工具栏没有入口')
   })
 
   await page.click('button:has-text("一句话生成")')
@@ -237,9 +270,11 @@ async function main() {
     assert.equal(state.generateBody?.requirement, requirement, state.generateBody)
   })
 
+  // 生成完自动切到新草稿 —— 名字在名称输入框里，状态在它旁边的标签上
+  const nameValue = await page.inputValue('input[aria-label="应用名称"]')
   const after = await page.textContent('body')
-  check('列表出现新草稿', () => {
-    assert.ok(after.includes('拉布拉多换边牧'), '列表里没看到生成的流程')
+  check('生成后切到新草稿', () => {
+    assert.equal(nameValue, '拉布拉多换边牧', `名称输入框里是「${nameValue}」`)
   })
   check('草稿显示待审批', () => {
     assert.ok(after.includes('待审批'), '没有「待审批」标记')
@@ -249,10 +284,8 @@ async function main() {
     assert.ok(after.includes('一步出图'), '说明里没有 Agent 的说明文字')
   })
 
-  // 收起面板 → 模拟后端被拔掉模型配置 → 再打开
+  // 后端被拔掉模型配置 → 再点一次入口，应该直接说明原因
   state.configured = false
-  await page.click('button:has-text("收起")')
-  await page.waitForTimeout(300)
   await page.click('button:has-text("一句话生成")')
   await page.waitForTimeout(600)
 
