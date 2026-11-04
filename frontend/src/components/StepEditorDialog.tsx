@@ -24,6 +24,7 @@ import {
 } from './flowExpr'
 import {
   buildSourceOptions,
+  describeSource,
   formatParsedParam,
   optionPick,
   optionToSource,
@@ -34,6 +35,7 @@ import {
   type ParamSource,
   type SourceOption,
 } from './flowSource'
+import { autoBinding, stepOutputName } from './flowBindings'
 
 interface Props {
   step: FlowStep
@@ -58,6 +60,12 @@ export default function StepEditorDialog({
   onClose,
 }: Props) {
   const [draft, setDraft] = useState<FlowStep>(step)
+  // 哪些字段展开了「加工 / 条件」。
+  //
+  // **状态必须在父组件**：ParamControl 是内联组件（定义在本函数体内），
+  // 父组件每渲染一次它就是新实例、内部 state 全丢 —— 展开区会「一加加工就
+  // 折叠」。放父组件才稳。
+  const [advancedFields, setAdvancedFields] = useState<string[]>([])
   const dialogRef = useRef<HTMLDivElement>(null)
   useModalKeyboard(true, dialogRef, onClose)
 
@@ -92,6 +100,29 @@ export default function StepEditorDialog({
   // 谁在吃这一步的产物
   const consumers = steps.filter((s) => stepDependencies(steps, s.id).includes(draft.id))
 
+  /**
+   * 上游的「产出名 → 步骤 id」。自动接上按它匹配。
+   *
+   * **只能接前面的步骤** —— 后面的还没跑，接了也是空的。
+   * 子流程步骤的产出名是它自己的 outputs 声明名（可以有好几个）。
+   */
+  const upstreamOutputs = useMemo(() => {
+    const map: Record<string, string> = {}
+    steps.forEach((s, i) => {
+      if (i >= selfIndex) return
+      if (s.type === 'flow') {
+        const sub = flows.find((f) => f.id === s.flow_id)
+        const names = (sub?.outputs ?? []).map((o) => o.name).filter(Boolean)
+        if (names.length === 0) map['output'] = s.id
+        else names.forEach((n) => { map[n] = s.id })
+      } else {
+        const name = stepOutputName(s)
+        if (name) map[name] = s.id
+      }
+    })
+    return map
+  }, [steps, flows, selfIndex])
+
   const patch = (part: Partial<FlowStep>) => setDraft((d) => ({ ...d, ...part }))
 
   const setParam = (name: string, value: string) =>
@@ -102,6 +133,28 @@ export default function StepEditorDialog({
     const next = { ...draft.params }
     delete next[name]
     patch({ params: next })
+  }
+
+  /**
+   * 开关「自动接上」。
+   *
+   * 自动 = 这个字段不写表达式，靠**标签同名**接到流程输入或上游产物上。
+   * 打开时要把表达式撤掉（表达式优先于自动），关掉时标记也撤掉。
+   */
+  /** 展开 / 收起某个字段的「加工 / 条件」区 */
+  const toggleAdvanced = (name: string) => {
+    setAdvancedFields((prev) =>
+      prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name],
+    )
+  }
+
+  const setAuto = (name: string, on: boolean) => {
+    const autoFields = new Set(draft.auto_fields ?? [])
+    if (on) autoFields.add(name)
+    else autoFields.delete(name)
+    const params = { ...draft.params }
+    if (on) delete params[name]
+    patch({ auto_fields: [...autoFields], params })
   }
 
   const subFlow = useMemo(
@@ -127,10 +180,24 @@ export default function StepEditorDialog({
   const ParamControl = ({
     field,
     raw,
+    auto,
+    onAutoChange,
+    advanced,
+    onToggleAdvanced,
+    allowAuto = true,
   }: {
     field: TemplateField
     raw: string
+    /** 这个字段是不是走「自动接上」（没配来源，靠同名接上） */
+    auto: boolean
+    onAutoChange: (on: boolean) => void
+    /** 「加工 / 条件」区是不是展开的（状态在父组件，见 advancedFields） */
+    advanced: boolean
+    onToggleAdvanced: () => void
+    /** 能不能选「自动」。子流程的输入是另一套同名自动传，不走这条 */
+    allowAuto?: boolean
   }) => {
+    const showAdvanced = advanced
     const parsed = parseParamSource(raw)
     // 固定值就是 raw 本身；自定义表达式的原文也是 raw。
     // 不另开 state 存 —— 那就要在外部改值时同步，反而容易不同步。
@@ -157,7 +224,19 @@ export default function StepEditorDialog({
       ]
     })
 
-    const current = sourceToOption(parsed.source, parsed.isCustom)
+    // 自动接上会接到什么 —— 显示出来，用户才知道「不用管也能跑对」
+    const binding = auto
+      ? autoBinding(
+          { name: field.name, label: field.label, type: field.type },
+          inputFields,
+          upstreamOutputs,
+        )
+      : null
+
+    // 没配过、也不自动的字段：单列一个「不传」选项。
+    // 显示成「固定值」会让人以为有个值在那儿，其实是空的
+    const unset = !auto && !parsed.isCustom && raw.trim() === ''
+    const current = auto ? 'auto' : unset ? 'none' : sourceToOption(parsed.source, parsed.isCustom)
     const inputFieldName =
       parsed.source.kind === 'input' ? parsed.source.field : ''
 
@@ -168,6 +247,19 @@ export default function StepEditorDialog({
     }
 
     const applyOption = (optionValue: string) => {
+      if (optionValue === 'auto') {
+        // 自动：撤掉这个字段的表达式，交给同名规则接
+        onAutoChange(true)
+        removeParam(field.name)
+        return
+      }
+      if (optionValue === 'none') {
+        // 不传：撤掉表达式，也不走自动
+        onAutoChange(false)
+        removeParam(field.name)
+        return
+      }
+      onAutoChange(false)
       const p = optionPick(optionValue)
       const src = optionToSource(optionValue, literal)
       if (src === 'custom') {
@@ -218,78 +310,99 @@ export default function StepEditorDialog({
       upstreams.map((u) => stepTitles[u.id] ?? ''),
     )
 
+    const hasAdvanced = parsed.transforms.length > 0 || !!parsed.condition
+
     return (
       <div className="flex flex-col gap-2xs">
-        <div className="flex flex-wrap items-end gap-xs">
-          <label className="field-label min-w-40 flex-1">
-            <span className="text-xs text-muted">
-              {field.label || field.name}
-              {field.required ? ' *' : ''}
-              {field.type === 'file_upload' && (
-                <span className="ml-2xs">（接上游产物）</span>
-              )}
-            </span>
-            {parsed.isCustom ? (
-              <textarea
-                className="field font-mono text-xs"
-                rows={2}
-                value={customText}
-                onChange={(e) => setParam(field.name, e.target.value)}
-                placeholder="{{ input.xxx }}"
-              />
-            ) : parsed.source.kind === 'input' ? (
-              <div className="field flex items-center bg-paper-2 text-sm text-ink-2">
-                取流程输入「
-                {inputFields.find((f) => f.name === inputFieldName)?.label ||
-                  inputFieldName}
-                」
-              </div>
-            ) : parsed.source.kind === 'upstream' ? (
-              <div className="field flex items-center bg-paper-2 text-sm text-ink-2">
-                取「{stepTitles[parsed.source.stepId] ?? '上一步'}」的产物
-                {parsed.source.pick === 'first' && '（第 1 张）'}
-                {parsed.source.pick === 'last' && '（最后一张）'}
-                {parsed.source.pick && /^[0-9]+$/.test(parsed.source.pick) &&
-                  `（第 ${Number(parsed.source.pick) + 1} 张）`}
-                {!canTakeOutput && (
-                  <span className="ml-2xs text-warning">
-                    这个字段不是图片/文件类型，接不了产物
-                  </span>
-                )}
-              </div>
-            ) : (
-              <LiteralControl
-                field={field}
-                value={literal}
-                onChange={(v) => write({ source: { kind: 'literal', value: v } })}
-              />
-            )}
-          </label>
-        </div>
-
-        <div className="flex items-center gap-xs">
-          <span className="text-xs text-muted">取值来自</span>
+        {/* 一行说清三件事：哪个字段、值从哪来、接到了什么 */}
+        <div className="flex flex-wrap items-center gap-xs">
+          <span className="w-28 shrink-0 text-sm text-ink-2">
+            {field.label || field.name}
+            {field.required && <span className="text-error"> *</span>}
+          </span>
           <select
-            className="field w-64"
+            className="field w-40 shrink-0"
             value={current}
             aria-label={`「${field.label || field.name}」的取值来源`}
             onChange={(e) => applyOption(e.target.value)}
           >
+            {allowAuto && <option value="auto">自动（同名接上）</option>}
+            <option value="none">不传（用节点默认值）</option>
             {withPick.map((o) => (
               <option key={o.value} value={o.value}>
                 {o.label}
               </option>
             ))}
           </select>
-          {parsed.isCustom && (
-            <span className="text-xs text-warning">这段是手写表达式，改动请谨慎</span>
-          )}
-          {!parsed.isCustom && parsed.source.kind === 'literal' && !literal && (
-            <span className="text-xs text-muted">留空则用节点自己的默认值</span>
+          <span className="min-w-0 flex-1 truncate text-xs text-muted">
+            {auto ? (
+              binding?.kind === 'input' ? (
+                <>接上「流程输入 · {binding.field.label || binding.field.name}」</>
+              ) : binding?.kind === 'upstream' ? (
+                <>接上「{stepTitles[binding.stepId] ?? '上一步'}」的产物</>
+              ) : (
+                <>没有同名的输入或上游产物，不传这个字段（用节点默认值）</>
+              )
+            ) : parsed.isCustom ? (
+              '手写表达式'
+            ) : (
+              describeSource(parsed.source, false, inputFields, stepTitles)
+            )}
+          </span>
+          {!auto && (
+            <button
+              type="button"
+              className="btn-quiet shrink-0 text-xs"
+              aria-expanded={showAdvanced}
+              onClick={onToggleAdvanced}
+            >
+              {showAdvanced ? '收起' : hasAdvanced ? '已加加工' : '加工 / 条件'}
+            </button>
           )}
         </div>
 
-        {!parsed.isCustom && (
+        {/* 固定值才要输入框 —— 选自动/上游/流程输入时下面这行不出现 */}
+        {!auto && parsed.isCustom && (
+          <textarea
+            className="field font-mono text-xs"
+            rows={2}
+            value={customText}
+            onChange={(e) => setParam(field.name, e.target.value)}
+            placeholder="{{ input.xxx }}"
+            aria-label={`「${field.label || field.name}」的自定义表达式`}
+          />
+        )}
+        {/* 选了「不传」就不给输入框 —— 空框会让人以为该填点什么 */}
+        {!auto && !parsed.isCustom && !unset && parsed.source.kind === 'literal' && (
+          <div className="pl-28">
+            <LiteralControl
+              field={field}
+              value={literal}
+              onChange={(v) => write({ source: { kind: 'literal', value: v } })}
+            />
+          </div>
+        )}
+        {!auto && !parsed.isCustom && parsed.source.kind === 'input' && (
+          <div className="pl-28 text-xs text-muted">
+            取流程输入「
+            {inputFields.find((f) => f.name === inputFieldName)?.label || inputFieldName}」
+          </div>
+        )}
+        {!auto && !parsed.isCustom && parsed.source.kind === 'upstream' && (
+          <div className="pl-28 text-xs text-muted">
+            取「{stepTitles[parsed.source.stepId] ?? '上一步'}」的产物
+            {parsed.source.pick === 'first' && '（第 1 张）'}
+            {parsed.source.pick === 'last' && '（最后一张）'}
+            {parsed.source.pick && /^[0-9]+$/.test(parsed.source.pick) &&
+              `（第 ${Number(parsed.source.pick) + 1} 张）`}
+            {!canTakeOutput && (
+              <span className="ml-2xs text-warning">这个字段不是图片/文件类型，接不了产物</span>
+            )}
+          </div>
+        )}
+
+        {/* 加工与条件收进「高级」—— 常用路径上不占地方 */}
+        {showAdvanced && !parsed.isCustom && (
           <div className="flex flex-col gap-2xs border-l-2 border-rule pl-sm">
             <div className="flex flex-wrap items-center gap-xs">
               <span className="text-xs text-muted">取到之后再处理</span>
@@ -698,7 +811,15 @@ export default function StepEditorDialog({
                         </div>
                         {overridden ? (
                           <div className="mt-2xs">
-                            <ParamControl field={f} raw={draft.params?.[f.name] ?? ''} />
+                            <ParamControl
+                              field={f}
+                              raw={draft.params?.[f.name] ?? ''}
+                              auto={false}
+                              allowAuto={false}
+                              onAutoChange={() => {}}
+                              advanced={advancedFields.includes(f.name)}
+                              onToggleAdvanced={() => toggleAdvanced(f.name)}
+                            />
                           </div>
                         ) : (
                           <p className="mt-2xs text-xs text-muted">
@@ -717,8 +838,20 @@ export default function StepEditorDialog({
             <p className="mt-2xs text-sm text-muted">这个节点没有可填的参数</p>
           ) : (
             <div className="mt-sm flex flex-col gap-md">
+              <p className="rounded-md border border-rule bg-paper-2 px-sm py-xs text-xs text-muted">
+                默认按「同名」自动接上流程输入或上一步的产物，不用配。接不上就用节点自己的默认值。
+                要例外时改右边的下拉。
+              </p>
               {cap.fields.map((f) => (
-                <ParamControl key={f.name} field={f} raw={draft.params?.[f.name] ?? ''} />
+                <ParamControl
+                  key={f.name}
+                  field={f}
+                  raw={draft.params?.[f.name] ?? ''}
+                  auto={(draft.auto_fields ?? []).includes(f.name)}
+                  onAutoChange={(on) => setAuto(f.name, on)}
+                  advanced={advancedFields.includes(f.name)}
+                  onToggleAdvanced={() => toggleAdvanced(f.name)}
+                />
               ))}
             </div>
           )}
@@ -741,6 +874,20 @@ export default function StepEditorDialog({
                   .join('、')}`
               : ' 目前没有别的步骤用它的产物。'}
           </p>
+          {draft.type !== 'flow' && (
+            <label className="field-label mt-2xs block w-64">
+              产出叫什么
+              <input
+                className="field"
+                value={draft.output_name ?? ''}
+                placeholder={draft.title || '例如：参考图'}
+                onChange={(e) => patch({ output_name: e.target.value })}
+              />
+              <span className="mt-2xs block text-xs text-muted">
+                下游节点的字段跟它同名，就自动接上这一步的产物。
+              </span>
+            </label>
+          )}
           {draft.params && Object.keys(draft.params).length > 0 && (
             <p className="mt-2xs text-xs text-muted">
               当前设置：{paramSummary(draft, cap, inputFields, stepTitles)}

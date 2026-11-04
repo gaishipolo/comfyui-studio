@@ -11,6 +11,7 @@
  */
 import type { FlowStep, NodeCapability, TemplateField } from '../types'
 import { describeParam, parseParamSource } from './flowSource'
+import { autoBinding } from './flowBindings'
 
 /** 引用上游产物的写法：{{ steps.s1.outputs }} / .first / .last / 子流程产出名。
  *
@@ -109,6 +110,7 @@ export function paramSummary(
   cap: NodeCapability | null,
   inputs: TemplateField[] = [],
   stepTitles: Record<string, string> = {},
+  upstreamOutputs: Record<string, string> = {},
 ): string {
   // 子流程没有「节点」，参数是覆盖子流程的同名输入 —— 别显示「未设置参数」
   if (!cap) {
@@ -122,7 +124,24 @@ export function paramSummary(
   const parts: string[] = []
   for (const f of fields) {
     const raw = step.params?.[f.name]
-    if (raw === undefined || raw === '') continue
+    if (raw === undefined || raw === '') {
+      // 自动接上的字段也要说出来 —— 用户得知道「不用管也会接对」
+      if (!(step.auto_fields ?? []).includes(f.name)) continue
+      const hit = autoBinding(
+        { name: f.name, label: f.label, type: f.type },
+        inputs,
+        upstreamOutputs,
+      )
+      if (!hit) {
+        parts.push(`${f.label || f.name}：用节点默认值`)
+      } else if (hit.kind === 'input') {
+        parts.push(`${f.label || f.name}：输入 · ${hit.field.label || hit.field.name}`)
+      } else {
+        parts.push(`${f.label || f.name}：接上「${stepTitles[hit.stepId] ?? '上一步'}」`)
+      }
+      if (parts.length >= 3) break
+      continue
+    }
     const parsed = parseParamSource(raw)
     const text = describeParam(parsed, inputs, stepTitles)
     parts.push(`${f.label || f.name}：${text}`)

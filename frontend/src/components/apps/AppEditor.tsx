@@ -35,6 +35,7 @@ import RunPanel from './RunPanel'
 import NodeRail from './NodeRail'
 import SideRail from './SideRail'
 import { nodeVisual, paramSummary, reorderSteps, wouldBreakDependency } from '../flowEditor'
+import { stepOutputName } from '../flowBindings'
 import { stepTitle } from '../flowSource'
 import { notify, reportError } from '../../notify'
 import { confirmDialog } from '../dialog'
@@ -137,6 +138,28 @@ export default function AppEditor({
 
   const subflowIds = draft.steps.filter((s) => s.type === 'flow' && s.flow_id).map((s) => s.flow_id)
 
+  /**
+   * 某一步**前面**的步骤各叫什么产出（产出名 → 步骤 id）。
+   *
+   * 自动接上按它匹配：下游节点的字段标签跟上游的产出名同名就接上。
+   * 只能接前面的 —— 后面的还没跑。
+   */
+  const upstreamBefore = (index: number): Record<string, string> => {
+    const map: Record<string, string> = {}
+    draft.steps.slice(0, index).forEach((s) => {
+      if (s.type === 'flow') {
+        const sub = flows.find((f) => f.id === s.flow_id)
+        const names = (sub?.outputs ?? []).map((o) => o.name).filter(Boolean)
+        if (names.length === 0) map['output'] = s.id
+        else names.forEach((n) => { map[n] = s.id })
+      } else {
+        const name = stepOutputName(s)
+        if (name) map[name] = s.id
+      }
+    })
+    return map
+  }
+
   // ── 步骤增删 ──────────────────────────────
   const appendStep = (step: Omit<FlowStep, 'id'>) => {
     patch({ ...draft, steps: [...draft.steps, { ...step, id: nextStepId(draft.steps) } as FlowStep] })
@@ -144,12 +167,16 @@ export default function AppEditor({
 
   const addNode = (cap: NodeCapability) => {
     appendStep({
-      title: '',
+      title: cap.name,
       type: 'template',
       template_id: cap.id,
       flow_id: '',
       count: 1,
       params: {},
+      // **默认所有字段都走自动接上** —— 加进来就能跑，用不着的字段
+      // 接不上就自动不传（节点用自己的默认值）。用户只在例外时才动手。
+      auto_fields: (cap.fields ?? []).map((f) => f.name),
+      output_name: cap.name,
     })
     notify(`已把「${cap.name}」接到流程末尾`, 'success')
   }
@@ -162,6 +189,7 @@ export default function AppEditor({
       flow_id: sub.id,
       count: 1,
       params: {},
+      output_name: sub.name,
     })
     notify(`已把「${sub.name}」当成一步接进来`, 'success')
   }
@@ -575,17 +603,53 @@ export default function AppEditor({
                             子流程
                           </span>
                         )}
-                        <span className="min-w-0 flex-1">
+                        <span className="flex min-w-0 flex-1 flex-col gap-1-xs">
                           <span className="block truncate text-sm font-medium">
                             {step.title?.trim() || (step.type === 'flow' ? subName : cap?.name) ||
                               '（未选节点）'}
                           </span>
-                          <span className="block truncate text-xs text-muted">
-                            {step.type === 'flow'
-                              ? '输入按同名自动传'
-                              : cap?.name && step.title?.trim()
-                                ? `${cap.name} · ${paramSummary(step, cap, inputFields, stepTitleMap)}`
-                                : paramSummary(step, cap, inputFields, stepTitleMap)}
+                          <span className="flex items-center gap-xs">
+                            {/* 产出名：下游按它同名自动接上。改一个词，下游就连上了 */}
+                            <label
+                              className="flex shrink-0 items-center gap-2xs text-xs text-muted"
+                              onClick={(e) => e.stopPropagation()}
+                              onDoubleClick={(e) => e.stopPropagation()}
+                            >
+                              产出
+                              <input
+                                className="field h-6 w-24 py-0 text-xs"
+                                value={step.output_name ?? ''}
+                                placeholder={step.title || '名称'}
+                                aria-label={`步骤 ${index + 1} 的产出名`}
+                                onChange={(e) =>
+                                  patch({
+                                    ...draft,
+                                    steps: draft.steps.map((s) =>
+                                      s.id === step.id ? { ...s, output_name: e.target.value } : s,
+                                    ),
+                                  })
+                                }
+                              />
+                            </label>
+                            <span className="min-w-0 truncate text-xs text-muted">
+                              {step.type === 'flow'
+                                ? '输入按同名自动传'
+                                : cap?.name && step.title?.trim()
+                                  ? `${cap.name} · ${paramSummary(
+                                      step,
+                                      cap,
+                                      inputFields,
+                                      stepTitleMap,
+                                      upstreamBefore(index),
+                                    )}`
+                                  : paramSummary(
+                                      step,
+                                      cap,
+                                      inputFields,
+                                      stepTitleMap,
+                                      upstreamBefore(index),
+                                    )}
+                            </span>
                           </span>
                         </span>
                         {layer >= 0 && (

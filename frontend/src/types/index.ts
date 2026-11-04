@@ -272,6 +272,19 @@ export interface FlowStep {
   count_expr?: string
   /** 字段 → 字面量或 {{...}} 表达式 */
   params: Record<string, string>
+  /**
+   * 走「自动接上」的字段名。
+   *
+   * 这些字段不用配来源：运行前按**标签同名**接到流程输入或上游产物上
+   * （见 flowBindings.ts）。用户的配置里保留这个标记，界面照旧能显示
+   * 「自动接到了什么」，改了标签下次运行自动跟着变。
+   */
+  auto_fields?: string[]
+  /**
+   * 这一步的产出叫什么。默认取步骤标题。
+   * 下游节点按**字段标签**和它同名就能自动接上（不用手写引用）。
+   */
+  output_name?: string
 }
 
 export interface FlowOutput {

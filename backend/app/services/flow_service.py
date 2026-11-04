@@ -24,6 +24,7 @@ from app.database import async_session
 from app.filestore import read_asset_bytes
 from app.models.models import Asset, Flow, FlowRun, Task, Template
 from app.services.engine_input import EngineInputError, push_bytes_to_engine
+from app.services.flow_bindings import apply_auto_bindings, match_input
 from app.services.flow_expr import FlowExprError, collect_refs, resolve_value
 from app.services.field_types import is_file_field, normalized_field_map
 from app.services.flow_validate import compute_layers, step_label
@@ -206,12 +207,25 @@ async def _run_flow(run_id: str) -> None:
         steps = list(flow.steps or [])
         params = dict(run.params or {})
 
-    ctx: dict = {"input": params, "steps": {}}
+    ctx: dict = {
+        "input": params,
+        # 流程输入的字段定义 —— 自动接上要按**标签**比（内部标识对不上，
+        # 标签才对得上）。表达式只认 `input.` 前缀，不会碰到这个键。
+        "input_fields": list((flow.input_schema or {}).get("fields") or []),
+        "steps": {},
+    }
     state: list[dict] = []
     total = len(steps)
     # 同一次运行里，(引擎, 素材) → 引擎侧名字。循环 200 次用同一张参考图时，
     # 不能把同一张图往引擎传 200 遍 —— 上传是网络 + 磁盘开销，纯浪费。
     input_cache: dict[tuple[str, str], str] = {}
+
+    # ── 自动接上：在内存里把「自动」补成显式引用 ──────────────────
+    #
+    # 不补的话，两步之间没有依赖 —— 分层会把它们算成同一层并行，
+    # 上游还没跑完，下游就接不到东西。补完再分层，依赖就自然成立了。
+    input_fields = list((flow.input_schema or {}).get("fields") or [])
+    steps = await _bind_auto_fields(steps, input_fields)
 
     # 按依赖分层：同层的步骤互不依赖，一起提交、一起等。
     # 「谁吃谁」是流程声明的，「谁能同时跑」是算出来的 —— 不让用户配并行组，
@@ -346,7 +360,7 @@ async def _run_flow(run_id: str) -> None:
                 }
             )
         for step_id, outputs in merged.items():
-            ctx["steps"][step_id] = {"outputs": outputs}
+            ctx["steps"][step_id] = _expose_step_outputs(by_id.get(step_id, {}), outputs)
             done_steps.add(step_id)
         progress = min(100.0, len(done_steps) / total * 100) if total else 100.0
         await _update_run(run_id, progress=progress, steps=state)
@@ -435,6 +449,25 @@ def _subflow_outputs(sub_ctx: dict) -> list[dict]:
     return outs
 
 
+def _expose_step_outputs(step: dict, outputs: list[dict]) -> dict:
+    """一步的产物对外的形状：outputs（列表）+ named（按产出名）。
+
+    **产出名**是这一步的产物叫什么。默认取步骤标题，用户可以在步骤卡片上
+    改成别的（比如「参考图」）。下游节点按**字段标签**和它同名就能自动接上 ——
+    这是「不用教用户写表达式」的关键：图生图的「参考图」字段自动吃
+    上一步「参考图」的产物。
+    """
+    exposed: dict = {"outputs": outputs, "named": {}}
+    name = str(step.get("output_name") or step.get("title") or "").strip()
+    if name:
+        exposed["named"][name] = outputs
+        # 摊平到顶层：父流程写 `{{ steps.s1.参考图 }}` 就能拿到 ——
+        # 和子流程的具名产出一个写法（子流程那边是 _expose_subflow 摊的）
+        if name not in ("outputs", "named"):
+            exposed[name] = outputs
+    return exposed
+
+
 def _expose_subflow(sub_ctx: dict) -> dict:
     """子流程对父流程暴露的形状。
 
@@ -512,8 +545,18 @@ async def _run_subflow(
     sub_params = _build_subflow_params(sub_input_schema, step, parent_ctx)
 
     # 子流程在自己的上下文里跑 —— 步骤 id 与父流程独立
-    sub_ctx: dict = {"input": sub_params, "steps": {}, "named": {}}
+    sub_ctx: dict = {
+        "input": sub_params,
+        "input_fields": list((sub_input_schema or {}).get("fields") or []),
+        "steps": {},
+        "named": {},
+    }
     sub_state: list[dict] = []
+
+    # 子流程内部的自动接上 —— 规则和主流程一样（按标签同名）
+    sub_steps = await _bind_auto_fields(
+        sub_steps, list((sub_input_schema or {}).get("fields") or [])
+    )
 
     layers, cycle = compute_layers(sub_steps)
     if cycle:
@@ -622,7 +665,7 @@ async def _run_subflow(
                 }
             )
         for sid, outs in merged.items():
-            sub_ctx["steps"][sid] = {"outputs": outs}
+            sub_ctx["steps"][sid] = _expose_step_outputs(by_id.get(sid, {}), outs)
 
         if failed:
             sid, task = failed[0]
@@ -644,14 +687,18 @@ def _build_subflow_params(input_schema: dict, step: dict, parent_ctx: dict) -> d
     """组装传给子流程的参数。
 
     **同名自动取作默认，显式绑定作覆盖**：
-    - 子流程的输入字段叫「风格」，父流程上下文里也有「风格」→ 自动对上
+    - 子流程的输入叫「风格」，父流程的输入里也叫「风格」→ 自动对上
     - 父流程想传别的 → 在这一步的 params 里显式写 `{"风格": "{{ input.画风 }}"}`
 
     和步骤字段用同一套规则，不引入新概念。
+
+    **按标签比，不只按内部标识**：两边的内部标识都是系统生成的
+    （input1、input2…），撞上是运气，标签相同才是真的同名。
     """
     fields = input_schema.get("fields") if isinstance(input_schema, dict) else []
     fields = fields if isinstance(fields, list) else []
     parent_input = parent_ctx.get("input") or {}
+    parent_fields = parent_ctx.get("input_fields") or []
 
     params: dict = {}
     for f in fields:
@@ -660,9 +707,13 @@ def _build_subflow_params(input_schema: dict, step: dict, parent_ctx: dict) -> d
         name = str(f.get("name") or "")
         if not name:
             continue
-        # 同名自动取
+        # 同名自动取：先看内部标识，再看标签
         if name in parent_input:
             params[name] = parent_input[name]
+            continue
+        hit = match_input({"name": name, "label": f.get("label")}, parent_fields)
+        if hit is not None and hit.get("name") in parent_input:
+            params[name] = parent_input[hit["name"]]
 
     # 显式绑定覆盖
     for field, expr in (step.get("params") or {}).items():
@@ -822,6 +873,59 @@ async def _update_run(
         await db.commit()
 
 
+async def _bind_auto_fields(steps: list[dict], input_fields: list[dict]) -> list[dict]:
+    """把步骤的 auto_fields 补成显式引用 —— **只在内存里，不落库**。
+
+    用户的配置里仍然写着「这个字段是自动的」，界面照旧显示自动接到了什么；
+    改了流程输入的标签，下次运行自动跟着变 —— 这就是不在落库时物化的理由。
+
+    要查两样东西：节点模板的字段表（字段标签和类型）、子流程的具名产出名。
+    """
+    if not any(s.get("auto_fields") for s in steps):
+        return steps
+
+    template_ids = {str(s.get("template_id") or "") for s in steps if s.get("type") != "flow"}
+    template_ids.discard("")
+    sub_ids = {str(s.get("flow_id") or "") for s in steps if s.get("type") == "flow"}
+    sub_ids.discard("")
+
+    field_specs: dict[str, dict] = {}
+    sub_output_names: dict[str, list[str]] = {}
+    async with async_session() as db:
+        if template_ids:
+            rows = (
+                (
+                    await db.execute(
+                        select(Template).where(Template.id.in_(template_ids))
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for t in rows:
+                field_specs[t.id] = normalized_field_map(t.input_schema)
+        if sub_ids:
+            rows = (
+                (await db.execute(select(Flow).where(Flow.id.in_(sub_ids)))).scalars().all()
+            )
+            for f in rows:
+                names = [
+                    str(o.get("name"))
+                    for o in (f.outputs or [])
+                    if isinstance(o, dict) and o.get("name")
+                ]
+                # 没声明产出时默认叫 output（见 _run_subflow）
+                sub_output_names[f.id] = names or ["output"]
+
+    specs_by_step: dict[str, dict] = {}
+    for s in steps:
+        tid = str(s.get("template_id") or "")
+        if tid and tid in field_specs:
+            specs_by_step[str(s.get("id") or "")] = field_specs[tid]
+
+    return apply_auto_bindings(steps, input_fields, specs_by_step, sub_output_names)
+
+
 async def _resolve_step_params(
     step: dict,
     ctx: dict,
@@ -845,7 +949,8 @@ async def _resolve_step_params(
         engine = template.engine
 
     resolved: dict = {}
-    for field, expr in (step.get("params") or {}).items():
+    params = step.get("params") or {}
+    for field, expr in params.items():
         value = resolve_value(expr, ctx)
         spec = fields.get(field)
         if spec is None:
@@ -864,6 +969,7 @@ async def _resolve_step_params(
                 "（只有 file_upload 类型的字段能接）"
             )
         resolved[field] = value
+
     return resolved
 
 

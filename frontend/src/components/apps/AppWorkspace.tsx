@@ -149,7 +149,11 @@ export default function AppWorkspace({ user }: ModuleProps) {
       const created = await createFlow({
         name: '新应用',
         description: '',
-        input_schema: { fields: [] },
+        // **预置一个「提示词」输入** —— 九成的流程第一步就是「按提示词生成」。
+        // 让用户先看到能填的东西，而不是一张空表再加字段。
+        input_schema: {
+          fields: [{ name: 'input1', label: '提示词', type: 'textarea', required: true }],
+        },
         outputs: [],
         steps: [],
         status: 'active',

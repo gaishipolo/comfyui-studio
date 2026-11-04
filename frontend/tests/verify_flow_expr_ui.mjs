@@ -210,6 +210,13 @@ async function main() {
 
   const dialog = await page.$('[role="dialog"]')
   assert.ok(dialog, '节点设置弹窗没打开')
+
+  // 加工与条件收在「加工 / 条件」折叠里 —— 先展开再测
+  const advancedBtn = await page.$('[role="dialog"] button:has-text("加工 / 条件")')
+  assert.ok(advancedBtn, '找不到「加工 / 条件」按钮')
+  await advancedBtn.click()
+  await page.waitForTimeout(400)
+
   const text = await dialog.textContent()
 
   check('弹窗里有「取到之后再处理」', () => {
