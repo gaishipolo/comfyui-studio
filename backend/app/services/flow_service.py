@@ -1,11 +1,13 @@
-"""流程执行器 —— 一条流程 = 一串步骤，每步 = 一个现有节点。
+"""流程执行器 —— 一条流程 = 一组步骤，每步 = 一个现有节点。
 
 **每一步跑成一个普通 Task**，所以并发闸门、进度轮询、失败重试、任务列表
 全部复用现有实现，流程不需要自己的执行引擎。
 
-第一刀的能力边界（数据模型一步到位，执行器是渐进的）：
-  ✓ 顺序执行、步骤间产物自动注入
-  ✗ 并行分层、循环、子流程嵌套、表达式管道
+能力边界（数据模型一步到位，执行器是渐进的）：
+  ✓ 依赖分层并行（同层步骤一起提交）
+  ✓ 循环（repeat，按列表长度或固定次数展开）
+  ✓ 子流程嵌套（递归执行，产出按名字暴露）
+  ✓ 表达式管道 / 条件
 
 「产物自动注入」是这里唯一需要特殊处理的地方：上游产物是我们自己存储里
 的文件，下游引擎不认，所以要先读字节、再交给下游引擎的 upload_input 换回
@@ -14,14 +16,13 @@
 在流程里是常规用法。
 """
 import asyncio
-import re
 import logging
 
 from app.database import async_session
 from app.filestore import read_asset_bytes
 from app.models.models import Asset, Flow, FlowRun, Task, Template
 from app.services.engine_input import EngineInputError, push_bytes_to_engine
-from app.services.flow_expr import FlowExprError, resolve_value
+from app.services.flow_expr import FlowExprError, collect_refs, resolve_value
 from app.services.field_types import is_file_field, normalized_field_map
 from app.services.flow_validate import compute_layers, step_label
 from app.services.random_fields import resolve_random_fields
@@ -83,8 +84,29 @@ async def submit_flow(db, flow: Flow, params: dict, user, is_trial: bool = False
     return run
 
 
-async def _execute_flow(run_id: str, _depth: int = 0) -> None:
-    """后台执行一条流程。出错把原因写进 FlowRun，不往上抛。
+async def _execute_flow(run_id: str) -> None:
+    """后台执行入口 —— **兜住所有异常**，别让运行记录永远停在 running。
+
+    spawn_background 只把异常写日志、不会改运行状态；如果数据库连接断了、
+    磁盘读失败、数据形状没预料到，异常逃出去后前端就一直转圈，运营只能
+    重跑一条新的。这里统一落成 error，并保留已经写进去的步骤进度。
+    """
+    try:
+        await _run_flow(run_id)
+    except asyncio.CancelledError:
+        # 进程停机时的协作式取消：状态由停机流程处理，不能当成业务失败
+        raise
+    except FlowError as exc:
+        await _mark_run_error(run_id, str(exc))
+    except Exception:
+        logger.exception("流程执行异常 run_id=%s", run_id)
+        await _mark_run_error(
+            run_id, "流程执行出错（内部错误），请联系管理员查看服务端日志"
+        )
+
+
+async def _run_flow(run_id: str) -> None:
+    """真正的执行过程。配置/引擎错误抛 FlowError，由入口统一落库。
 
     **开头用短会话读完就释放**：整个执行过程可能跑几分钟，长会话会把
     连接池占住（池是给 50 个人用的），而且它持有的读事务会挡住后面
@@ -107,6 +129,9 @@ async def _execute_flow(run_id: str, _depth: int = 0) -> None:
     ctx: dict = {"input": params, "steps": {}}
     state: list[dict] = []
     total = len(steps)
+    # 同一次运行里，(引擎, 素材) → 引擎侧名字。循环 200 次用同一张参考图时，
+    # 不能把同一张图往引擎传 200 遍 —— 上传是网络 + 磁盘开销，纯浪费。
+    input_cache: dict[tuple[str, str], str] = {}
 
     # 按依赖分层：同层的步骤互不依赖，一起提交、一起等。
     # 「谁吃谁」是流程声明的，「谁能同时跑」是算出来的 —— 不让用户配并行组，
@@ -120,7 +145,9 @@ async def _execute_flow(run_id: str, _depth: int = 0) -> None:
         return
 
     by_id = {str(s.get("id") or ""): s for s in steps}
-    done_count = 0
+    # 进度按「完成的步骤数」算，不按任务数 —— 循环一步会展开成 N 个任务，
+    # 按任务数算会超过 100%（一步循环 10 次 = 1000%）。
+    done_steps: set[str] = set()
 
     for layer_index, layer_ids in enumerate(layers):
         layer_steps = [(sid, by_id[sid]) for sid in layer_ids if sid in by_id]
@@ -129,52 +156,40 @@ async def _execute_flow(run_id: str, _depth: int = 0) -> None:
 
         # ── 先把整层都提交出去（这一步不等待，任务在后台跑）──
         # 循环步骤在这一层展开成 N 个实例（N 个任务一起提交，并行跑）
-        # 子流程步骤在这一层整体执行（它内部自己分层）
+        # 子流程步骤起一个协程、**不在这里等**：等它就等于把整层堵成串行
         started: list[tuple[str, str, int]] = []
-        subflow_done: list[tuple[str, dict]] = []
+        subflow_jobs: list[tuple[str, dict, asyncio.Task]] = []
         for step_id, step in layer_steps:
             step_type = str(step.get("type") or "template")
             if step_type == "flow":
-                # ── 子流程：整条流程作为一步 ──
-                try:
-                    sub_ctx, sub_state = await _run_subflow(
-                        run, step, step_id, ctx, depth=_depth
+                job = asyncio.create_task(
+                    _run_subflow(
+                        run,
+                        step,
+                        step_id,
+                        ctx,
+                        depth=0,
+                        ancestors=(flow.id,),
+                        input_cache=input_cache,
                     )
-                except FlowError as exc:
-                    await _fail_run(run_id, f"{step_label(steps, step_id)}：{exc}", state)
-                    return
-                # 只把「产物」暴露给父流程 —— 子流程的 input / steps 是它
-                # 内部的事，父流程不该读到（读了也没意义，引用路径也不同）。
-                # 具名产出直接摊在这一层：父流程写 {{ steps.sub.final_image }}
-                # 就能拿到，不必再经一层 named。
-                exposed: dict = {"outputs": _subflow_outputs(sub_ctx)}
-                exposed.update(sub_ctx.get("named") or {})
-                ctx["steps"][step_id] = exposed
-                subflow_done.append((step_id, sub_state))
-                state.append(
-                    {
-                        "step_id": step_id,
-                        "task_id": "",
-                        "status": "done",
-                        "layer": layer_index,
-                        "iteration": 0,
-                        "outputs": _subflow_outputs(sub_ctx),
-                        "subflow": sub_state,
-                    }
                 )
-                done_count += 1
+                subflow_jobs.append((step_id, step, job))
                 continue
 
             try:
                 instances = await _expand_instances(step, step_id, ctx)
             except (FlowError, FlowExprError) as exc:
+                _cancel_jobs(subflow_jobs)
                 await _fail_run(run_id, f"{step_label(steps, step_id)}：{exc}", state)
                 return
 
             for iteration, iteration_ctx in instances:
                 try:
-                    resolved = await _resolve_step_params(step, iteration_ctx)
+                    resolved = await _resolve_step_params(
+                        step, iteration_ctx, input_cache
+                    )
                 except (FlowError, FlowExprError) as exc:
+                    _cancel_jobs(subflow_jobs)
                     await _fail_run(
                         run_id,
                         f"{step_label(steps, step_id)}第 {iteration + 1} 次：{exc}",
@@ -184,6 +199,7 @@ async def _execute_flow(run_id: str, _depth: int = 0) -> None:
                 try:
                     task_id = await _start_step(run, step, step_id, resolved)
                 except FlowError as exc:
+                    _cancel_jobs(subflow_jobs)
                     await _fail_run(
                         run_id,
                         f"{step_label(steps, step_id)}第 {iteration + 1} 次：{exc}",
@@ -192,7 +208,34 @@ async def _execute_flow(run_id: str, _depth: int = 0) -> None:
                     return
                 started.append((step_id, task_id, iteration))
 
-        # ── 再等这一层全部跑完 ──
+        # ── 等这一层的子流程（普通节点此刻已经在引擎队列里跑）──
+        for step_id, _step, job in subflow_jobs:
+            try:
+                sub_ctx, sub_state = await job
+            except FlowError as exc:
+                _cancel_jobs(subflow_jobs)
+                await _fail_run(run_id, f"{step_label(steps, step_id)}：{exc}", state)
+                return
+            except Exception:
+                _cancel_jobs(subflow_jobs)
+                raise
+            # 只把「产物」暴露给父流程 —— 子流程的 input / steps 是它
+            # 内部的事，父流程不该读到（读了也没意义，引用路径也不同）。
+            ctx["steps"][step_id] = _expose_subflow(sub_ctx)
+            state.append(
+                {
+                    "step_id": step_id,
+                    "task_id": "",
+                    "status": "done",
+                    "layer": layer_index,
+                    "iteration": 0,
+                    "outputs": _subflow_outputs(sub_ctx),
+                    "subflow": sub_state,
+                }
+            )
+            done_steps.add(step_id)
+
+        # ── 再等这一层的普通任务全部跑完 ──
         finished: list[tuple[str, Task, int]] = []
         for step_id, task_id, iteration in started:
             try:
@@ -219,10 +262,11 @@ async def _execute_flow(run_id: str, _depth: int = 0) -> None:
                     "outputs": outputs,
                 }
             )
-            done_count += 1
         for step_id, outputs in merged.items():
             ctx["steps"][step_id] = {"outputs": outputs}
-        await _update_run(run_id, progress=done_count / total * 100, steps=state)
+            done_steps.add(step_id)
+        progress = min(100.0, len(done_steps) / total * 100) if total else 100.0
+        await _update_run(run_id, progress=progress, steps=state)
 
         if failed:
             step_id, task = failed[0]
@@ -234,8 +278,8 @@ async def _execute_flow(run_id: str, _depth: int = 0) -> None:
             )
             return
 
-    # 流程级产出：按声明解析（outputs 声明此前只是存着，执行器从不消费它）
-    final_outputs = _resolve_flow_outputs(flow.outputs or [], ctx)
+    # 流程级产出：按声明解析
+    final_outputs = _resolve_flow_outputs(flow.outputs or [], ctx, steps)
     await _update_run(
         run_id,
         status="done",
@@ -245,7 +289,7 @@ async def _execute_flow(run_id: str, _depth: int = 0) -> None:
     )
 
 
-def _resolve_flow_outputs(declarations: list, ctx: dict) -> list[dict]:
+def _resolve_flow_outputs(declarations: list, ctx: dict, steps: list | None = None) -> list[dict]:
     """按流程的输出声明解析出流程级产物。
 
     声明形如 `{name, from_step, pick}`：
@@ -255,12 +299,17 @@ def _resolve_flow_outputs(declarations: list, ctx: dict) -> list[dict]:
 
     **没声明时默认交付最后一步的产物** —— 大多数流程就是「跑完拿结果」，
     逼用户先声明一遍才能用是本末倒置。
+
+    **「最后一步」按列表顺序找，不按执行完成顺序找**：同层步骤是并行跑的，
+    ctx 的插入顺序由谁先跑完决定 —— 拿它当「最后一步」会时好时坏。
     """
+    step_outputs = ctx.get("steps") or {}
     if not declarations:
-        # 默认：最后一步的产物
-        step_outputs = ctx.get("steps") or {}
-        for step_id in reversed(list(step_outputs.keys())):
-            outs = step_outputs[step_id].get("outputs") or []
+        order = [str(s.get("id") or "") for s in (steps or [])]
+        if not order:
+            order = list(step_outputs.keys())
+        for step_id in reversed(order):
+            outs = (step_outputs.get(step_id) or {}).get("outputs") or []
             if outs:
                 return [
                     {
@@ -272,7 +321,6 @@ def _resolve_flow_outputs(declarations: list, ctx: dict) -> list[dict]:
         return []
 
     resolved: list[dict] = []
-    step_outputs = ctx.get("steps") or {}
     for decl in declarations:
         name = str(decl.get("name") or "").strip()
         src = str(decl.get("from_step") or decl.get("from") or "").strip()
@@ -304,12 +352,39 @@ def _subflow_outputs(sub_ctx: dict) -> list[dict]:
     return outs
 
 
+def _expose_subflow(sub_ctx: dict) -> dict:
+    """子流程对父流程暴露的形状。
+
+    只暴露产物：input / steps 是子流程内部的事，父流程引用它们没有意义。
+    具名产出摊在顶层，父流程写 `{{ steps.sub.final_image }}` 就能拿到。
+
+    **父流程和嵌套子流程必须共用这一个函数** —— 之前两处各写一遍，
+    嵌套那处漏了摊平，导致「子流程里再调子流程」时具名产出引用不到。
+    """
+    exposed: dict = {"outputs": _subflow_outputs(sub_ctx)}
+    exposed.update(sub_ctx.get("named") or {})
+    return exposed
+
+
+def _cancel_jobs(jobs: list[tuple[str, dict, asyncio.Task]]) -> None:
+    """失败收尾：取消同层还没跑完的子流程。
+
+    子流程内部已经提交的引擎任务取消不掉（和同层普通任务一样，跑都跑了），
+    但至少不会继续往下提交新的层。
+    """
+    for _sid, _step, job in jobs:
+        if not job.done():
+            job.cancel()
+
+
 async def _run_subflow(
     run: FlowRun,
     step: dict,
     step_id: str,
     parent_ctx: dict,
     depth: int,
+    ancestors: tuple[str, ...] = (),
+    input_cache: dict[tuple[str, str], str] | None = None,
 ) -> tuple[dict, list[dict]]:
     """执行一条子流程。返回 (子流程的上下文, 子流程的步骤状态)。
 
@@ -337,10 +412,18 @@ async def _run_subflow(
             raise FlowError(f"子流程不存在：{flow_id}")
         if sub_flow.id == run.flow_id:
             raise FlowError("子流程不能调用自己")
+        # A → B → C → B 这种环：只查「是不是根流程」查不出来，
+        # 会一直递归到深度上限才报错，文案还只能说「可能是环」。
+        if sub_flow.id in ancestors:
+            chain = " → ".join([*ancestors, sub_flow.id])
+            raise FlowError(f"子流程互相调用形成了环：{chain}")
         sub_steps = list(sub_flow.steps or [])
         sub_outputs_decl = list(sub_flow.outputs or [])
         sub_input_schema = dict(sub_flow.input_schema or {})
         sub_name = sub_flow.name
+
+    if input_cache is None:
+        input_cache = {}
 
     # ── 组装子流程的输入 ──
     sub_params = _build_subflow_params(sub_input_schema, step, parent_ctx)
@@ -356,60 +439,86 @@ async def _run_subflow(
         return sub_ctx, sub_state
 
     by_id = {str(s.get("id") or ""): s for s in sub_steps}
-    done_count = 0
 
     for layer_index, layer_ids in enumerate(layers):
         layer_steps = [(sid, by_id[sid]) for sid in layer_ids if sid in by_id]
         if not layer_steps:
             continue
 
+        prefix = f"子流程「{sub_name}」的"
         started: list[tuple[str, str, int]] = []
+        subflow_jobs: list[tuple[str, dict, asyncio.Task]] = []
         for sid, sstep in layer_steps:
             if str(sstep.get("type") or "template") == "flow":
-                sub2_ctx, sub2_state = await _run_subflow(
-                    run, sstep, sid, sub_ctx, depth=depth + 1
+                job = asyncio.create_task(
+                    _run_subflow(
+                        run,
+                        sstep,
+                        sid,
+                        sub_ctx,
+                        depth=depth + 1,
+                        ancestors=(*ancestors, sub_flow.id),
+                        input_cache=input_cache,
+                    )
                 )
-                sub_ctx["steps"][sid] = sub2_ctx
-                sub_state.append(
-                    {
-                        "step_id": sid,
-                        "task_id": "",
-                        "status": "done",
-                        "layer": layer_index,
-                        "iteration": 0,
-                        "outputs": _subflow_outputs(sub2_ctx),
-                        "subflow": sub2_state,
-                    }
-                )
-                done_count += 1
+                subflow_jobs.append((sid, sstep, job))
                 continue
 
             try:
                 instances = await _expand_instances(sstep, sid, sub_ctx)
             except (FlowError, FlowExprError) as exc:
-                raise FlowError(f"子流程「{sub_name}」的{step_label(sub_steps, sid)}：{exc}") from exc
+                _cancel_jobs(subflow_jobs)
+                raise FlowError(f"{prefix}{step_label(sub_steps, sid)}：{exc}") from exc
 
             for iteration, iteration_ctx in instances:
                 try:
-                    resolved = await _resolve_step_params(sstep, iteration_ctx)
+                    resolved = await _resolve_step_params(
+                        sstep, iteration_ctx, input_cache
+                    )
                 except (FlowError, FlowExprError) as exc:
+                    _cancel_jobs(subflow_jobs)
                     raise FlowError(
-                        f"子流程「{sub_name}」的{step_label(sub_steps, sid)}第 {iteration + 1} 次：{exc}"
+                        f"{prefix}{step_label(sub_steps, sid)}第 {iteration + 1} 次：{exc}"
                     ) from exc
                 try:
                     task_id = await _start_step(run, sstep, sid, resolved)
                 except FlowError as exc:
+                    _cancel_jobs(subflow_jobs)
                     raise FlowError(
-                        f"子流程「{sub_name}」的{step_label(sub_steps, sid)}第 {iteration + 1} 次：{exc}"
+                        f"{prefix}{step_label(sub_steps, sid)}第 {iteration + 1} 次：{exc}"
                     ) from exc
                 started.append((sid, task_id, iteration))
+
+        for sid, _sstep, job in subflow_jobs:
+            try:
+                sub2_ctx, sub2_state = await job
+            except FlowError as exc:
+                _cancel_jobs(subflow_jobs)
+                raise FlowError(f"{prefix}{step_label(sub_steps, sid)}：{exc}") from exc
+            except Exception:
+                _cancel_jobs(subflow_jobs)
+                raise
+            # 和父流程同一套暴露规则 —— 具名产出摊在 steps.<id> 下，
+            # 否则「子流程里再调子流程」时 {{ steps.x.final }} 取不到。
+            sub_ctx["steps"][sid] = _expose_subflow(sub2_ctx)
+            sub_state.append(
+                {
+                    "step_id": sid,
+                    "task_id": "",
+                    "status": "done",
+                    "layer": layer_index,
+                    "iteration": 0,
+                    "outputs": _subflow_outputs(sub2_ctx),
+                    "subflow": sub2_state,
+                }
+            )
 
         finished: list[tuple[str, Task, int]] = []
         for sid, task_id, iteration in started:
             try:
                 finished.append((sid, await _wait_task(task_id), iteration))
             except FlowError as exc:
-                raise FlowError(f"子流程「{sub_name}」的{step_label(sub_steps, sid)}：{exc}") from exc
+                raise FlowError(f"{prefix}{step_label(sub_steps, sid)}：{exc}") from exc
 
         failed = [(sid, t) for sid, t, _ in finished if t.status != "done"]
         merged: dict[str, list[dict]] = {}
@@ -426,21 +535,20 @@ async def _run_subflow(
                     "outputs": outs,
                 }
             )
-            done_count += 1
         for sid, outs in merged.items():
             sub_ctx["steps"][sid] = {"outputs": outs}
 
         if failed:
             sid, task = failed[0]
             detail = task.error_msg or f"任务状态 {task.status}"
-            raise FlowError(f"子流程「{sub_name}」的{step_label(sub_steps, sid)}失败：{detail}")
+            raise FlowError(f"{prefix}{step_label(sub_steps, sid)}失败：{detail}")
 
     # ── 子流程的具名产出 ──
-    for item in _resolve_flow_outputs(sub_outputs_decl, sub_ctx):
+    for item in _resolve_flow_outputs(sub_outputs_decl, sub_ctx, sub_steps):
         sub_ctx["named"][item["name"]] = item["outputs"]
     if not sub_ctx["named"]:
         # 没声明产出 → 默认最后一步的产物，名字就叫 output
-        last = _resolve_flow_outputs([], sub_ctx)
+        last = _resolve_flow_outputs([], sub_ctx, sub_steps)
         if last:
             sub_ctx["named"]["output"] = last[0]["outputs"]
     return sub_ctx, sub_state
@@ -540,11 +648,6 @@ async def _expand_instances(step: dict, step_id: str, ctx: dict) -> list[tuple[i
 
 
 # 循环列表来源的识别：`input.<字段>[index]`
-_LOOP_SOURCE = re.compile(
-    r"input\.([A-Za-z_][A-Za-z0-9_]*)\[[A-Za-z_][A-Za-z0-9_]*\]"
-)
-
-
 def _loop_source(step: dict, ctx: dict) -> list | None:
     """循环每次喂的那一项 —— 来自流程输入里的列表字段。
 
@@ -554,13 +657,19 @@ def _loop_source(step: dict, ctx: dict) -> list | None:
 
     约定：param 里写了 `input.<字段>[...]` 这种形式，那个 `<字段>`
     就是列表来源。循环次数默认由它的长度决定（count 留 0 即可）。
+
+    **用 collect_refs 而不是正则**：    字段名允许中文，正则里的
+    `[A-Za-z_]` 会漏掉 `input.提示词列表[index]`（校验和执行都会错）。
+    路径解析器已经支持中文标识符，结构识别就该复用它。
     """
     inputs = ctx.get("input") or {}
     for expr in (step.get("params") or {}).values():
         if not isinstance(expr, str) or "{{" not in expr:
             continue
-        for m in _LOOP_SOURCE.finditer(expr):
-            name = m.group(1)
+        for ref in collect_refs(expr):
+            if not ref.startswith("input.") or "[" not in ref:
+                continue
+            name = ref[len("input.") :].split("[", 1)[0]
             value = inputs.get(name)
             if isinstance(value, list):
                 return value
@@ -575,6 +684,23 @@ async def _fail_run(run_id: str, message: str, state: list[dict]) -> None:
         run.status = "error"
         run.error_msg = message
         run.steps = state
+        run.finished_at = utcnow()
+        await db.commit()
+
+
+async def _mark_run_error(run_id: str, message: str) -> None:
+    """把运行标记为失败，**不动已写入的步骤进度**。
+
+    内部异常可能在任何一行抛出，手里没有可信的 state —— 不能拿一个空列表
+    把用户已经看到的进度覆盖掉。已经结束的运行也不改（不能让收尾异常
+    把成功改写成失败）。
+    """
+    async with async_session() as db:
+        run = await db.get(FlowRun, run_id)
+        if run is None or run.status in ("done", "cancelled"):
+            return
+        run.status = "error"
+        run.error_msg = message
         run.finished_at = utcnow()
         await db.commit()
 
@@ -604,7 +730,11 @@ async def _update_run(
         await db.commit()
 
 
-async def _resolve_step_params(step: dict, ctx: dict) -> dict:
+async def _resolve_step_params(
+    step: dict,
+    ctx: dict,
+    input_cache: dict[tuple[str, str], str] | None = None,
+) -> dict:
     """把步骤的 params 表达式解析成实际参数值。
 
     上游产物引用（值是产物列表）要送进本步节点的引擎，换回引擎侧名字；
@@ -635,7 +765,7 @@ async def _resolve_step_params(step: dict, ctx: dict) -> dict:
             # 文件类型的字段，值统一是「素材引用」：要么是素材 id（用户传的），
             # 要么是上游产物列表。两种都要送进本步节点的引擎换回引擎侧名字 ——
             # 我们自己存储里的路径，引擎不认。
-            value = await _push_to_engine(engine, value, spec)
+            value = await _push_to_engine(engine, value, spec, input_cache)
         elif _is_asset_list(value) or _is_asset_ref(value):
             raise FlowError(
                 f"字段「{field}」的类型是 {spec.get('type')}，不能接上游产物"
@@ -645,8 +775,17 @@ async def _resolve_step_params(step: dict, ctx: dict) -> dict:
     return resolved
 
 
-async def _push_to_engine(engine: str, value, spec: dict):
-    """把素材引用推进引擎，返回引擎侧文件名（多值字段返回列表）。"""
+async def _push_to_engine(
+    engine: str,
+    value,
+    spec: dict,
+    cache: dict[tuple[str, str], str] | None = None,
+):
+    """把素材引用推进引擎，返回引擎侧文件名（多值字段返回列表）。
+
+    cache 是**一次运行内**的映射：(引擎, 素材 id) → 引擎侧名字。
+    循环里每轮吃同一张参考图是常规用法，不缓存就会把同一张图上传 N 次。
+    """
     if isinstance(value, str) and value:
         items = [{"asset_id": value}]
     elif _is_asset_ref(value):
@@ -657,19 +796,28 @@ async def _push_to_engine(engine: str, value, spec: dict):
     else:
         raise FlowError("文件字段没有可用的素材引用")
 
+    cache = cache if cache is not None else {}
     names: list[str] = []
     async with async_session() as db:
         for item in items:
-            asset = await db.get(Asset, str(item.get("asset_id")))
+            asset_id = str(item.get("asset_id"))
+            key = (engine, asset_id)
+            cached = cache.get(key)
+            if cached is not None:
+                names.append(cached)
+                continue
+            asset = await db.get(Asset, asset_id)
             if asset is None:
-                raise FlowError(f"素材不存在：{item.get('asset_id')}")
+                raise FlowError(f"素材不存在：{asset_id}")
             data = read_asset_bytes(asset.file_path)
             if data is None:
                 raise FlowError(f"素材读不出来：{asset.file_name}")
             try:
-                names.append(await push_bytes_to_engine(engine, data, asset.file_name))
+                pushed = await push_bytes_to_engine(engine, data, asset.file_name)
             except EngineInputError as exc:
                 raise FlowError(f"素材送进引擎失败：{exc}") from exc
+            cache[key] = pushed
+            names.append(pushed)
     if spec.get("multiple"):
         return names
     if len(names) > 1:

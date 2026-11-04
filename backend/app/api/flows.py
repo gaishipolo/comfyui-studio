@@ -114,6 +114,32 @@ async def list_capabilities(
     return caps
 
 
+async def _validation_context(db: AsyncSession) -> tuple[dict, dict]:
+    """校验用的真实数据：全部节点 + 全部流程。
+
+    流程引用子流程时要查它是否存在，所以不能只取 active 的流程 ——
+    草稿流程也可能被引用（编排过程中先串起来再上线是常规做法）。
+    """
+    templates = {
+        t.id: t for t in (await db.execute(select(Template))).scalars().all()
+    }
+    flows = {
+        f.id: f.name for f in (await db.execute(select(Flow))).scalars().all()
+    }
+    return templates, flows
+
+
+def _reject_invalid_config(result: dict, *, action: str) -> None:
+    """配置有错就不落库 —— 不让坏流程进数据库，别等跑的时候才发现。"""
+    if result["ok"]:
+        return
+    detail = "；".join(result["errors"][:5])
+    raise HTTPException(
+        status_code=400,
+        detail=f"流程配置有问题，{action}被拒绝：{detail}",
+    )
+
+
 @router.post("/validate", response_model=FlowValidateResponse)
 async def validate_flow(
     payload: FlowValidateRequest,
@@ -122,19 +148,11 @@ async def validate_flow(
 ):
     """校验一份流程配置（不落库）。
 
-    编排器保存前走这里，将来 Agent 生成的配置也走这里 —— 同一道门。
+    编排器保存前、将来 Agent 生成的配置都走这里 —— 同一道门。
     检查项：步骤 id 唯一、节点存在、参数字段存在、引用的流程输入存在、
-    引用的上游步骤存在且在前面、有环，并给出依赖分层。
+    引用的上游步骤存在、有环，并给出依赖分层。
     """
-    templates = {
-        t.id: t
-        for t in (await db.execute(select(Template))).scalars().all()
-    }
-    # 所有可调用的流程 —— 用来检查子流程引用是否存在
-    flows = {
-        f.id: f.name
-        for f in (await db.execute(select(Flow))).scalars().all()
-    }
+    templates, flows = await _validation_context(db)
     return validate_flow_config(
         steps=[s.model_dump() for s in payload.steps],
         input_schema=payload.input_schema,
@@ -502,15 +520,34 @@ async def create_flow(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """新建流程。"""
+    """新建流程。
+
+    **服务端也校验**：编排器保存前会调 /validate，但接口不能依赖「调用方
+    一定校验过」—— 直接调 API、脚本导入、Agent 都可能绕过界面。让坏配置
+    进库，代价是跑到一半才失败（引擎的钱已经花了）。
+    """
+    steps = [s.model_dump() for s in payload.steps]
+    outputs = [o.model_dump() for o in payload.outputs]
+    templates, flows = await _validation_context(db)
+    _reject_invalid_config(
+        validate_flow_config(
+            steps=steps,
+            input_schema=payload.input_schema,
+            outputs=outputs,
+            templates=templates,
+            flows=flows,
+        ),
+        action="创建",
+    )
+
     flow = Flow(
         name=payload.name,
         description=payload.description,
         category=payload.category,
         icon=payload.icon,
         input_schema=payload.input_schema,
-        outputs=[o.model_dump() for o in payload.outputs],
-        steps=[s.model_dump() for s in payload.steps],
+        outputs=outputs,
+        steps=steps,
         status=payload.status,
         created_by=user.id,
         version=1,
@@ -528,7 +565,12 @@ async def update_flow(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """改流程。没传的字段不动。"""
+    """改流程。没传的字段不动。
+
+    **状态不能从这里改**：draft → active 必须走审批接口。否则拿到编辑权限
+    的人（作者本人）可以直接把 Agent 生成的草稿改成 active，审批留痕
+    就成摆设了。归档同理走审批的驳回。
+    """
     flow = await db.get(Flow, flow_id)
     if flow is None:
         raise HTTPException(status_code=404, detail="流程不存在")
@@ -537,6 +579,33 @@ async def update_flow(
     data = payload.model_dump(exclude_unset=True)
     if "steps" in data and data["steps"] is not None:
         data["steps"] = [s.model_dump() for s in payload.steps]
+
+    # 只要动了会影响可执行性的字段，就重新校验一遍（和保存前同一道门）
+    if any(key in data for key in ("steps", "input_schema", "outputs")):
+        templates, flows = await _validation_context(db)
+        _reject_invalid_config(
+            validate_flow_config(
+                steps=data.get("steps") if data.get("steps") is not None else list(flow.steps or []),
+                input_schema=(
+                    data.get("input_schema")
+                    if data.get("input_schema") is not None
+                    else dict(flow.input_schema or {})
+                ),
+                outputs=(
+                    data.get("outputs")
+                    if data.get("outputs") is not None
+                    else list(flow.outputs or [])
+                ),
+                templates=templates,
+                flows=flows,
+                flow_id=flow.id,
+            ),
+            action="保存",
+        )
+
+    # 状态只由审批接口流转，普通编辑不能顺手把它改成 active
+    data.pop("status", None)
+
     for key, value in data.items():
         if value is not None:
             setattr(flow, key, value)
@@ -552,12 +621,36 @@ async def delete_flow(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """删流程。运行记录保留（它们是历史，不是流程的一部分）。"""
+    """删流程。运行记录保留（它们是历史，不是流程的一部分）。
+
+    **被别的流程当子流程调用时不许删**：直接删会留下断链，那条父流程
+    要到运行时才报「子流程不存在」，而且改不回来（步骤还在，引用没了）。
+    提示用户先去改父流程，比事后排查便宜。
+    """
     flow = await db.get(Flow, flow_id)
     if flow is None:
         raise HTTPException(status_code=404, detail="流程不存在")
     if not _can_edit(flow, user):
         raise HTTPException(status_code=403, detail="只能删自己创建的流程")
+
+    others = (
+        await db.execute(select(Flow).where(Flow.id != flow_id))
+    ).scalars().all()
+    users = [
+        other.name
+        for other in others
+        if other.status != "archived"
+        and any(
+            str(s.get("flow_id") or "") == flow_id for s in (other.steps or [])
+        )
+    ]
+    if users:
+        shown = "、".join(users[:3]) + (" 等" if len(users) > 3 else "")
+        raise HTTPException(
+            status_code=409,
+            detail=f"流程「{shown}」正在调用它，先把那些步骤改掉再删",
+        )
+
     await db.delete(flow)
     await db.commit()
     return {"message": "流程已删除", "id": flow_id}
@@ -689,6 +782,21 @@ async def import_flow(
         "steps": steps,
         "status": str(payload.flow.get("status") or "active"),
     }
+
+    # 引用重写之后必须再校验一遍：导出文件可能来自旧版本、被手改过，
+    # 或者引用解析后仍然接不上。导入是写库操作，坏配置不能进来。
+    templates, all_flows = await _validation_context(db)
+    _reject_invalid_config(
+        validate_flow_config(
+            steps=data["steps"],
+            input_schema=data["input_schema"],
+            outputs=data["outputs"],
+            templates=templates,
+            flows=all_flows,
+            flow_id=existing.id if existing is not None else "",
+        ),
+        action="导入",
+    )
 
     if existing is not None:
         for key, value in data.items():

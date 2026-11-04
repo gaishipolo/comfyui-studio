@@ -136,6 +136,12 @@ def expr_problems(expr) -> list[str]:
     if not isinstance(expr, str) or "{{" not in expr:
         return []
     problems: list[str] = []
+    # 括号不配对时 `{{ ... }}` 匹配不到，下面会一条问题都不报 ——
+    # 表达式被当成普通文本原样塞给引擎，用户看到的是「提示词没生效」。
+    if expr.count("{{") != expr.count("}}"):
+        problems.append("表达式括号不配对（{{ 与 }} 数量不一致）")
+    if re.search(r"\{\{\s*\}\}", expr):
+        problems.append("表达式是空的（{{ }} 里没有内容）")
     for m in _PART_REF.finditer(expr):
         item = m.group(1).strip()
         try:

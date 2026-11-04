@@ -203,6 +203,19 @@ def test_expr_problems_reports_unknown_function() -> None:
     assert "nonexist" in problems[0]
 
 
+def test_expr_problems_reports_unbalanced_braces() -> None:
+    """少一个 }} 时不能被当成普通文本静默发下去。"""
+    problems = expr_problems("{{ input.prompt")
+    assert problems, "括号不配对应该报错"
+    assert any("配对" in p for p in problems), problems
+
+
+def test_expr_problems_reports_empty_expression() -> None:
+    problems = expr_problems("{{ }}")
+    assert problems
+    assert any("空的" in p for p in problems), problems
+
+
 def test_no_code_execution() -> None:
     """**最重要的一条**：表达式不能执行任意代码。
 
@@ -317,6 +330,8 @@ def main() -> int:
         test_expr_problems_empty_for_valid,
         test_expr_problems_reports_syntax_error,
         test_expr_problems_reports_unknown_function,
+        test_expr_problems_reports_unbalanced_braces,
+        test_expr_problems_reports_empty_expression,
         test_no_code_execution,
         test_function_whitelist_is_fixed,
         test_literal_string_with_chinese,

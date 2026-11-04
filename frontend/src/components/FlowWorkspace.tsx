@@ -247,6 +247,9 @@ function RunView({
 }) {
   const nodeName = (templateId: string) =>
     caps.find((c) => c.id === templateId)?.name ?? '未知节点'
+  // 进度只在这里算一次。后端已经 clamp 过，前端再兜一层：
+  // 一条脏数据不该让进度条冲出轨道、也不该显示成 "150%"。
+  const pct = Math.max(0, Math.min(100, run?.progress ?? 0))
   // 运行台只列**能跑的**流程。
   // 草稿还没审批上线，运营点了也跑不了 —— 列出来只会让人以为坏了。
   // 草稿在「编排」页看。
@@ -325,42 +328,82 @@ function RunView({
                   <h4 className="font-display text-base font-medium">
                     运行 {run.flow_name}
                   </h4>
-                  <span className="chip">{RUN_STATUS_LABEL[run.status] ?? run.status}</span>
+                  <div className="flex items-center gap-xs">
+                    <span
+                      role="progressbar"
+                      data-run-progress
+                      aria-label="流程进度"
+                      aria-valuenow={Math.round(pct)}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      className="h-1.5 w-16 overflow-hidden rounded-pill bg-paper-3"
+                    >
+                      <span
+                        className={`block h-full rounded-pill ${
+                          run.status === 'error'
+                            ? 'bg-error'
+                            : run.status === 'cancelled'
+                              ? 'bg-muted'
+                              : 'bg-accent'
+                        }`}
+                        style={{ width: `${pct}%` }}
+                      />
+                    </span>
+                    <span data-run-percent className="w-9 text-right text-sm text-ink-2">
+                      {Math.round(pct)}%
+                    </span>
+                    <span data-run-status className="chip">
+                      {RUN_STATUS_LABEL[run.status] ?? run.status}
+                    </span>
+                  </div>
                 </div>
                 {run.error_msg && (
                   <p className="mt-2xs text-sm text-error">{run.error_msg}</p>
                 )}
-                <ol className="mt-sm flex flex-col gap-2xs">
-                  {run.steps.map((s, i) => (
-                    <li key={s.step_id} className="flex items-center gap-sm text-sm">
-                      <span className="chip">{i + 1}</span>
-                      {typeof s.layer === 'number' && (
-                        <span className="text-xs text-muted">第 {s.layer + 1} 层</span>
-                      )}
-                      <span>
-                        {selected.steps.find((st) => st.id === s.step_id)?.title ||
-                          nodeName(
-                            selected.steps.find((st) => st.id === s.step_id)?.template_id ?? '',
-                          )}
-                      </span>
-                      <span
-                        className={
-                          s.status === 'done'
-                            ? 'text-muted'
-                            : s.status === 'error'
-                              ? 'text-error'
-                              : 'text-ink-2'
-                        }
+                <ol data-run-steps className="mt-sm flex flex-col gap-2xs">
+                  {run.steps.map((s, i) => {
+                    // 循环步骤一次运行会有 N 行（同一 step_id）——
+                    // key 只用 step_id 会重复，React 会复用错行。
+                    // 嵌套子流程的 task_id 为空，也不能拿来当 key。
+                    const stepDef = selected.steps.find((st) => st.id === s.step_id)
+                    return (
+                      <li
+                        key={`${s.step_id}-${s.iteration ?? 0}-${i}`}
+                        className="flex items-center gap-sm text-sm"
                       >
-                        {TASK_STATUS_LABEL[s.status] ?? s.status}
-                      </span>
-                      {s.outputs && s.outputs.length > 0 && (
-                        <span className="text-xs text-muted">
-                          {s.outputs.length} 个产物
+                        <span className="chip">{i + 1}</span>
+                        {typeof s.layer === 'number' && (
+                          <span className="text-xs text-muted">第 {s.layer + 1} 层</span>
+                        )}
+                        <span>
+                          {stepDef?.title ||
+                            (stepDef?.type === 'flow'
+                              ? (flows.find((f) => f.id === stepDef.flow_id)?.name ??
+                                '子流程')
+                              : nodeName(stepDef?.template_id ?? ''))}
                         </span>
-                      )}
-                    </li>
-                  ))}
+                        {stepDef?.type === 'repeat' && typeof s.iteration === 'number' && (
+                          <span className="text-xs text-muted">第 {s.iteration + 1} 次</span>
+                        )}
+                        <span
+                          className={
+                            s.status === 'done'
+                              ? 'text-muted'
+                              : s.status === 'error'
+                                ? 'text-error'
+                                : 'text-ink-2'
+                          }
+                        >
+                          {TASK_STATUS_LABEL[s.status] ?? s.status}
+                        </span>
+                        {s.outputs && s.outputs.length > 0 && (
+                          <span className="text-xs text-muted">
+                            {s.outputs.length} 个产物
+                          </span>
+                        )}
+                      </li>
+                    )
+                  })}
                   {run.status === 'running' && run.steps.length === 0 && (
                     <li className="text-sm text-muted">正在执行第一步…</li>
                   )}
@@ -618,10 +661,21 @@ function EditView({
         notify('流程还有问题，先改完再保存', 'warning')
         return
       }
+      // 只提交可编辑字段：status / id / version / 审批留痕一律不从这里走。
+      // 草稿上线只能走审批接口 —— 顺手带个 status 就等于绕开审批。
+      const payload = {
+        name: draft.name,
+        description: draft.description,
+        category: draft.category,
+        icon: draft.icon,
+        input_schema: draft.input_schema,
+        outputs: draft.outputs,
+        steps: draft.steps,
+      }
       if (draft.id) {
-        await updateFlow(draft.id, draft)
+        await updateFlow(draft.id, payload)
       } else {
-        await createFlow(draft)
+        await createFlow(payload)
       }
       notify('流程已保存', 'success')
       await onChanged()

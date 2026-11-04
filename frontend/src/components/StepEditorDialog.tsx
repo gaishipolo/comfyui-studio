@@ -97,6 +97,19 @@ export default function StepEditorDialog({
   const setParam = (name: string, value: string) =>
     patch({ params: { ...draft.params, [name]: value } })
 
+  /** 删掉一个键 = 回到「子流程同名输入自动传」 */
+  const removeParam = (name: string) => {
+    const next = { ...draft.params }
+    delete next[name]
+    patch({ params: next })
+  }
+
+  const subFlow = useMemo(
+    () => (draft.type === 'flow' ? flows.find((f) => f.id === draft.flow_id) ?? null : null),
+    [draft.type, draft.flow_id, flows],
+  )
+  const subInputFields = subFlow?.input_schema?.fields ?? []
+
   /**
    * 参数取值编辑器。
    *
@@ -538,13 +551,21 @@ export default function StepEditorDialog({
               <select
                 className="field"
                 value={draft.type}
-                onChange={(e) =>
+                onChange={(e) => {
+                  const nextType = e.target.value as FlowStep['type']
+                  // 普通节点和子流程的参数是两套字段；跨类型切换还留着旧键，
+                  // 会变成子流程的意外覆盖（或普通节点的自造字段），直接清掉。
+                  const crossesFlow =
+                    (nextType === 'flow') !== (draft.type === 'flow')
                   patch({
-                    type: e.target.value as FlowStep['type'],
+                    type: nextType,
                     // 切成循环时给个默认次数；切回来时次数保留（改回去不用重设）
-                    count: e.target.value === 'repeat' ? (draft.count || 1) : draft.count,
+                    count: nextType === 'repeat' ? draft.count || 1 : draft.count,
+                    params: crossesFlow ? {} : draft.params,
+                    template_id: nextType === 'flow' ? '' : draft.template_id,
+                    flow_id: nextType === 'flow' ? draft.flow_id : '',
                   })
-                }
+                }}
               >
                 <option value="template">普通</option>
                 <option value="repeat">循环</option>
@@ -557,7 +578,11 @@ export default function StepEditorDialog({
                 <select
                   className="field"
                   value={draft.flow_id}
-                  onChange={(e) => patch({ flow_id: e.target.value })}
+                  onChange={(e) =>
+                    // 换一条子流程，输入字段就换了一套 —— 旧绑定留着只会
+                    // 变成「不存在的字段」，清掉后同名输入仍会自动传
+                    patch({ flow_id: e.target.value, params: {} })
+                  }
                 >
                   <option value="">选一条流程…</option>
                   {flows.map((f) => (
@@ -631,7 +656,62 @@ export default function StepEditorDialog({
           </p>
 
           <h4 className="mt-md font-display text-base font-medium">这一步吃什么</h4>
-          {!cap ? (
+          {draft.type === 'flow' ? (
+            !subFlow ? (
+              <p className="mt-2xs text-sm text-muted">先选一条子流程</p>
+            ) : subInputFields.length === 0 ? (
+              <p className="mt-2xs text-sm text-muted">这条子流程没有输入</p>
+            ) : (
+              <>
+                <p className="mt-2xs text-xs text-muted">
+                  同名字段会自动从父流程传进来。只有想换来源时才需要单独设置。
+                </p>
+                <div className="mt-sm flex flex-col gap-md">
+                  {subInputFields.map((f) => {
+                    const overridden = Object.prototype.hasOwnProperty.call(
+                      draft.params ?? {},
+                      f.name,
+                    )
+                    return (
+                      <div key={f.name}>
+                        <div className="flex flex-wrap items-center justify-between gap-sm">
+                          <span className="text-sm">
+                            {f.label || f.name}
+                            {f.required && <span className="text-error"> *</span>}
+                          </span>
+                          <button
+                            type="button"
+                            className="btn btn-quiet"
+                            onClick={() => {
+                              if (overridden) {
+                                removeParam(f.name)
+                                return
+                              }
+                              // 默认填「同名的父流程输入」—— 和自动传一致，
+                              // 用户接着改来源即可，不用从空白开始
+                              const sameName = inputFields.some((i) => i.name === f.name)
+                              setParam(f.name, sameName ? `{{ input.${f.name} }}` : '')
+                            }}
+                          >
+                            {overridden ? '恢复同名自动传' : '改用其他来源'}
+                          </button>
+                        </div>
+                        {overridden ? (
+                          <div className="mt-2xs">
+                            <ParamControl field={f} raw={draft.params?.[f.name] ?? ''} />
+                          </div>
+                        ) : (
+                          <p className="mt-2xs text-xs text-muted">
+                            运行时取同名的父流程输入
+                          </p>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              </>
+            )
+          ) : !cap ? (
             <p className="mt-2xs text-sm text-muted">先选一个节点</p>
           ) : cap.fields.length === 0 ? (
             <p className="mt-2xs text-sm text-muted">这个节点没有可填的参数</p>
@@ -645,7 +725,14 @@ export default function StepEditorDialog({
 
           <h4 className="mt-lg font-display text-base font-medium">这一步产出什么</h4>
           <p className="mt-2xs text-sm text-muted">
-            产出由节点决定（{cap ? `${cap.name} 的输出` : '选好节点后可知'}）。
+            {draft.type === 'flow'
+              ? subFlow
+                ? `子流程产出：${
+                    (subFlow.outputs ?? []).map((o) => o.name).join('、') ||
+                    '未声明（默认交付最后一步的产物）'
+                  }。`
+                : '先选一条子流程。'
+              : `产出由节点决定（${cap ? `${cap.name} 的输出` : '选好节点后可知'}）。`}
             {consumers.length > 0
               ? ` 下面这些步骤在吃它的产物：${consumers
                   .map((c) =>

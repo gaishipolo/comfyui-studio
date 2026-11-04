@@ -34,6 +34,18 @@ test('stepDependencies 解析上游引用', () => {
   assert.deepEqual(stepDependencies(steps, 'gen'), [])
 })
 
+test('stepDependencies 认出取单张与子流程具名产出', () => {
+  const steps = [
+    step('gen'),
+    step('sub'),
+    step('edit', {
+      image: '{{ steps.gen.outputs.first }}',
+      ref: '{{ steps.sub.final_image }}',
+    }),
+  ]
+  assert.deepEqual(stepDependencies(steps, 'edit').sort(), ['gen', 'sub'])
+})
+
 test('isOrderValid 认出顺序被破坏的情况', () => {
   const good = [step('gen'), step('edit', { image: REF })]
   assert.equal(isOrderValid(good), true)
@@ -63,6 +75,20 @@ test('wouldBreakDependency 拦住会断链的拖动', () => {
   assert.equal(wouldBreakDependency(free, 0, 1), false)
   // 原地不动不算破坏
   assert.equal(wouldBreakDependency(steps, 0, 0), false)
+})
+
+test('paramSummary 对子流程说人话', () => {
+  const sub: FlowStep = {
+    ...step('sub'),
+    type: 'flow',
+    template_id: '',
+    flow_id: 'flow-1',
+  }
+  assert.equal(paramSummary(sub, null), '输入按同名自动传')
+  assert.equal(
+    paramSummary({ ...sub, params: { prompt: '{{ input.prompt }}' } }, null),
+    '已单独设置 1 个输入',
+  )
 })
 
 test('nodeVisual 按能力给图标', () => {

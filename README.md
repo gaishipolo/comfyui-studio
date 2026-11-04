@@ -162,7 +162,7 @@ cd ../deploy/windows && .\install-service.ps1
 
 ### 单元测试（离线一条命令跑完，不碰任何真实资源）
 
-`backend/tests/test_*.py`（57 个，不依赖 pytest）：鉴权吊销、请求准入、任务终态竞态、插件恢复守卫、输入校验、下载票据、登录限速、启动配置自检、清理脚本守卫、live 脚本自检、端口匹配、素材回收站、存储配额与默认配额、按引擎分组的并发闸门、重启后排队任务重排、图片缩略图预生成、随机数字段 schema 与 -1 哨兵展开、媒体 MIME 的跨平台一致性、流程表达式语言（管道/条件/白名单）、前后端表达式契约清单与端到端求值、Agent 编排四步链路（spec/draft/trial/approve）与试跑产物隔离、LLM 生成通道（围栏 JSON 解析、校验错误回喂自修、失败不落库、未配置提示、重名草稿自动后缀）、整应用 ASGI 冒烟（登录→建模板→提交→列素材）等。逐个直接运行即可：
+`backend/tests/test_*.py`（59 个，不依赖 pytest）：鉴权吊销、请求准入、任务终态竞态、插件恢复守卫、输入校验、下载票据、登录限速、启动配置自检、清理脚本守卫、live 脚本自检、端口匹配、素材回收站、存储配额与默认配额、按引擎分组的并发闸门、重启后排队任务重排、图片缩略图预生成、随机数字段 schema 与 -1 哨兵展开、媒体 MIME 的跨平台一致性、流程表达式语言（管道/条件/白名单）、前后端表达式契约清单与端到端求值、流程编排（依赖分层并行、循环实例、子流程嵌套与环路检测、内部异常落 error、进度上限、默认产出按声明顺序）、流程配置治理（非法配置拒建拒改、草稿不能自激活、被引用的子流程不能删）、Agent 编排四步链路（spec/draft/trial/approve）与试跑产物隔离、LLM 生成通道（围栏 JSON 解析、校验错误回喂自修、失败不落库、未配置提示、重名草稿自动后缀）、整应用 ASGI 冒烟（登录→建模板→提交→列素材）等。逐个直接运行即可：
 
 ```powershell
 Get-ChildItem tests\test_*.py | ForEach-Object { & .\.venv\Scripts\python.exe $_.FullName; if ($LASTEXITCODE -ne 0) { exit 1 } }
@@ -232,6 +232,17 @@ npm ci
 npm run test:state
 npm run test:ui
 ```
+
+`test:ui` 只跑主界面那一套。流程相关的几套要单独点，它们都自带静态服务、拦截 API 造数据，不需要真后端（都在 `frontend/tests/` 下）：
+
+| 脚本 | 覆盖 |
+| --- | --- |
+| `node tests/verify_flow_run_panel_ui.mjs` | 运行台进度条与百分比（含超范围进度兜底）、循环实例逐行标「第 N 次」、子流程步骤显示子流程名、失败态转 error 色并给出原因 |
+| `node tests/verify_flow_expr_ui.mjs` | 节点设置弹窗里的「再加工」「按条件取值」、中文标签、存的是规范表达式 |
+| `node tests/verify_agent_flow_ui.mjs` | 流程草稿的待审批标记、审批区、试跑按钮与试跑接口 |
+| `node tests/verify_agent_generate_ui.mjs` | 「一句话生成」入口、需求输入、模型显示、未配置时的说明 |
+
+这几套用有头浏览器（无头 Chromium 不占滚动条宽度，量布局会得出假结论），所以不进 CI，在本地回归时跑。
 
 服务脚本固定用 `admin` / `admin123`。只可对全新、可丢弃的数据库设置 `ADMIN_INITIAL_PASSWORD=admin123`；已有管理员时该变量不会重置密码。服务回归会创建、修改和删除数据库行、插件文件、工作流及素材，禁止指向用户正在使用的服务。
 

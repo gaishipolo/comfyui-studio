@@ -5,14 +5,12 @@
 
 检查项分两档：
 - error：这份配置跑不起来（引用了不存在的节点/字段、环、文件字段填了字面量）
-- warning：能跑但可能有坑（引用的上游步骤在后面 —— 顺序执行下拿不到产物）
+- warning：能跑但可能有问题（引用了列表里排在后面的步骤 —— 执行按依赖分层，
+  会自动提前，但列表顺序和实际执行顺序不一致，容易误读）
 
-依赖分层用 Kahn 算法：同一层的步骤互不依赖，可以并行。第一刀执行器
-还是顺序的，但分层结果一并返回 —— 编排界面要显示「第几步」，
-将来并行时执行器直接用这个分层，不用重新算。
+依赖分层用 Kahn 算法：同一层的步骤互不依赖，可以并行。执行器直接用这个
+分层结果，不再自己算一遍。
 """
-import re
-
 from app.models.models import Template
 from app.services.field_types import is_file_field, normalized_field_map
 from app.services.flow_expr import collect_base_refs, collect_refs, expr_problems
@@ -36,12 +34,17 @@ def _input_field_names(input_schema) -> set[str]:
 
 
 def _has_list_source(step: dict) -> bool:
-    """这一步的参数量引了「列表[序号]」吗 —— 那种情况下次数由列表长度决定。"""
+    """这一步的参数里引了「列表[序号]」吗 —— 那种情况下次数由列表长度决定。
+
+    用引用解析而不是正则：字段名允许中文，正则写 `[A-Za-z_]` 会漏掉
+    `input.提示词列表[index]`，于是合法的循环配置被误报「没找到列表来源」。
+    """
     for expr in (step.get("params") or {}).values():
         if not isinstance(expr, str):
             continue
-        if re.search(r"input\.[A-Za-z_][A-Za-z0-9_]*\[[A-Za-z_][A-Za-z0-9_]*\]", expr):
-            return True
+        for ref in collect_refs(expr):
+            if ref.startswith("input.") and "[" in ref:
+                return True
     return False
 
 
@@ -138,6 +141,10 @@ def validate_flow_config(
         seen.add(sid)
 
     input_names = _input_field_names(input_schema)
+    # 步骤 id → 类型：引用子流程的具名产出（steps.sub.final_image）时要放行
+    step_types = {
+        str(s.get("id") or ""): str(s.get("type") or "template") for s in steps
+    }
 
     for index, step in enumerate(steps):
         sid = str(step.get("id") or f"step{index + 1}")
@@ -222,30 +229,42 @@ def validate_flow_config(
             for ref in collect_refs(expr):
                 if ref.startswith("steps."):
                     parts = ref.split(".")
-                    if len(parts) < 3 or parts[2] != "outputs":
+                    if len(parts) < 3:
+                        warnings.append(
+                            f"{label}的引用「{ref}」不完整"
+                            "（应为 steps.<步骤>.outputs，子流程也可以用产出名）"
+                        )
+                        continue
+                    upstream, suffix = parts[1], parts[2]
+                    # 子流程的具名产出（steps.sub.final_image）是合法写法；
+                    # 普通节点只有 outputs 这一种产物入口。
+                    if suffix != "outputs" and step_types.get(upstream) != "flow":
                         warnings.append(
                             f"{label}的引用「{ref}」只认 steps.<步骤>.outputs 这种形状"
                         )
+                    if upstream == sid:
+                        errors.append(f"{label}引用了自己的产物（成环）")
+                        continue
+                    if upstream not in seen:
+                        errors.append(
+                            f"{label}引用了不存在的步骤「{upstream}」"
+                        )
                     else:
-                        upstream = parts[1]
-                        if upstream not in seen:
-                            errors.append(
-                                f"{label}引用了不存在的步骤「{upstream}」"
+                        up_index = next(
+                            (
+                                i
+                                for i, s in enumerate(steps)
+                                if str(s.get("id") or "") == upstream
+                            ),
+                            -1,
+                        )
+                        # 执行按依赖分层，引用排在后面的步骤也能跑对 ——
+                        # 只提示「列表顺序和实际顺序不一致」，不拦。
+                        if up_index > index:
+                            warnings.append(
+                                f"{label}引用了排在后面的{step_label(steps, upstream)}"
+                                "（执行时会按依赖自动提前，但建议把它拖到前面）"
                             )
-                        else:
-                            up_index = next(
-                                (
-                                    i
-                                    for i, s in enumerate(steps)
-                                    if str(s.get("id") or "") == upstream
-                                ),
-                                -1,
-                            )
-                            if up_index >= index:
-                                errors.append(
-                                    f"{label}引用了后面的{step_label(steps, upstream)}"
-                                    "（只能引用前面的步骤 —— 顺序执行下拿不到还没跑的产物）"
-                                )
 
     # ── 循环次数 ──
     for step in steps:
@@ -275,13 +294,24 @@ def validate_flow_config(
                 )
 
     # ── 输出声明 ──
+    out_names: set[str] = set()
     for out in outputs:
-        name = str(out.get("name") or "")
+        name = str(out.get("name") or "").strip()
         src = str(out.get("from_step") or out.get("from") or "")
+        pick = str(out.get("pick") or "all")
         if not name:
             errors.append("输出声明缺少 name")
+        elif name in out_names:
+            # 重名会让父流程拿到不确定的那一个（后写覆盖前写），必须拦
+            errors.append(f"输出名「{name}」重复了，换一个")
+        else:
+            out_names.add(name)
         if src and src not in seen:
             errors.append(f"输出「{name}」引用的步骤不存在：{src}")
+        if pick not in ("all", "first", "last"):
+            errors.append(
+                f"输出「{name}」的取值方式「{pick}」不认识（只能是 all / first / last）"
+            )
 
     layers, cycle = compute_layers(steps)
     if cycle:

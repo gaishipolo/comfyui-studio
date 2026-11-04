@@ -12,8 +12,12 @@
 import type { FlowStep, NodeCapability, TemplateField } from '../types'
 import { describeParam, parseParamSource } from './flowSource'
 
-/** 引用上游产物的写法：{{ steps.s1.outputs }} */
-const STEP_REF = /\{\{\s*steps\.([A-Za-z0-9_]+)\.outputs\s*\}\}/g
+/** 引用上游产物的写法：{{ steps.s1.outputs }} / .first / .last / 子流程产出名。
+ *
+ *  只认 `.outputs` 会漏两类真用法：取单张（`steps.s1.outputs.first`）和
+ *  子流程的具名产出（`steps.sub.final_image`）。漏了不会跑错（后端按依赖
+ *  分层），但界面会允许把引用者拖到上游前面，拖完才发现顺序不对。 */
+const STEP_REF = /\{\{\s*steps\.([^.\s}]+)\./g
 
 /** 这一步依赖哪些上游步骤的产物 */
 export function stepDependencies(steps: FlowStep[], stepId: string): string[] {
@@ -106,6 +110,14 @@ export function paramSummary(
   inputs: TemplateField[] = [],
   stepTitles: Record<string, string> = {},
 ): string {
+  // 子流程没有「节点」，参数是覆盖子流程的同名输入 —— 别显示「未设置参数」
+  if (!cap) {
+    if (step.type === 'flow') {
+      const bound = Object.values(step.params ?? {}).filter((v) => v !== '').length
+      return bound ? `已单独设置 ${bound} 个输入` : '输入按同名自动传'
+    }
+    return '未选节点'
+  }
   const fields = cap?.fields ?? []
   const parts: string[] = []
   for (const f of fields) {

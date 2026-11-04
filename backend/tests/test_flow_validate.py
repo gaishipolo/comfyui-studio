@@ -53,12 +53,13 @@ TEMPLATES = {
 }
 
 
-def _validate(steps, inputs=None, outputs=None):
+def _validate(steps, inputs=None, outputs=None, flows=None):
     return validate_flow_config(
         steps=steps,
         input_schema={"fields": inputs if inputs is not None else []},
         outputs=outputs or [],
         templates=TEMPLATES,
+        flows=flows or {},
     )
 
 
@@ -150,8 +151,8 @@ def test_missing_upstream_still_errors() -> None:
     assert any("不存在" in e for e in result["errors"]), result["errors"]
 
 
-def test_forward_reference_still_errors() -> None:
-    """引用后面的步骤仍然要报错（顺序执行拿不到还没跑的产物）。"""
+def test_forward_reference_is_warning_not_error() -> None:
+    """引用后面的步骤能跑（执行按依赖分层），只提示顺序不一致。"""
     steps = [
         {
             "id": "edit",
@@ -161,8 +162,84 @@ def test_forward_reference_still_errors() -> None:
         {"id": "gen", "template_id": "t1", "params": {"prompt": "x"}},
     ]
     result = _validate(steps)
+    assert result["ok"], result["errors"]
+    assert any("后面的" in w for w in result["warnings"]), result["warnings"]
+
+
+def test_chinese_list_field_is_loop_source() -> None:
+    """中文字段名的列表循环是合法的 —— 只用 ASCII 正则会误报「没找到列表来源」。"""
+    steps = [
+        {
+            "id": "shots",
+            "type": "repeat",
+            "template_id": "t1",
+            "count": 0,
+            "params": {"prompt": "{{ input.提示词列表[index] }}"},
+        }
+    ]
+    inputs = [
+        {
+            "name": "提示词列表",
+            "label": "提示词列表",
+            "type": "textarea",
+            "multiple": True,
+        }
+    ]
+    result = _validate(steps, inputs=inputs)
+    assert result["ok"], result["errors"]
+
+
+def test_subflow_named_output_reference_ok() -> None:
+    """子流程的具名产出（steps.sub.final）合法，不该报「只认 outputs」。"""
+    steps = [
+        {"id": "sub", "type": "flow", "flow_id": "f1", "params": {}},
+        {
+            "id": "use",
+            "template_id": "t2",
+            "params": {
+                "prompt": "{{ input.prompt }}",
+                "image": "{{ steps.sub.final_image }}",
+            },
+        },
+    ]
+    result = _validate(steps, inputs=[PROMPT_FIELD], flows={"f1": "子流程"})
+    assert result["ok"], result["errors"]
+    assert not any("只认" in w for w in result["warnings"]), result["warnings"]
+
+
+def test_step_cannot_reference_itself() -> None:
+    steps = [
+        {
+            "id": "gen",
+            "template_id": "t2",
+            "params": {"prompt": "x", "image": "{{ steps.gen.outputs }}"},
+        }
+    ]
+    result = _validate(steps)
     assert not result["ok"]
-    assert any("后面的" in e for e in result["errors"]), result["errors"]
+    assert any("自己" in e for e in result["errors"]), result["errors"]
+
+
+def test_duplicate_output_names_error() -> None:
+    steps = [{"id": "gen", "template_id": "t1", "params": {"prompt": "x"}}]
+    result = _validate(
+        steps,
+        outputs=[
+            {"name": "final", "from": "gen"},
+            {"name": "final", "from": "gen"},
+        ],
+    )
+    assert not result["ok"]
+    assert any("重复" in e for e in result["errors"]), result["errors"]
+
+
+def test_invalid_output_pick_error() -> None:
+    steps = [{"id": "gen", "template_id": "t1", "params": {"prompt": "x"}}]
+    result = _validate(
+        steps, outputs=[{"name": "final", "from": "gen", "pick": "second"}]
+    )
+    assert not result["ok"]
+    assert any("取值方式" in e for e in result["errors"]), result["errors"]
 
 
 def test_duplicate_step_id_errors() -> None:
@@ -434,7 +511,12 @@ def main() -> int:
         test_pick_suffix_is_accepted,
         test_index_suffix_is_accepted,
         test_missing_upstream_still_errors,
-        test_forward_reference_still_errors,
+        test_forward_reference_is_warning_not_error,
+        test_chinese_list_field_is_loop_source,
+        test_subflow_named_output_reference_ok,
+        test_step_cannot_reference_itself,
+        test_duplicate_output_names_error,
+        test_invalid_output_pick_error,
         test_duplicate_step_id_errors,
         test_layers_group_independent_steps,
         test_image_upload_alias_treated_as_file_field,

@@ -309,7 +309,11 @@ export interface FlowStepState {
   status: string
   /** 依赖分层（从 0 开始）—— 同层的步骤是同时跑的 */
   layer?: number
+  /** 循环步骤的实例序号（从 0 开始）；非循环步骤固定为 0 */
+  iteration?: number
   outputs?: { asset_id: string; filename: string; mime_type: string }[]
+  /** 子流程步骤的内部步骤进度 —— 只有 type='flow' 的步骤才有 */
+  subflow?: FlowStepState[]
 }
 
 export interface FlowRun {
