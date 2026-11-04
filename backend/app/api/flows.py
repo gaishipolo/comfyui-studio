@@ -7,11 +7,13 @@
 - 运行：所有登录用户都能跑 active 流程（运营同事的日常）
 """
 import logging
+from types import SimpleNamespace
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.database import get_db
 from app.disposition import attachment_disposition
 from app.models.models import Flow, FlowRun, Template, User
@@ -21,6 +23,8 @@ from app.schemas.schemas import (
     AgentApproveResponse,
     AgentDraftRequest,
     AgentDraftResponse,
+    AgentGenerateRequest,
+    AgentGenerateResponse,
     FlowCreate,
     FlowImportPayload,
     FlowImportResponse,
@@ -31,6 +35,7 @@ from app.schemas.schemas import (
     FlowValidateResponse,
     NodeCapability,
 )
+from app.services import agent_llm
 from app.services.agent_spec import build_spec
 from app.services.flow_service import FlowError, submit_flow
 from app.timeutils import utcnow
@@ -185,6 +190,154 @@ async def agent_spec(
         await db.execute(select(Flow).where(Flow.status == "active"))
     ).scalars().all()
     return build_spec(templates, flows)
+
+
+async def _unique_flow_name(db: AsyncSession, base: str) -> str:
+    """给 Agent 生成的草稿挑一个没被占用的名字。
+
+    为什么自动加后缀而不是报错：一句话生成是「多试几次」的功能，
+    第二次生成撞上第一条草稿的名字就失败，体验上莫名其妙。
+    人工新建走的是另一条路（同名直接报错），因为那是人在决定名字。
+    """
+    base = (base or "Agent 流程").strip()[:110] or "Agent 流程"
+    for index in range(1, 51):
+        candidate = base if index == 1 else f"{base} · {index}"
+        exists = (
+            await db.execute(select(Flow.id).where(Flow.name == candidate))
+        ).scalars().first()
+        if exists is None:
+            return candidate
+    raise HTTPException(
+        status_code=409,
+        detail="同名草稿太多了，先在编排器里清理一下再生成",
+    )
+
+
+@router.get("/agent/status")
+async def agent_status(user: User = Depends(get_current_user)):
+    """Agent 通道状态 —— 界面据此决定「能不能用一句话生成」。
+
+    只回是否可用和模型名，**不回 base_url / key**：前端不需要，
+    而这些信息对排查部署问题以外的人没有价值。
+    """
+    configured = agent_llm.is_configured()
+    return {
+        "configured": configured,
+        "model": settings.LLM_MODEL.strip() if configured else "",
+    }
+
+
+def _node_snapshot(t: Template):
+    """把节点拍成普通对象，供 LLM 调用期间使用。
+
+    为什么要拍：调模型可能几十秒，这段时间不该一直攥着数据库连接
+    （50 个人同时点，连接池会直接排满）。拍完快照就结束读事务，
+    把连接还回去 —— 校验只需要 id / name / input_schema 这几项。
+    """
+    return SimpleNamespace(
+        id=t.id,
+        name=t.name,
+        description=t.description or "",
+        category=t.category or "",
+        engine=t.engine or "",
+        capability=t.capability or "",
+        input_schema=t.input_schema or {},
+    )
+
+
+@router.post("/agent/generate", response_model=AgentGenerateResponse)
+async def agent_generate(
+    payload: AgentGenerateRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """一句话需求 → 流程配置 → **草稿**。
+
+    这是「生成」入口，和 `/agent/draft`（提交现成配置）的区别只是
+    「谁写配置」：模型写还是外部 Agent 写。落库规则完全一样 ——
+    校验、draft、试跑、人审批，一步不少。
+
+    **生成失败不落库**：只回错误和轨迹，让人改需求再来一次。
+    留一堆跑不通的半成品草稿，比没有这个功能更糟。
+    """
+    user_id = user.id
+    template_rows = (
+        await db.execute(select(Template).where(Template.is_active.is_(True)))
+    ).scalars().all()
+    flow_rows = (
+        await db.execute(select(Flow).where(Flow.status == "active"))
+    ).scalars().all()
+
+    nodes = [_node_snapshot(t) for t in template_rows]
+    subflows = [
+        SimpleNamespace(id=f.id, name=f.name, description=f.description or "")
+        for f in flow_rows
+    ]
+    templates = {t.id: t for t in nodes}
+    flows = {f.id: f.name for f in subflows}
+    spec = build_spec(nodes, subflows)
+
+    # 结束读事务，把连接还给池子；接下来的等待是网络时间，不是数据库时间
+    await db.rollback()
+
+    try:
+        result = await agent_llm.generate_flow_draft(
+            payload.requirement,
+            spec,
+            templates,
+            flows,
+        )
+    except agent_llm.AgentLLMError as exc:
+        # 通道不可用是**部署问题**，不是需求问题 —— 文案要区分开，
+        # 否则用户会一直改需求，而真正该做的是找管理员配模型
+        return AgentGenerateResponse(ok=False, message=str(exc), errors=[str(exc)])
+
+    if not result.ok or not result.config:
+        return AgentGenerateResponse(
+            ok=False,
+            errors=result.errors,
+            attempts=result.attempts,
+            model=result.model,
+            message=result.message,
+        )
+
+    config = result.config
+    name = await _unique_flow_name(db, str(config.get("name") or "Agent 流程"))
+    note_parts = [f"模型 {result.model}"]
+    if result.attempts:
+        note_parts.append(f"第 {len(result.attempts)} 次尝试通过校验")
+    if result.note.strip():
+        note_parts.append(result.note.strip())
+
+    flow = Flow(
+        name=name,
+        description=str(config.get("description") or ""),
+        category=str(config.get("category") or payload.category),
+        icon=str(config.get("icon") or ""),
+        input_schema=config.get("input_schema") or {},
+        outputs=config.get("outputs") or [],
+        steps=config.get("steps") or [],
+        # 关键：模型只写配置，不能自己上线
+        status="draft",
+        created_by=user_id,
+        version=1,
+        agent_note=" · ".join(note_parts),
+    )
+    db.add(flow)
+    await db.commit()
+    await db.refresh(flow)
+
+    return AgentGenerateResponse(
+        ok=True,
+        flow_id=flow.id,
+        name=flow.name,
+        note=flow.agent_note,
+        warnings=result.warnings,
+        layers=result.layers,
+        attempts=result.attempts,
+        model=result.model,
+        message=f"已生成草稿「{flow.name}」，试跑确认效果后再审批上线",
+    )
 
 
 @router.post("/agent/draft", response_model=AgentDraftResponse)

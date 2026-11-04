@@ -331,6 +331,36 @@ export interface FlowRun {
   finished_at: string | null
 }
 
+/** Agent 一次生成的轨迹：第几次、卡在哪一步、错在哪。
+ *  审批时看这个比看模型的说明更可信 —— 一次过和改三轮不是一回事 */
+export interface AgentAttempt {
+  attempt: number
+  /** json = 输出不是 JSON；schema = 结构不对；semantic = 空流程；
+   *  validate = 校验不过；ok = 通过 */
+  stage: string
+  errors: string[]
+}
+
+/** 一句话生成的结果。ok 只代表「配置合法且已落成草稿」，不代表已上线 */
+export interface AgentGenerateResult {
+  ok: boolean
+  flow_id: string
+  name: string
+  note: string
+  errors: string[]
+  warnings: string[]
+  layers: string[][]
+  attempts: AgentAttempt[]
+  model: string
+  message: string
+}
+
+/** 编排通道状态 —— 没配模型时界面直接说清楚，别让人白点 */
+export interface AgentStatus {
+  configured: boolean
+  model: string
+}
+
 /** 流程导入的结果 */
 export interface FlowImportResult {
   id: string

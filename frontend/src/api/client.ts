@@ -4,7 +4,7 @@ import type {
   AssetTag, EngineInfo, WorkflowUploadResponse, WorkflowInventoryResponse,
   UsageResponse, EnginePluginInfo, TemplateImportResult, StorageQuota,
   Flow, FlowRun, FlowStep, FlowOutput, FlowValidateResult, NodeCapability,
-  FlowImportResult, TemplateField,
+  FlowImportResult, TemplateField, AgentGenerateResult, AgentStatus,
 } from '../types'
 
 const BASE = '/api'
@@ -714,3 +714,15 @@ export const approveFlow = (id: string, approve: boolean, note = '') =>
     `/flows/${id}/approve`,
     { method: 'POST', body: JSON.stringify({ approve, note }) },
   )
+
+/** 编排通道状态 —— 没配模型时界面直接说清楚，别让人填完需求才发现用不了 */
+export const getAgentStatus = () => request<AgentStatus>('/flows/agent/status')
+
+/** 一句话需求 → 流程草稿。
+ *  模型只写配置：生成结果一律是 draft，要试跑 + 人审批才上线。
+ *  生成失败不会落库，errors 是给人改需求用的。 */
+export const generateFlowDraft = (data: { requirement: string; category?: string }) =>
+  request<AgentGenerateResult>('/flows/agent/generate', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  })

@@ -61,6 +61,24 @@ class Settings(BaseSettings):
     MINIO_SECURE: bool = False
     MINIO_REGION: str = ""
 
+    # ── 流程编排 Agent（LLM）──
+    # 只走 OpenAI 兼容的 /chat/completions 协议，不绑厂商：OpenAI、DeepSeek、
+    # 通义、Kimi、本地 vLLM / Ollama 的兼容层都能填。留空 = 未启用，
+    # 界面会提示改用人工编排，不会静默失败。
+    #
+    # **为什么不把模型配置放进数据库**：这是系统级凭据，不是某个人的偏好；
+    # 放 .env 由部署方管，不会随备份/导出泄露，也不用为「谁能改模型」设计权限。
+    LLM_BASE_URL: str = ""  # 如 https://api.deepseek.com 或 http://127.0.0.1:11434/v1
+    LLM_API_KEY: str = ""  # 本地模型可留空
+    LLM_MODEL: str = ""  # 如 deepseek-chat / gpt-4o-mini / qwen2.5:14b
+    LLM_TIMEOUT: float = 90.0  # 单次生成超时（秒）。生成长 JSON 比聊天慢，别设太小
+    # 校验不过时把错误回喂给模型自修的次数。3 次足够：再多是在烧钱，
+    # 而且说明模型压根没理解规格。
+    LLM_MAX_ATTEMPTS: int = 3
+    # 访问外部模型是否继承系统代理。国内访问 OpenAI 之类通常需要代理，
+    # 与 ComfyUI 的内网地址正好相反，所以这里默认开启。
+    LLM_TRUST_ENV: bool = True
+
     # 任务
     MAX_CONCURRENT_TASKS: int = 2
     # 重启时把「排队中、还没提交到引擎」的任务重新排一遍。

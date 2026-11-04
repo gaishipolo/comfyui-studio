@@ -13,12 +13,22 @@
  * 不用「同名自动取」是因为两个节点可能都有同名字段，同名自动取会串味。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { Flow, FlowRun, FlowStep, NodeCapability, Template, TemplateField } from '../types'
+import type {
+  AgentStatus,
+  Flow,
+  FlowRun,
+  FlowStep,
+  NodeCapability,
+  Template,
+  TemplateField,
+} from '../types'
 import {
   approveFlow,
   createFlow,
   deleteFlow,
   exportFlow,
+  generateFlowDraft,
+  getAgentStatus,
   getFlowRun,
   importFlow,
   listFlows,
@@ -414,6 +424,14 @@ function EditView({
   const [dropIdx, setDropIdx] = useState<number | null>(null)
   // 审批意见 —— 草稿批/驳时填
   const [reviewNote, setReviewNote] = useState('')
+  // ── 一句话生成 ──
+  // 模型只写配置：生成完落到 draft，人看效果再审批。
+  // 这些状态都放在编排器里（而不是弹窗组件），因为生成后要选中新草稿。
+  const [agentOpen, setAgentOpen] = useState(false)
+  const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null)
+  const [requirement, setRequirement] = useState('')
+  const [agentBusy, setAgentBusy] = useState(false)
+  const [agentErrors, setAgentErrors] = useState<string[]>([])
 
   useEffect(() => {
     setDraft(selected)
@@ -691,9 +709,66 @@ function EditView({
     }
   }
 
+  /**
+   * 打开「一句话生成」面板，顺便问一次通道状态。
+   *
+   * 每次打开都问：部署方可能刚配好模型，不该让人刷新整页才生效。
+   * 状态拿不到也不拦人 —— 真点了生成，后端会给明确的失败原因。
+   */
+  const openAgent = async () => {
+    setAgentOpen(true)
+    setAgentErrors([])
+    try {
+      setAgentStatus(await getAgentStatus())
+    } catch {
+      setAgentStatus(null)
+    }
+  }
+
+  /**
+   * 一句话 → 草稿。
+   *
+   * 生成成功不代表上线：新草稿会被选中，接着该试跑、看效果、审批。
+   * 生成失败不落库，错误直接列在面板里 —— 让人改的是需求，不是去猜哪里错了。
+   */
+  const doAgentGenerate = async () => {
+    const text = requirement.trim()
+    if (text.length < 2) {
+      notify('把想做的流程说得具体一点，比如「先生成参考图，再换成边牧」', 'warning')
+      return
+    }
+    setAgentBusy(true)
+    setAgentErrors([])
+    try {
+      const result = await generateFlowDraft({ requirement: text })
+      if (!result.ok) {
+        setAgentErrors(result.errors.length ? result.errors : [result.message || '生成失败'])
+        if (result.message) notify(result.message, 'warning')
+        return
+      }
+      await onChanged()
+      onSelect(result.flow_id)
+      setRequirement('')
+      setAgentOpen(false)
+      notify(
+        result.warnings.length
+          ? `已生成草稿「${result.name}」，另有 ${result.warnings.length} 条校验提醒`
+          : result.message || `已生成草稿「${result.name}」`,
+        'success',
+      )
+    } catch (err) {
+      reportError('生成失败', err)
+    } finally {
+      setAgentBusy(false)
+    }
+  }
+
   return (
     <div className="flex min-h-0 flex-1 gap-md">
       <aside className="w-56 shrink-0 overflow-y-auto">
+        <button type="button" className="btn btn-quiet mb-sm w-full" onClick={() => void openAgent()}>
+          一句话生成（Agent）
+        </button>
         <button type="button" className="btn btn-quiet mb-sm w-full" onClick={() => void createNew()}>
           新建流程
         </button>
@@ -741,6 +816,69 @@ function EditView({
       </aside>
 
       <section className="flex min-w-0 flex-1 flex-col overflow-y-auto">
+        {/* ── 一句话生成：模型写配置，人负责判断它有没有用 ── */}
+        {agentOpen && (
+          <div className="panel mb-md border-accent">
+            <div className="flex flex-wrap items-start justify-between gap-sm">
+              <div>
+                <h4 className="font-display text-base font-medium">用一句话生成流程</h4>
+                <p className="mt-2xs text-xs text-muted">
+                  模型只负责写配置。生成后是草稿：先试跑看效果，再由人审批上线。
+                </p>
+              </div>
+              <button type="button" className="btn btn-quiet" onClick={() => setAgentOpen(false)}>
+                收起
+              </button>
+            </div>
+
+            {agentStatus && !agentStatus.configured ? (
+              <p className="mt-sm rounded-md border border-warning-line bg-warning-soft px-sm py-xs text-sm text-warning">
+                后端还没配置编排模型（LLM_BASE_URL / LLM_API_KEY / LLM_MODEL），暂时用不了。
+                可以先手工编排，配置好之后这里会自动可用。
+              </p>
+            ) : (
+              <>
+                <label className="field-label mt-sm block">
+                  想做什么
+                  <textarea
+                    className="field mt-2xs"
+                    rows={3}
+                    value={requirement}
+                    disabled={agentBusy}
+                    placeholder="例：先用 Flux2 生成一张拉布拉多拉拖拉机的图，再用图生图把拉布拉多换成边牧，最后放大 2 倍"
+                    onChange={(e) => setRequirement(e.target.value)}
+                  />
+                </label>
+                <div className="mt-sm flex flex-wrap items-center gap-sm">
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    disabled={agentBusy}
+                    onClick={() => void doAgentGenerate()}
+                  >
+                    {agentBusy ? '正在生成…' : '生成草稿'}
+                  </button>
+                  <span className="text-xs text-muted">
+                    {agentBusy
+                      ? '模型在想，通常 10~40 秒'
+                      : agentStatus?.model
+                        ? `模型：${agentStatus.model}`
+                        : '生成后可直接试跑，产物不进正式素材库'}
+                  </span>
+                </div>
+              </>
+            )}
+
+            {agentErrors.length > 0 && (
+              <ul className="mt-sm flex flex-col gap-2xs text-sm text-error">
+                {agentErrors.map((msg, i) => (
+                  <li key={`${i}-${msg}`}>· {msg}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+
         {!draft ? (
           <div className="empty">
             <p className="empty-title">选一个流程，或者新建一条</p>

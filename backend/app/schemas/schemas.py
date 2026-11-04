@@ -499,6 +499,40 @@ class AgentDraftResponse(BaseModel):
     layers: list[list[str]] = Field(default_factory=list)
 
 
+class AgentGenerateRequest(BaseModel):
+    """一句话需求 → 流程配置。
+
+    **这是唯一让模型参与的环节**：模型只能产出配置数据，落库仍是 draft，
+    照样要过校验、试跑、人审批。所以给它的输入也要限长 —— 需求不是越
+    长越好，超长只会让模型抓不住重点、让调用变贵。
+    """
+
+    requirement: str = Field(
+        min_length=2, max_length=4000, description="用自然语言描述这条流程要做什么"
+    )
+    category: str = Field(default="image", max_length=64, description="期望的流程分类")
+
+
+class AgentGenerateResponse(BaseModel):
+    """生成结果。
+
+    **ok=true 只代表「配置合法且已落成草稿」**，不代表已上线。
+    attempts 是回喂轨迹：[{attempt, stage: json/schema/semantic/validate/ok, errors}]，
+    审批人据此判断这份草稿可不可信（一次过 vs 改了三轮）。
+    """
+
+    ok: bool
+    flow_id: str = ""
+    name: str = ""
+    note: str = ""
+    errors: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    layers: list[list[str]] = Field(default_factory=list)
+    attempts: list[dict] = Field(default_factory=list)
+    model: str = ""
+    message: str = ""
+
+
 class AgentApproveRequest(BaseModel):
     """审批一份草稿。"""
 
