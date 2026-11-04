@@ -703,6 +703,10 @@ export const runFlow = (id: string, params: Record<string, unknown>) =>
 
 export const getFlowRun = (runId: string) => request<FlowRun>(`/flows/runs/${runId}`)
 
+/** 停掉一次还在跑的流程。后端只标记，在飞的任务由它自己撤 */
+export const cancelFlowRun = (runId: string) =>
+  request<FlowRun>(`/flows/runs/${runId}/cancel`, { method: 'POST' })
+
 /** 试跑一条流程 —— 真的出图，但产物不进正式素材库。
  *  Agent 生成的流程上线前先看效果，产物默认从素材库排除。 */
 export const trialFlow = (id: string, params: Record<string, unknown>) =>

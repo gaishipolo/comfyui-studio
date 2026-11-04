@@ -18,6 +18,8 @@
 import asyncio
 import logging
 
+from sqlalchemy import select
+
 from app.database import async_session
 from app.filestore import read_asset_bytes
 from app.models.models import Asset, Flow, FlowRun, Task, Template
@@ -40,6 +42,15 @@ _POLL_INTERVAL_SECONDS = 1.0
 
 class FlowError(RuntimeError):
     """流程配置错或执行出错。消息面向使用者，不含内部细节。"""
+
+
+class FlowCancelled(Exception):
+    """运行被用户取消 —— 不是错误，不该写错误文案，也不该算失败。
+
+    单独一个类型是为了把所有「取消」和「出错」分开：出错要落 error 并告诉
+    用户原因，取消只需要停下来。用 FlowError 表示取消，收尾时就会把一次
+    正常的人工取消写成失败。
+    """
 
 
 # 循环次数上限 —— 防止一条流程把引擎队列塞爆。
@@ -84,6 +95,58 @@ async def submit_flow(db, flow: Flow, params: dict, user, is_trial: bool = False
     return run
 
 
+async def cancel_run(db, run_id: str) -> FlowRun:
+    """用户取消一次运行。
+
+    **只落库标记，不在这里撤任务。** 撤任务由执行协程自己收尾
+    （`_cancel_run_tasks`）：它才知道自己手上还有哪些任务，也能避免
+    「标记之后又提交出新的步骤」这种竞态 —— 标记先落库，执行协程下一轮
+    轮询就会看到并停下来，之后新建的任务也在它自己的收尾清扫范围内。
+    """
+    run = await db.get(FlowRun, run_id)
+    if run is None:
+        raise LookupError("运行记录不存在")
+    if run.status in _TERMINAL:
+        raise ValueError("这次运行已经结束了，不用取消")
+    run.status = "cancelled"
+    run.error_msg = ""
+    run.finished_at = utcnow()
+    await db.commit()
+    await db.refresh(run)
+    return run
+
+
+async def _cancel_run_tasks(run_id: str) -> None:
+    """把这次运行名下还没结束的任务逐个撤掉。
+
+    按 `Task.flow_run_id` 查而不是在内存里登记 —— 登记表在多进程/重启后
+    就不可信了，而 flow_run_id 是落了库的。
+    """
+    async with async_session() as db:
+        rows = (
+            (
+                await db.execute(
+                    select(Task.id).where(
+                        Task.flow_run_id == run_id,
+                        Task.status.in_(("pending", "running")),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    for task_id in rows:
+        # 一个任务撤不掉不能影响别的任务，也不能把取消变成失败
+        try:
+            async with async_session() as db:
+                await TaskService.cancel_task(db, task_id)
+        except (LookupError, ValueError):
+            continue
+        except Exception:  # noqa: BLE001
+            logger.warning("取消流程任务失败 task_id=%s", task_id, exc_info=True)
+
+
 async def _execute_flow(run_id: str) -> None:
     """后台执行入口 —— **兜住所有异常**，别让运行记录永远停在 running。
 
@@ -96,13 +159,30 @@ async def _execute_flow(run_id: str) -> None:
     except asyncio.CancelledError:
         # 进程停机时的协作式取消：状态由停机流程处理，不能当成业务失败
         raise
+    except FlowCancelled:
+        # 用户取消了：状态已经落成 cancelled，这里不写错误文案。
+        # 走 _mark_run_error 会把一次正常的人工取消写成失败。
+        logger.info("流程运行被取消 run_id=%s", run_id)
     except FlowError as exc:
         await _mark_run_error(run_id, str(exc))
+        return
     except Exception:
         logger.exception("流程执行异常 run_id=%s", run_id)
         await _mark_run_error(
             run_id, "流程执行出错（内部错误），请联系管理员查看服务端日志"
         )
+        return
+
+    # 取消可能落在任意时刻，也可能「任务先自己变成 cancelled，执行协程
+    # 还没来得及看到运行状态」。所以收尾看运行状态兜底，不依赖上面走的哪个分支。
+    if await _run_is_cancelled(run_id):
+        await _cancel_run_tasks(run_id)
+
+
+async def _run_is_cancelled(run_id: str) -> bool:
+    async with async_session() as db:
+        run = await db.get(FlowRun, run_id)
+        return run is not None and run.status == "cancelled"
 
 
 async def _run_flow(run_id: str) -> None:
@@ -153,6 +233,9 @@ async def _run_flow(run_id: str) -> None:
         layer_steps = [(sid, by_id[sid]) for sid in layer_ids if sid in by_id]
         if not layer_steps:
             continue
+        # 上一层跑完这段空档里用户可能点了取消 —— 开工前再看一眼，
+        # 否则这一层会照常往引擎里塞任务
+        await _ensure_running(run.id)
 
         # ── 先把整层都提交出去（这一步不等待，任务在后台跑）──
         # 循环步骤在这一层展开成 N 个实例（N 个任务一起提交，并行跑）
@@ -239,7 +322,7 @@ async def _run_flow(run_id: str) -> None:
         finished: list[tuple[str, Task, int]] = []
         for step_id, task_id, iteration in started:
             try:
-                finished.append((step_id, await _wait_task(task_id), iteration))
+                finished.append((step_id, await _wait_task(task_id, run_id), iteration))
             except FlowError as exc:
                 await _fail_run(run_id, f"{step_label(steps, step_id)}：{exc}", state)
                 return
@@ -444,6 +527,9 @@ async def _run_subflow(
         layer_steps = [(sid, by_id[sid]) for sid in layer_ids if sid in by_id]
         if not layer_steps:
             continue
+        # 上一层跑完这段空档里用户可能点了取消 —— 开工前再看一眼，
+        # 否则这一层会照常往引擎里塞任务
+        await _ensure_running(run.id)
 
         prefix = f"子流程「{sub_name}」的"
         started: list[tuple[str, str, int]] = []
@@ -516,7 +602,7 @@ async def _run_subflow(
         finished: list[tuple[str, Task, int]] = []
         for sid, task_id, iteration in started:
             try:
-                finished.append((sid, await _wait_task(task_id), iteration))
+                finished.append((sid, await _wait_task(task_id, run.id), iteration))
             except FlowError as exc:
                 raise FlowError(f"{prefix}{step_label(sub_steps, sid)}：{exc}") from exc
 
@@ -680,6 +766,12 @@ async def _fail_run(run_id: str, message: str, state: list[dict]) -> None:
     async with async_session() as db:
         run = await db.get(FlowRun, run_id)
         if run is None:
+            return
+        # 已经被取消的运行不能改写成失败：任务是取消后变成 cancelled 的，
+        # 往下算自然「有一步没成功」—— 那是取消的结果，不是失败。
+        if run.status in ("done", "cancelled"):
+            run.steps = state
+            await db.commit()
             return
         run.status = "error"
         run.error_msg = message
@@ -857,17 +949,23 @@ async def _start_step(run: FlowRun, step: dict, step_id: str, params: dict) -> s
     return task_id
 
 
-async def _wait_task(task_id: str) -> Task:
-    """等任务到终态。
+async def _wait_task(task_id: str, run_id: str) -> Task:
+    """等任务到终态。运行被取消时抛 FlowCancelled。
 
     每次轮询开一个短会话 —— 流程可能跑几分钟，长会话会把连接池占住，
     而连接池是给 50 个人用的（pool_size = 并发数 + 5）。
+
+    顺带看一眼运行状态：用户点了取消，不该等到这一步跑完才停 —— 一步可能
+    是几分钟的生成，取消要立刻生效。
     """
     waited = 0.0
     while True:
         await asyncio.sleep(_POLL_INTERVAL_SECONDS)
         waited += _POLL_INTERVAL_SECONDS
         async with async_session() as db:
+            run = await db.get(FlowRun, run_id)
+            if run is None or run.status == "cancelled":
+                raise FlowCancelled(run_id)
             task = await db.get(Task, task_id)
             if task is None:
                 raise FlowError("任务记录消失")
@@ -877,11 +975,21 @@ async def _wait_task(task_id: str) -> Task:
             raise FlowError(f"等待超时（{int(_STEP_TIMEOUT_SECONDS)} 秒）")
 
 
+async def _ensure_running(run_id: str) -> None:
+    """每一层开工前确认运行还在跑。
+
+    没有这一步，取消只会在「等当前任务」时生效：这一层剩下的步骤、以及
+    后面的层，还会继续往引擎里塞任务。
+    """
+    async with async_session() as db:
+        run = await db.get(FlowRun, run_id)
+        if run is None or run.status == "cancelled":
+            raise FlowCancelled(run_id)
+
+
 async def _collect_outputs(task_id: str) -> list[dict]:
     """取一个任务产出的素材，压成流程内部可引用的形状。"""
     async with async_session() as db:
-        from sqlalchemy import select
-
         rows = (
             await db.execute(
                 select(Asset).where(Asset.task_id == task_id, Asset.deleted_at.is_(None))

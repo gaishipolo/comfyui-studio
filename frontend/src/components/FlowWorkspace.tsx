@@ -24,6 +24,7 @@ import type {
 } from '../types'
 import {
   approveFlow,
+  cancelFlowRun,
   createFlow,
   deleteFlow,
   exportFlow,
@@ -167,6 +168,17 @@ export default function FlowWorkspace({ user }: ModuleProps) {
     }
   }
 
+  const handleCancel = async () => {
+    if (!run) return
+    try {
+      const next = await cancelFlowRun(run.id)
+      setRun(next)
+      notify('已取消这次运行', 'info')
+    } catch (err) {
+      reportError('取消失败', err)
+    }
+  }
+
   return (
     <div className="flex h-full flex-col gap-md">
       <div className="flex flex-wrap items-center justify-between gap-sm">
@@ -206,6 +218,7 @@ export default function FlowWorkspace({ user }: ModuleProps) {
           loading={loading}
           onSelect={setSelectedId}
           onRun={handleRun}
+          onCancel={handleCancel}
         />
       ) : (
         <EditView
@@ -236,6 +249,7 @@ function RunView({
   loading,
   onSelect,
   onRun,
+  onCancel,
 }: {
   flows: Flow[]
   caps: NodeCapability[]
@@ -244,6 +258,7 @@ function RunView({
   loading: boolean
   onSelect: (id: string) => void
   onRun: (params: Record<string, unknown>) => void
+  onCancel: () => void
 }) {
   const nodeName = (templateId: string) =>
     caps.find((c) => c.id === templateId)?.name ?? '未知节点'
@@ -355,6 +370,16 @@ function RunView({
                     <span data-run-status className="chip">
                       {RUN_STATUS_LABEL[run.status] ?? run.status}
                     </span>
+                    {run.status === 'running' && (
+                      <button
+                        type="button"
+                        className="btn btn-quiet"
+                        data-run-cancel
+                        onClick={onCancel}
+                      >
+                        取消
+                      </button>
+                    )}
                   </div>
                 </div>
                 {run.error_msg && (

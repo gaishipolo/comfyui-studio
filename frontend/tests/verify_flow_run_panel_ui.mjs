@@ -9,6 +9,7 @@
  * 2. 循环步骤一次运行有 N 行，每行标「第 N 次」（行数不少、序号不重）
  * 3. 子流程步骤没填标题时显示子流程名，不是「未知节点」
  * 4. 失败时进度条转 error 色、错误原因显示出来
+ * 5. 运行中能点「取消」，点了真的调取消接口，状态转已取消、按钮消失
  *
  * **进度数值怎么算**由 backend/tests/test_flow_review_fixes.py 负责（完成
  * 步骤数 / 总步骤数，不按任务数）。两边看的是同一件事的两端。
@@ -185,6 +186,21 @@ const RUN_ERROR = {
 /** 第一次轮询故意给一条脏进度，验证前端兜住不冲出轨道、也不显示成 150% */
 const RUN_DIRTY = { ...RUN_MID, progress: 150 }
 
+/** 第三次运行：一直在跑，用来验取消按钮 */
+const RUN_RUNNING = {
+  ...RUN_MID,
+  id: 'run-3',
+  status: 'running',
+  progress: 50,
+  steps: [
+    { step_id: 's1', task_id: 't1', status: 'done', layer: 0, iteration: 0, outputs: [ASSET(1)] },
+    { step_id: 's2', task_id: 't2', status: 'running', layer: 1, iteration: 0, outputs: [] },
+  ],
+}
+
+/** 取消接口返回的状态 */
+const RUN_CANCELLED = { ...RUN_RUNNING, status: 'cancelled', finished_at: '2026-10-31T00:03:00' }
+
 function json(route, body, status = 200) {
   return route.fulfill({
     status,
@@ -292,9 +308,12 @@ async function main() {
   const pollQueues = {
     'run-1': [RUN_DIRTY, RUN_DONE],
     'run-2': [RUN_ERROR],
+    // 第三次一直在跑，用来验取消
+    'run-3': [RUN_RUNNING],
   }
-  // 第 1 次「开始运行」→ run-1，第 2 次 → run-2
+  // 第 n 次「开始运行」→ run-1 / run-2 / run-3
   let runStarts = 0
+  const cancelCalls = []
 
   await page.route('**/api/**', async (route) => {
     const request = route.request()
@@ -314,11 +333,17 @@ async function main() {
     }
     if (path === '/api/flows/flow-main/run' && request.method() === 'POST') {
       runStarts += 1
-      const id = runStarts === 1 ? 'run-1' : 'run-2'
+      const id = `run-${runStarts}`
       return json(route, { ...RUN_MID, id, progress: 0, steps: [] })
     }
     if (path === '/api/flows/flow-child/run' && request.method() === 'POST') {
       return json(route, { ...RUN_MID, progress: 0, steps: [] })
+    }
+    // 取消要放在 /runs/{id} 通配之前，否则 /runs/x/cancel 会被当成一次轮询
+    const cancelMatch = path.match(/^\/api\/flows\/runs\/([^/]+)\/cancel$/)
+    if (cancelMatch && request.method() === 'POST') {
+      cancelCalls.push(cancelMatch[1])
+      return json(route, { ...RUN_CANCELLED, id: cancelMatch[1] })
     }
     const runMatch = path.match(/^\/api\/flows\/runs\/(.+)$/)
     if (runMatch) {
@@ -448,6 +473,28 @@ async function main() {
       failedRows.some((r) => r.includes('批量变体') && r.includes('失败')),
       `步骤行：${failedRows.join(' / ')}`,
     )
+  })
+
+  // ── 第三次运行：取消 ─────────────────────────────────────────
+  await page.click('button:has-text("开始运行")')
+  await page.waitForTimeout(400)
+
+  const cancelBtn = await page.$('[data-run-cancel]')
+  check('运行中有「取消」按钮', () => assert.ok(cancelBtn, '找不到取消按钮'))
+
+  await page.click('[data-run-cancel]')
+  await page.waitForTimeout(600)
+  const afterCancel = await bar(page)
+  const cancelStillThere = await page.$('[data-run-cancel]')
+
+  check('点取消调的是取消接口', () => {
+    assert.deepEqual(cancelCalls, ['run-3'], `实际调用：${cancelCalls.join('|')}`)
+  })
+  check('取消后状态变已取消', () => {
+    assert.equal(afterCancel.chip, '已取消')
+  })
+  check('取消后按钮消失（没有第二次可取消的东西）', () => {
+    assert.equal(cancelStillThere, null)
   })
 
   check('无 console 错误', () => {

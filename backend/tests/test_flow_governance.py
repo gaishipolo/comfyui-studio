@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # no
 
 from app.auth import hash_password  # noqa: E402
 from app.database import Base  # noqa: E402
-from app.models.models import Template, User  # noqa: E402
+from app.models.models import FlowRun, Template, User  # noqa: E402
 
 TOKEN = ""
 
@@ -208,6 +208,53 @@ def test_delete_referenced_subflow_blocked() -> None:
     assert c.delete(f"/api/flows/{child['id']}", headers=_headers()).status_code == 200
 
 
+def _insert_run(status: str = "done") -> str:
+    """直接插一条运行记录 —— 取消接口只看状态，不需要真跑一次流程。"""
+
+    async def _do() -> str:
+        engine = create_async_engine(os.environ["DATABASE_URL"])
+        Session = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with Session() as db:
+                run = FlowRun(
+                    flow_id="gov_flow",
+                    flow_name="取消测试",
+                    created_by="u1",
+                    params={},
+                    status=status,
+                    progress=50.0,
+                    steps=[],
+                )
+                db.add(run)
+                await db.commit()
+                await db.refresh(run)
+                return run.id
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(_do())
+
+
+def test_cancel_missing_run_is_404() -> None:
+    resp = _client().post("/api/flows/runs/no-such-run/cancel", headers=_headers())
+    assert resp.status_code == 404, resp.text
+
+
+def test_cancel_finished_run_is_409() -> None:
+    """已经结束的运行不能再取消 —— 否则界面会显示一个假状态。"""
+    run_id = _insert_run("done")
+    resp = _client().post(f"/api/flows/runs/{run_id}/cancel", headers=_headers())
+    assert resp.status_code == 409, resp.text
+    assert "已经结束" in resp.json()["detail"], resp.json()
+
+
+def test_cancel_running_run_works() -> None:
+    run_id = _insert_run("running")
+    resp = _client().post(f"/api/flows/runs/{run_id}/cancel", headers=_headers())
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "cancelled", resp.json()
+
+
 def main() -> int:
     setup()
     tests = [
@@ -216,6 +263,9 @@ def main() -> int:
         test_update_rejects_invalid_config_without_writing,
         test_draft_cannot_self_activate,
         test_delete_referenced_subflow_blocked,
+        test_cancel_missing_run_is_404,
+        test_cancel_finished_run_is_409,
+        test_cancel_running_run_works,
     ]
     failures: list[str] = []
     for test in tests:

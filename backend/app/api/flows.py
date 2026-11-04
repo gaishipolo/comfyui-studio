@@ -37,7 +37,7 @@ from app.schemas.schemas import (
 )
 from app.services import agent_llm
 from app.services.agent_spec import build_spec
-from app.services.flow_service import FlowError, submit_flow
+from app.services.flow_service import FlowError, cancel_run, submit_flow
 from app.timeutils import utcnow
 from app.services.flow_validate import validate_flow_config
 from app.services.flow_portability import (
@@ -172,6 +172,27 @@ async def get_run(
     run = await db.get(FlowRun, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="运行记录不存在")
+    return FlowRunResponse.model_validate(run)
+
+
+@router.post("/runs/{run_id}/cancel", response_model=FlowRunResponse)
+async def cancel_run_endpoint(
+    run_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """停掉一次还在跑的流程。
+
+    流程卡在某一步（引擎那边不返回、或者本来就是长任务）时，运营得有个刹车。
+    这里只把运行标成已取消；在飞的任务由后台执行协程自己撤 —— 它才知道
+    自己手上有哪些任务，也不会在取消之后又提交出新的步骤。
+    """
+    try:
+        run = await cancel_run(db, run_id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="运行记录不存在") from None
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
     return FlowRunResponse.model_validate(run)
 
 
